@@ -50,8 +50,8 @@ var locales = map[string]map[string]string{
 // ──────────────────────────────────────────
 // Tab names
 // ──────────────────────────────────────────
-var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "OAuth", "日志"}
-var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "OAuth", "Logs"}
+var zhTabNames = []string{"仪表盘", "配置", "认证文件", "API 密钥", "模型映射", "OAuth", "日志"}
+var enTabNames = []string{"Dashboard", "Config", "Auth Files", "API Keys", "Model Mapping", "OAuth", "Logs"}
 
 // TabNames returns tab names in the current locale.
 func TabNames() []string {
@@ -207,6 +207,27 @@ var zhStrings = map[string]string{
 	"usage_cached":        "缓存",
 	"usage_reasoning":     "思考",
 	"usage_time":          "时间",
+
+	// ── Model Mapping ──
+	"mapping_title":           "🔀 模型映射",
+	"mapping_help":            " [↑↓/jk] 导航 • [a] 添加 • [e] 编辑 • [d] 删除 • [Space] 启用 • [f] 回写原名 • [r] 刷新",
+	"mapping_empty":           "  暂无映射规则。按 [a] 添加，例如 gpt-5.4 → gpt-5.5",
+	"mapping_confirm_delete":  "⚠ 删除该规则? [y/n]",
+	"mapping_added":           "已添加映射规则",
+	"mapping_updated":         "已更新映射规则",
+	"mapping_deleted":         "已删除映射规则",
+	"mapping_toggled":         "已切换启用状态",
+	"mapping_force_toggled":   "已切换响应回写",
+	"mapping_match_prompt":    "  Match: ",
+	"mapping_target_prompt":   "  Target: ",
+	"mapping_mode_prompt":     "  Mode (exact/wildcard/regex): ",
+	"mapping_match_required":  "match 不能为空",
+	"mapping_target_required": "target 不能为空",
+	"mapping_invalid_mode":    "mode 必须是 exact、wildcard 或 regex",
+	"mapping_on":              "启用",
+	"mapping_off":             "停用",
+	"mapping_force_on":        "回写原名",
+	"mapping_force_off":       "返回上游名",
 
 	// ── Logs ──
 	"logs_title":       "📋 日志",
@@ -364,6 +385,27 @@ var enStrings = map[string]string{
 	"usage_cached":        "Cached",
 	"usage_reasoning":     "Reasoning",
 	"usage_time":          "Time",
+
+	// ── Model Mapping ──
+	"mapping_title":           "🔀 Model Mapping",
+	"mapping_help":            " [↑↓/jk] Navigate • [a] Add • [e] Edit • [d] Delete • [Space] Enable • [f] Echo original • [r] Refresh",
+	"mapping_empty":           "  No mapping rules. Press [a] to add, e.g. gpt-5.4 → gpt-5.5",
+	"mapping_confirm_delete":  "⚠ Delete this rule? [y/n]",
+	"mapping_added":           "Mapping rule added",
+	"mapping_updated":         "Mapping rule updated",
+	"mapping_deleted":         "Mapping rule deleted",
+	"mapping_toggled":         "Enabled flag toggled",
+	"mapping_force_toggled":   "Force-mapping toggled",
+	"mapping_match_prompt":    "  Match: ",
+	"mapping_target_prompt":   "  Target: ",
+	"mapping_mode_prompt":     "  Mode (exact/wildcard/regex): ",
+	"mapping_match_required":  "match is required",
+	"mapping_target_required": "target is required",
+	"mapping_invalid_mode":    "mode must be exact, wildcard, or regex",
+	"mapping_on":              "on",
+	"mapping_off":             "off",
+	"mapping_force_on":        "echo original",
+	"mapping_force_off":       "return mapped",
 
 	// ── Logs ──
 	"logs_title":       "📋 Logs",
