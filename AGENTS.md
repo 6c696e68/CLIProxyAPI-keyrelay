@@ -21,12 +21,14 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - `.env` is auto-loaded from the working directory
 - Auth material defaults under `auths/`
 - Storage backends: file-based default; optional Postgres/git/object store (`PGSTORE_*`, `GITSTORE_*`, `OBJECTSTORE_*`)
+- `model-mapping` is the global request rewrite layer. See `docs/model-mapping.md`. Do not confuse it with `oauth-model-alias` or per-credential `models[].alias`.
 
 ## Architecture
 - `cmd/server/` — Server entrypoint
 - `internal/api/` — Gin HTTP API (routes, middleware, modules)
 - `internal/api/modules/amp/` — Amp integration (Amp-style routes + reverse proxy)
 - `internal/thinking/` — Main thinking/reasoning pipeline. `ApplyThinking()` (apply.go) parses suffixes (`suffix.go`, suffix overrides body), normalizes config to canonical `ThinkingConfig` (`types.go`), normalizes and validates centrally (`validate.go`/`convert.go`), then applies provider-specific output via `ProviderApplier`. Do not break this "canonical representation → per-provider translation" architecture.
+- `internal/modelmapping/` — Global client-model rewrite applied **before** provider routing. First enabled rule wins (`exact` / `wildcard` / `regex`). Thinking suffixes such as `(high)` are preserved. Default `force-mapping: true` echoes the original client model in responses. Hook: `sdk/api/handlers/handlers_model_mapping.go` from execution, stream, count, and `PrepareStreamModelRoute`. Management API: `/v0/management/model-mapping`. TUI tab: Model Mapping. This is **not** `oauth-model-alias` (OAuth catalog aliases only) and **not** `*-api-key.models[].alias` (per-credential).
 - `internal/runtime/executor/` — Per-provider runtime executors (incl. Codex WebSocket)
 - `internal/translator/` — Provider protocol translators (and shared `common`)
 - `internal/registry/` — Model registry + remote updater (`StartModelsUpdater`); `--local-model` disables remote updates
@@ -56,3 +58,4 @@ go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRE
 - Use logrus structured logging; avoid leaking secrets/tokens in logs
 - Avoid panics in HTTP handlers; prefer logged errors and meaningful HTTP status codes
 - Timeouts are allowed only during credential acquisition; after an upstream connection is established, do not set timeouts for any subsequent network behavior. Intentional exceptions that must remain allowed are the Codex websocket liveness deadlines in `internal/runtime/executor/codex_websockets_executor.go`, the wsrelay session deadlines in `internal/wsrelay/session.go`, the management APICall timeout in `internal/api/handlers/management/api_tools.go`, and the `cmd/fetch_antigravity_models` utility timeouts
+- When a client asks for a retired or hardcoded model name (for example Zeroclaw sending `gpt-5.4`), use `model-mapping`, not `oauth-model-alias`. Keep rewrite in `internal/modelmapping` + the handler hook; do not scatter per-executor remaps. Do not add mapped names to `/v1/models` unless explicitly requested. Web control-panel tab lives in `router-for-me/Cli-Proxy-API-Management-Center`, not this repo.

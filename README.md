@@ -128,6 +128,7 @@ PackyCode provides special discounts for our software users: register using <a h
 - OpenAI Codex multi-account load balancing
 - Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
+- Global `model-mapping` to rewrite client model names (exact / wildcard / regex) before routing (see `docs/model-mapping.md`)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)
 
 ## Getting Started
@@ -156,6 +157,7 @@ Full CLIProxyAPI management center with request-level monitoring and cost estima
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+- Model mapping: [docs/model-mapping.md](docs/model-mapping.md)
 - Custom Provider Example: `examples/custom-provider`
 
 ## Contributing
