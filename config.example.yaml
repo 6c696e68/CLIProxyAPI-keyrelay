@@ -753,6 +753,7 @@ nonstream-keepalive-interval: 0
 #       alias: "sample-latest"
 
 # Global request model rewrite (all channels, before provider routing)
+# See docs/model-mapping.md. This is not oauth-model-alias or per-credential models[].alias.
 # First matching enabled rule wins. Thinking suffixes such as "(high)" are preserved.
 # mode: exact | wildcard | regex. Empty mode infers wildcard when match contains '*'.
 # force-mapping defaults to true and rewrites response model fields back to the client name.
