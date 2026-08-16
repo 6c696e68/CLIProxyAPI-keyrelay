@@ -44,6 +44,7 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 
 func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
 	responseProtocol := modelExecutionResponseProtocol(entryProtocol, exitProtocol)
 	if errMsg := validateNativeInteractionsExecution(entryProtocol, execOptions, routeDecision); errMsg != nil {
@@ -106,6 +107,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), responseProtocol, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body = rewriteMappedResponseBody(body, mappingResult)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
@@ -118,6 +120,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)
 	if routeDecision.ExecutorPluginID != "" {
 		return h.countWithPluginExecutor(ctx, handlerType, modelName, originalRequestedModel, rawJSON, alt, routeDecision.ExecutorPluginID, execOptions)
@@ -174,6 +177,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, normalizedModel, originalRequestedModel, executedOpts, rawResponseHeaders, responseHeaders, executedOpts.OriginalRequest, executedReq.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body = rewriteMappedResponseBody(body, mappingResult)
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
@@ -223,6 +227,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(execCtx, lifecycle.requestID(), responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(originalRequestedModel))
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
@@ -258,6 +263,7 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 	rawResponseHeaders := cloneHeader(resp.Headers)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, PassthroughHeadersEnabled(h.Cfg))
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID)
+	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(originalRequestedModel))
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }

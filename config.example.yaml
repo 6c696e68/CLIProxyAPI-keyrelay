@@ -752,6 +752,20 @@ nonstream-keepalive-interval: 0
 #     - name: "sample-model-latest"
 #       alias: "sample-latest"
 
+# Global request model rewrite (all channels, before provider routing)
+# First matching enabled rule wins. Thinking suffixes such as "(high)" are preserved.
+# mode: exact | wildcard | regex. Empty mode infers wildcard when match contains '*'.
+# force-mapping defaults to true and rewrites response model fields back to the client name.
+# model-mapping:
+#   - match: "gpt-5.4"
+#     target: "gpt-5.5"
+#   - match: "gpt-5.*"
+#     target: "gpt-5.5"
+#     mode: wildcard
+#   - match: "^gpt-5\.4(-.*)?$"
+#     target: "gpt-5.5$1"
+#     mode: regex
+
 # OAuth provider excluded models
 # oauth-excluded-models:
 #   vertex:
