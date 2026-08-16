@@ -435,6 +435,39 @@ func ResolveOAuthModelSetting(settings []OAuthModelSetting, modelID, metadataMod
 	return nameMatch
 }
 
+// Model mapping modes applied before provider routing.
+const (
+	ModelMappingModeExact    = "exact"
+	ModelMappingModeWildcard = "wildcard"
+	ModelMappingModeRegex    = "regex"
+)
+
+// ModelMappingRule rewrites a client-requested model name before provider routing.
+// The first enabled matching rule wins. Matching uses the base model name after
+// thinking suffixes such as "(high)" are stripped; the suffix is preserved on the mapped name.
+type ModelMappingRule struct {
+	// Match is the client-visible model name, wildcard pattern, or regular expression.
+	Match string `yaml:"match" json:"match"`
+	// Target is the rewritten model name. Regex mode may include replacement groups such as $1.
+	Target string `yaml:"target" json:"target"`
+	// Mode is exact, wildcard, or regex. Empty defaults to wildcard when Match contains '*', otherwise exact.
+	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+	// Enabled defaults to true when omitted. Set false to keep a rule without applying it.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// ForceMapping defaults to true when omitted. When true, response model fields are rewritten back to the original client name.
+	ForceMapping *bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
+}
+
+// ModelMappingRuleEnabled reports whether the rule is active. Missing Enabled means true.
+func ModelMappingRuleEnabled(rule ModelMappingRule) bool {
+	return rule.Enabled == nil || *rule.Enabled
+}
+
+// ModelMappingForceMapping reports whether responses should echo the original client model. Missing ForceMapping means true.
+func ModelMappingForceMapping(rule ModelMappingRule) bool {
+	return rule.ForceMapping == nil || *rule.ForceMapping
+}
+
 // PayloadConfig defines default and override parameter rules applied to provider payloads.
 type PayloadConfig struct {
 	// Default defines rules that only set parameters when they are missing in the payload.

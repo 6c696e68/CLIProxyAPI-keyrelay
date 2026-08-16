@@ -168,6 +168,19 @@ routing:
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false
 
+  # Global request model rewrite before provider routing. See docs/model-mapping.md.
+  # Not oauth.model-alias or per-credential models[].alias.
+  # Legacy top-level model-mapping still loads; a v8 write stores it here.
+  # model-mapping:
+  #   - match: "gpt-5.4"
+  #     target: "gpt-5.5"
+  #   - match: "gpt-5.*"
+  #     target: "gpt-5.5"
+  #     mode: wildcard
+  #   - match: "^gpt-5\\.4(-.*)?$"
+  #     target: "gpt-5.5$1"
+  #     mode: regex
+
   retry:
     # Number of additional credential retry rounds after the first round exhausts
     # its eligible credentials. Round 0 is the initial round; round r only admits
@@ -1197,6 +1210,9 @@ plugins:
 #   codex-api-key:                   # now api-keys.codex groups with keys
 #     - api-key: "your-upstream-key"
 #       base-url: "https://codex.example.com"
+#   model-mapping:                   # now routing.model-mapping
+#     - match: "gpt-5.4"
+#       target: "gpt-5.5"
 #
 # Compatibility-only quota switches have no new v8 counterpart. They remain
 # readable/editable in legacy files and through /v0/management, but are omitted

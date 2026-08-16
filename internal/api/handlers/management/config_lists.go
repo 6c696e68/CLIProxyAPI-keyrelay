@@ -2230,6 +2230,127 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	entry.Models = normalized
 }
 
+// model-mapping: []ModelMappingRule
+func (h *Handler) GetModelMapping(c *gin.Context) {
+	c.JSON(200, gin.H{"model-mapping": sanitizedModelMapping(h.cfg.ModelMapping)})
+}
+
+func (h *Handler) PutModelMapping(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var rules []config.ModelMappingRule
+	if err = json.Unmarshal(data, &rules); err != nil {
+		var wrapper struct {
+			Items []config.ModelMappingRule `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &wrapper); err2 != nil {
+			var named struct {
+				ModelMapping []config.ModelMappingRule `json:"model-mapping"`
+			}
+			if err3 := json.Unmarshal(data, &named); err3 != nil {
+				c.JSON(400, gin.H{"error": "invalid body"})
+				return
+			}
+			rules = named.ModelMapping
+		} else {
+			rules = wrapper.Items
+		}
+	}
+	h.cfg.ModelMapping = sanitizedModelMapping(rules)
+	h.persist(c)
+}
+
+func (h *Handler) PatchModelMapping(c *gin.Context) {
+	var body struct {
+		Index *int                     `json:"index"`
+		Old   *config.ModelMappingRule `json:"old"`
+		Rule  *config.ModelMappingRule `json:"rule"`
+		Value *config.ModelMappingRule `json:"value"`
+	}
+	if errBindJSON := c.ShouldBindJSON(&body); errBindJSON != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	rule := body.Rule
+	if rule == nil {
+		rule = body.Value
+	}
+	if rule == nil {
+		c.JSON(400, gin.H{"error": "missing rule"})
+		return
+	}
+	normalized := sanitizedModelMapping([]config.ModelMappingRule{*rule})
+	if len(normalized) == 0 {
+		c.JSON(400, gin.H{"error": "invalid rule"})
+		return
+	}
+	next := append([]config.ModelMappingRule(nil), h.cfg.ModelMapping...)
+	if body.Index != nil {
+		if *body.Index < 0 || *body.Index >= len(next) {
+			c.JSON(404, gin.H{"error": "index not found"})
+			return
+		}
+		next[*body.Index] = normalized[0]
+	} else if body.Old != nil {
+		idx := indexOfModelMappingRule(next, *body.Old)
+		if idx < 0 {
+			c.JSON(404, gin.H{"error": "rule not found"})
+			return
+		}
+		next[idx] = normalized[0]
+	} else {
+		next = append(next, normalized[0])
+	}
+	h.cfg.ModelMapping = sanitizedModelMapping(next)
+	h.persist(c)
+}
+
+func (h *Handler) DeleteModelMapping(c *gin.Context) {
+	indexRaw := strings.TrimSpace(c.Query("index"))
+	if indexRaw == "" {
+		c.JSON(400, gin.H{"error": "missing index"})
+		return
+	}
+	var index int
+	if _, err := fmt.Sscanf(indexRaw, "%d", &index); err != nil {
+		c.JSON(400, gin.H{"error": "invalid index"})
+		return
+	}
+	if index < 0 || index >= len(h.cfg.ModelMapping) {
+		c.JSON(404, gin.H{"error": "index not found"})
+		return
+	}
+	next := append([]config.ModelMappingRule(nil), h.cfg.ModelMapping...)
+	h.cfg.ModelMapping = sanitizedModelMapping(append(next[:index], next[index+1:]...))
+	h.persist(c)
+}
+
+func sanitizedModelMapping(rules []config.ModelMappingRule) []config.ModelMappingRule {
+	return config.SanitizeModelMapping(rules)
+}
+
+func indexOfModelMappingRule(rules []config.ModelMappingRule, target config.ModelMappingRule) int {
+	targetMatch := strings.TrimSpace(target.Match)
+	targetTarget := strings.TrimSpace(target.Target)
+	targetMode := strings.ToLower(strings.TrimSpace(target.Mode))
+	for i, rule := range rules {
+		if strings.TrimSpace(rule.Match) != targetMatch {
+			continue
+		}
+		if strings.TrimSpace(rule.Target) != targetTarget {
+			continue
+		}
+		if targetMode != "" && strings.ToLower(strings.TrimSpace(rule.Mode)) != targetMode {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
 func sanitizedOAuthModelAlias(entries map[string][]config.OAuthModelAlias) map[string][]config.OAuthModelAlias {
 	if len(entries) == 0 {
 		return nil
