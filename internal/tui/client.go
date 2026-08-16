@@ -453,3 +453,22 @@ func (c *Client) DeleteField(path string) error {
 	_, _, err := c.doRequest("DELETE", "/v0/management/"+path, nil)
 	return err
 }
+
+// GetModelMapping fetches global model rewrite rules.
+func (c *Client) GetModelMapping() ([]map[string]any, error) {
+	wrapper, err := c.getJSON("/v8/management/routing/model-mapping")
+	if err != nil {
+		return nil, err
+	}
+	return extractList(wrapper, "model-mapping")
+}
+
+// PutModelMapping replaces the full model-mapping rule list.
+func (c *Client) PutModelMapping(rules []map[string]any) error {
+	body, err := json.Marshal(rules)
+	if err != nil {
+		return err
+	}
+	_, err = c.put("/v8/management/routing/model-mapping", strings.NewReader(string(body)))
+	return err
+}

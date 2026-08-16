@@ -17,6 +17,7 @@ const (
 	tabConfig
 	tabAuthFiles
 	tabAPIKeys
+	tabMapping
 	tabOAuth
 	tabLogs
 )
@@ -38,6 +39,7 @@ type App struct {
 	config    configTabModel
 	auth      authTabModel
 	keys      keysTabModel
+	mapping   mappingTabModel
 	oauth     oauthTabModel
 	logs      logsTabModel
 
@@ -48,7 +50,7 @@ type App struct {
 	ready  bool
 
 	// Track which tabs have been initialized (fetched data)
-	initialized [6]bool
+	initialized [7]bool
 }
 
 type authConnectMsg struct {
@@ -83,10 +85,11 @@ func NewAppWithBaseURL(baseURL string, secretKey string, hook *LogHook) App {
 		config:        newConfigTabModel(client),
 		auth:          newAuthTabModel(client),
 		keys:          newKeysTabModel(client),
+		mapping:       newMappingTabModel(client),
 		oauth:         newOAuthTabModel(client),
 		logs:          newLogsTabModel(client, hook),
 		client:        client,
-		initialized: [6]bool{
+		initialized: [7]bool{
 			tabDashboard: true,
 			tabLogs:      true,
 		},
@@ -94,7 +97,7 @@ func NewAppWithBaseURL(baseURL string, secretKey string, hook *LogHook) App {
 
 	app.refreshTabs()
 	if authRequired {
-		app.initialized = [6]bool{}
+		app.initialized = [7]bool{}
 	}
 	app.setAuthInputPrompt()
 	return app
@@ -129,6 +132,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.config.SetSize(contentW, contentH)
 		a.auth.SetSize(contentW, contentH)
 		a.keys.SetSize(contentW, contentH)
+		a.mapping.SetSize(contentW, contentH)
 		a.oauth.SetSize(contentW, contentH)
 		a.logs.SetSize(contentW, contentH)
 		return a, nil
@@ -143,7 +147,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.authenticated = true
 		a.logsEnabled = a.standalone || isLogsEnabledFromConfig(msg.cfg)
 		a.refreshTabs()
-		a.initialized = [6]bool{}
+		a.initialized = [7]bool{}
 		a.initialized[tabDashboard] = true
 		cmds := []tea.Cmd{a.dashboard.Init()}
 		if a.logsEnabled {
@@ -257,6 +261,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.auth, cmd = a.auth.Update(msg)
 	case tabAPIKeys:
 		a.keys, cmd = a.keys.Update(msg)
+	case tabMapping:
+		a.mapping, cmd = a.mapping.Update(msg)
 	case tabOAuth:
 		a.oauth, cmd = a.oauth.Update(msg)
 	case tabLogs:
@@ -319,6 +325,8 @@ func (a *App) initTabIfNeeded(_ int) tea.Cmd {
 		return a.auth.Init()
 	case tabAPIKeys:
 		return a.keys.Init()
+	case tabMapping:
+		return a.mapping.Init()
 	case tabOAuth:
 		return a.oauth.Init()
 	case tabLogs:
@@ -355,6 +363,8 @@ func (a App) View() string {
 		sb.WriteString(a.auth.View())
 	case tabAPIKeys:
 		sb.WriteString(a.keys.View())
+	case tabMapping:
+		sb.WriteString(a.mapping.View())
 	case tabOAuth:
 		sb.WriteString(a.oauth.View())
 	case tabLogs:
@@ -523,6 +533,10 @@ func (a App) broadcastToAllTabs(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 	}
 	a.keys, cmd = a.keys.Update(msg)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	a.mapping, cmd = a.mapping.Update(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}

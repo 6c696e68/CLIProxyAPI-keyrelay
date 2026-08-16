@@ -50,6 +50,11 @@ type SDKConfig struct {
 	// credentials as well.
 	ForceModelPrefix bool `yaml:"force-model-prefix" json:"force-model-prefix"`
 
+	// ModelMapping rewrites client-requested model names before provider routing.
+	// The first enabled matching rule wins and applies to every auth channel.
+	// YAML boundary: legacy model-mapping, v8 routing.model-mapping.
+	ModelMapping []ModelMappingRule `yaml:"model-mapping,omitempty" json:"model-mapping,omitempty"`
+
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
