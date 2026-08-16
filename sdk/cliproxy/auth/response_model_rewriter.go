@@ -12,6 +12,11 @@ var modelFieldPaths = []string{"model", "modelVersion", "response.model", "respo
 
 const maxPendingBufSize = 1 << 20 // 1MB limit for pending buffer
 
+// RewriteSSEModel rewrites model fields in SSE data lines to targetModel.
+func RewriteSSEModel(payload []byte, targetModel string) []byte {
+	return rewriteSSEPayloadLines(payload, targetModel)
+}
+
 func rewriteSSEPayloadLines(payload []byte, targetModel string) []byte {
 	if targetModel == "" || len(payload) == 0 {
 		return payload
@@ -31,6 +36,11 @@ func rewriteSSEPayloadLines(payload []byte, targetModel string) []byte {
 		joined = append(joined, '\n')
 	}
 	return joined
+}
+
+// RewriteResponseModel rewrites known response model fields to targetModel.
+func RewriteResponseModel(data []byte, targetModel string) []byte {
+	return rewriteModelInResponse(data, targetModel)
 }
 
 func rewriteModelInResponse(data []byte, targetModel string) []byte {

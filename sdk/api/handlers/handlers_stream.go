@@ -242,6 +242,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					continue
 				}
 			}
+			payload = rewriteMappedStreamPayload(payload, h.mappingResultForOriginal(originalRequestedModel))
 			select {
 			case dataChan <- payload:
 				if streamInterceptorsActive {
@@ -266,6 +267,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 
 func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context, entryProtocol, exitProtocol, modelName string, rawJSON []byte, alt string, allowImageModel bool, execOptions modelExecutionOptions) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
+	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
@@ -446,6 +448,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 				return nil, false, nil
 			}
 		}
+		payload = rewriteMappedStreamPayload(payload, mappingResult)
 		return payload, true, nil
 	}
 
