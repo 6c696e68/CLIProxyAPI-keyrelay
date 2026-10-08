@@ -42,6 +42,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
+| `/config/routing/model-mapping` | Global request model rewrite rules. Legacy root `model-mapping` still loads until a v8 write. |
 | `/config/plugins/configs/<id>` | A plugin configuration object. |
 
 For example, `PATCH /v8/management/config` with this body disables additional
@@ -92,6 +93,7 @@ retain the corresponding business operation's fields.
 | `/requests/api-call` | POST | Make an authenticated upstream call. |
 | `/routing/cooldown/reset` | POST | Clear credential cooldown. |
 | `/routing/model-definitions/<channel>` | GET | Get model definitions. |
+| `/routing/model-mapping` | GET, PUT, PATCH, DELETE | Read or edit global model-mapping rules. PATCH/DELETE by index; PUT replaces the list. |
 | `/observability/logs` | GET, DELETE | Read or clear application logs. |
 | `/observability/logs/errors` | GET | List error-log files. |
 | `/observability/logs/errors/<name>` | GET | Download an error-log file. |
