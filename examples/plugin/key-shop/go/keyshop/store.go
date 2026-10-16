@@ -1,6 +1,7 @@
 package keyshop
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -535,6 +536,22 @@ func (s *Store) Session(secret string, limit int) (Session, error) {
 		return Session{}, err
 	}
 	return Session{Key: key, Requests: reqs}, nil
+}
+
+func (s *Store) RunSweeper(ctx context.Context) {
+	if s == nil || ctx == nil {
+		return
+	}
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = s.Sweep()
+		}
+	}
 }
 
 func (s *Store) Sweep() error {

@@ -19,6 +19,7 @@ extern void cliproxyPluginShutdown(void);
 import "C"
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"sync"
@@ -36,6 +37,8 @@ var (
 	runtimeMu sync.Mutex
 	service   *keyshop.Service
 	store     *keyshop.Store
+	sweepStop context.CancelFunc
+	sweepDone chan struct{}
 )
 
 func main() {}
@@ -85,6 +88,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 func cliproxyPluginShutdown() {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
+	stopSweeperLocked()
 	if store != nil {
 		_ = store.Close()
 		store = nil
@@ -152,10 +156,30 @@ func configure(request []byte) error {
 	dash, _ := webFS.ReadFile("web/dashboard.html")
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
+	stopSweeperLocked()
 	if store != nil {
 		_ = store.Close()
 	}
 	store = opened
 	service = keyshop.NewService(opened, admin, dash)
+	sweepCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	sweepStop = cancel
+	sweepDone = done
+	go func() {
+		defer close(done)
+		opened.RunSweeper(sweepCtx)
+	}()
 	return nil
+}
+
+func stopSweeperLocked() {
+	if sweepStop != nil {
+		sweepStop()
+		sweepStop = nil
+	}
+	if sweepDone != nil {
+		<-sweepDone
+		sweepDone = nil
+	}
 }

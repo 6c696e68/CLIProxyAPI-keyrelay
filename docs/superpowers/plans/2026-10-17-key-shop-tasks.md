@@ -16,6 +16,7 @@ Status values: `pending`, `in_progress`, `complete`, `blocked`.
 | T5 | Stamp lifecycle request id onto usage records | complete | `go test ./internal/runtime/executor/helps -run TestUsageReporterUsesExecutionRequestID -count=1` |
 | T6 | Host alias `/key-dashboard` and AGENTS.md flow | complete | `go test ./internal/api -run TestKeyShop -count=1` |
 | T7 | Full plugin tests and server compile | complete | `go test ./keyshop -race -count=1`, `go build -buildmode=c-shared`, `go build ./cmd/server` |
+| T8 | Sweep unfinished reservations and document plugin config | complete | `go test ./keyshop -run 'TestRunSweeperStopsWhenCanceled|TestClosedStoreTerminatesInsteadOfPassing|TestHostABIDecodesAdmission' -count=1` |
 
 ## Rules
 

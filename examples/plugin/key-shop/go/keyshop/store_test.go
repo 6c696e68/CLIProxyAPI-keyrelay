@@ -1,6 +1,7 @@
 package keyshop
 
 import (
+	"context"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -183,6 +184,22 @@ func TestUnlimitedLimitIsNeverExhausted(t *testing.T) {
 	admission, err := store.Admit(AdmitInput{Secret: secret, RequestID: "u2", Path: "/v1/chat/completions", Generate: true})
 	if err != nil || !admission.Allowed {
 		t.Fatalf("unlimited admission=%+v err=%v", admission, err)
+	}
+}
+
+func TestRunSweeperStopsWhenCanceled(t *testing.T) {
+	store := testStore(t, time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		store.RunSweeper(ctx)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("sweeper did not stop")
 	}
 }
 

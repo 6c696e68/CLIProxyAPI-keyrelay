@@ -28,6 +28,14 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 			"metadata": map[string]any{
 				"Name": "key-shop", "Version": "0.1.0", "Author": "cliproxyapi",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
+				"ConfigFields": []map[string]any{
+					{"Name": "data_file", "Type": "string", "Description": "SQLite path. Empty uses ~/.cliproxyapi/key-shop/key-shop.db"},
+					{"Name": "default_ttl", "Type": "string", "Default": "168h", "Description": "Default key lifetime"},
+					{"Name": "default_token_limit", "Type": "integer", "Default": 100000000, "Description": "Default token cap. Key-level 0 means unlimited"},
+					{"Name": "reserve_tokens", "Type": "integer", "Default": 32768, "Description": "Tokens held before usage is known"},
+					{"Name": "reservation_ttl", "Type": "string", "Default": "15m", "Description": "How long an unfinished reservation is kept"},
+					{"Name": "retention_days", "Type": "integer", "Default": 30, "Description": "How long request rows are kept"},
+				},
 			},
 			"capabilities": map[string]any{
 				"frontend_auth_provider":   true,
