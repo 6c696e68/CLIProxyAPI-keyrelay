@@ -124,6 +124,7 @@ type pluginConfig struct {
 	StickySeconds        *int              `yaml:"sticky-seconds"`
 	ModelCooldownMinutes *int              `yaml:"model-cooldown-minutes"`
 	StatsFile            string            `yaml:"stats-file"`
+	UpstreamCache        bool              `yaml:"upstream-cache"`
 	Models               []modelSpec       `yaml:"models"`
 }
 
