@@ -22,6 +22,7 @@ const streamBridgeBufferSize = 16
 var errStreamBridgeClosed = errors.New("stream is not open")
 
 type streamBridgeStream struct {
+	owner     *hostCallbackInstance
 	chunks    chan pluginapi.ExecutorStreamChunk
 	emits     chan streamBridgeEmit
 	closes    chan streamBridgeClose
@@ -188,9 +189,13 @@ func (b *streamBridge) open(ctx context.Context) (string, <-chan pluginapi.Execu
 	}
 	id := strconv.FormatUint(b.next.Add(1), 10)
 	stream := newStreamBridgeStream()
+	stream.owner = hostCallbackInstanceFromContext(ctx)
 	b.mu.Lock()
 	b.streams[id] = stream
 	b.mu.Unlock()
+	if stream.owner != nil && stream.owner.closed.Load() {
+		stream.abortStream()
+	}
 	cleanup := func() {
 		b.mu.Lock()
 		if b.streams[id] == stream {
@@ -199,13 +204,30 @@ func (b *streamBridge) open(ctx context.Context) (string, <-chan pluginapi.Execu
 		b.mu.Unlock()
 		stream.abortStream()
 	}
-	if ctx != nil && ctx.Done() != nil {
-		// Abort streams canceled before ExecuteStream can install cleanupWhenStreamDone.
-		go func() {
-			<-ctx.Done()
-			cleanup()
-		}()
+	remove := func() {
+		b.mu.Lock()
+		if b.streams[id] == stream {
+			delete(b.streams, id)
+		}
+		b.mu.Unlock()
 	}
+	var done <-chan struct{}
+	if ctx != nil {
+		done = ctx.Done()
+	}
+	go func() {
+		select {
+		case <-done:
+			select {
+			case <-stream.finished:
+				remove()
+			default:
+				cleanup()
+			}
+		case <-stream.finished:
+			remove()
+		}
+	}()
 	return id, stream.chunks, cleanup
 }
 
@@ -240,4 +262,22 @@ func (b *streamBridge) close(id string, errorMessage string) {
 		return
 	}
 	stream.close(errorMessage)
+}
+
+func (b *streamBridge) closeInstance(instance *hostCallbackInstance) {
+	if b == nil || instance == nil {
+		return
+	}
+	b.mu.Lock()
+	streams := make([]*streamBridgeStream, 0)
+	for id, stream := range b.streams {
+		if stream.owner == instance {
+			delete(b.streams, id)
+			streams = append(streams, stream)
+		}
+	}
+	b.mu.Unlock()
+	for _, stream := range streams {
+		stream.abortStream()
+	}
 }

@@ -195,3 +195,50 @@ func TestStreamBridgeClosePreservesTerminalErrorWhenBufferIsFull(t *testing.T) {
 		t.Fatalf("terminal error = %v, want plugin stream failed", terminalErr)
 	}
 }
+func TestStreamBridgeEOFDrainsTerminalChunkBeforeCleanup(t *testing.T) {
+	bridge := newStreamBridge()
+	streamID, chunks, _ := bridge.open(context.Background())
+	bridge.mu.Lock()
+	stream := bridge.streams[streamID]
+	bridge.mu.Unlock()
+	if stream == nil {
+		t.Fatal("stream was not registered")
+	}
+
+	forwarded := cleanupWhenStreamDone(context.Background(), chunks, stream.abort, nil)
+	closeDone := make(chan struct{})
+	go func() {
+		if err := bridge.emit(context.Background(), streamID, pluginapi.ExecutorStreamChunk{Payload: []byte("response.created")}); err != nil {
+			t.Errorf("emit response.created: %v", err)
+		}
+		if err := bridge.emit(context.Background(), streamID, pluginapi.ExecutorStreamChunk{Payload: []byte("response.completed")}); err != nil {
+			t.Errorf("emit response.completed: %v", err)
+		}
+		bridge.close(streamID, "")
+		close(closeDone)
+	}()
+
+	first := readStreamBridgeChunk(t, forwarded)
+	if string(first.Payload) != "response.created" {
+		t.Fatalf("first payload = %q, want response.created", first.Payload)
+	}
+	<-stream.finished
+
+	second := readStreamBridgeChunk(t, forwarded)
+	if string(second.Payload) != "response.completed" {
+		t.Fatalf("terminal payload = %q, want response.completed", second.Payload)
+	}
+	if _, ok := <-forwarded; ok {
+		t.Fatal("stream remained open after terminal payload")
+	}
+	<-closeDone
+}
+
+func readStreamBridgeChunk(t *testing.T, chunks <-chan pluginapi.ExecutorStreamChunk) pluginapi.ExecutorStreamChunk {
+	t.Helper()
+	chunk, ok := <-chunks
+	if !ok {
+		t.Fatal("stream closed before expected payload")
+	}
+	return chunk
+}

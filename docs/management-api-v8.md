@@ -40,6 +40,7 @@ the corresponding group value. Legacy field names are rejected by v8 writes.
 | `/config/api-keys` | All upstream provider groups. |
 | `/config/api-keys/codex` | Codex upstream groups. |
 | `/config/client/codex/optimize-multi-agent-v2` | Boolean, default `false`; applies to Codex clients across OAuth and API-key routes. |
+| `/config/client/codex/disable-subagents` | Boolean, default `false`; strips Codex spawn namespaces and rejects `collab_spawn` / `thread_spawn` sub-agent threads on Responses HTTP and WebSocket. |
 | `/config/observability/logs/debug` | A boolean, for example `true`. |
 | `/config/routing/retry/request-retry` | A number, for example `0`. |
 | `/config/routing/model-mapping` | Global request model rewrite rules. Legacy root `model-mapping` still loads until a v8 write. |

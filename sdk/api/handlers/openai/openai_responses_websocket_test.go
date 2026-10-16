@@ -7776,3 +7776,89 @@ func TestForwardResponsesWebsocketPingWriteFailureAbortsSession(t *testing.T) {
 		t.Fatal("timed out awaiting cancel callback on ping write failure")
 	}
 }
+
+func TestResponsesWebsocketMappedAliasPinsPassthroughAuth(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const (
+		clientModel = "ws-alias-pin-model"
+		mappedModel = "ws-mapped-pin-model"
+		pinnedAuth  = "auth-alias-pin-a"
+		otherAuth   = "auth-alias-pin-b"
+	)
+	selector := &orderedWebsocketSelector{order: []string{pinnedAuth, otherAuth}}
+	executor := &websocketDirectCaptureExecutor{provider: "xai", done: make(chan struct{})}
+	manager := coreauth.NewManager(nil, selector, nil)
+	manager.RegisterExecutor(executor)
+	for _, authID := range []string{pinnedAuth, otherAuth} {
+		auth := &coreauth.Auth{
+			ID:         authID,
+			Provider:   "xai",
+			Status:     coreauth.StatusActive,
+			Attributes: map[string]string{"websockets": "true"},
+		}
+		if _, err := manager.Register(context.Background(), auth); err != nil {
+			t.Fatalf("Register auth %s: %v", authID, err)
+		}
+		registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: mappedModel}})
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+	}
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []internalconfig.ModelMappingRule{{Match: clientModel, Target: mappedModel}},
+	}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.GET("/v1/responses/ws", h.ResponsesWebsocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses/ws", nil)
+	if err != nil {
+		t.Fatalf("dial websocket: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	requests := [][]byte{
+		[]byte(fmt.Sprintf(`{"type":"response.create","model":%q,"input":[{"type":"message","id":"msg-1","role":"user","content":"first"}]}`, clientModel)),
+		[]byte(`{"type":"response.create","previous_response_id":"resp-1","input":[{"type":"message","id":"msg-2","role":"user","content":"second"}]}`),
+	}
+	for index, request := range requests {
+		if errWrite := conn.WriteMessage(websocket.TextMessage, request); errWrite != nil {
+			t.Fatalf("write websocket message %d: %v", index+1, errWrite)
+		}
+		if _, payload, errRead := conn.ReadMessage(); errRead != nil {
+			t.Fatalf("read websocket message %d: %v", index+1, errRead)
+		} else if got := gjson.GetBytes(payload, "type").String(); got != wsEventTypeCompleted {
+			t.Fatalf("message %d type = %q, want %q: %s", index+1, got, wsEventTypeCompleted, payload)
+		}
+	}
+
+	select {
+	case <-executor.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for mapped alias websocket passthrough")
+	}
+
+	if got := executor.AuthIDs(); len(got) != 2 || got[0] != pinnedAuth || got[1] != pinnedAuth {
+		t.Fatalf("auth IDs = %v, want pinned [%s %s] for mapped model %q", got, pinnedAuth, pinnedAuth, mappedModel)
+	}
+	payloads := executor.Payloads()
+	if len(payloads) != 2 {
+		t.Fatalf("payload count = %d, want 2", len(payloads))
+	}
+	second := payloads[1]
+	if got := gjson.GetBytes(second, "previous_response_id").String(); got != "resp-1" {
+		t.Fatalf("mapped alias did not use websocket passthrough; previous_response_id = %q, want resp-1: %s", got, second)
+	}
+	input := gjson.GetBytes(second, "input").Array()
+	if len(input) != 1 || input[0].Get("id").String() != "msg-2" {
+		t.Fatalf("second payload is not the client delta: %s", second)
+	}
+	if got := executor.Models(); len(got) != 2 || got[0] != mappedModel || got[1] != mappedModel {
+		t.Fatalf("upstream models = %v, want [%s %s]", got, mappedModel, mappedModel)
+	}
+	if got := gjson.GetBytes(payloads[0], "model").String(); got != mappedModel {
+		t.Fatalf("upstream payload model = %q, want mapped %q (client alias must stay out of the upstream body)", got, mappedModel)
+	}
+}

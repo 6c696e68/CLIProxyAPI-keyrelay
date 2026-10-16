@@ -90,6 +90,11 @@ type CodexClientConfig struct {
 	// Default false leaves the client's multi-agent behavior unchanged.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
 
+	// DisableSubagents strips Codex spawn_agent tool namespaces from Responses
+	// requests and rejects spawned sub-agent threads (x-openai-subagent=collab_spawn).
+	// Default false leaves multi-agent behavior unchanged.
+	DisableSubagents bool `yaml:"disable-subagents" json:"disable-subagents"`
+
 	// EnableApplyPatch advertises freeform apply_patch only for supported models.
 	// Default false clears the capability regardless of template metadata.
 	EnableApplyPatch bool `yaml:"enable-apply-patch" json:"enable-apply-patch"`

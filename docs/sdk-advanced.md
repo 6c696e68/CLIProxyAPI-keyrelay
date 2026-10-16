@@ -129,6 +129,7 @@ The embedded server calls this automatically for built‑in providers; for custo
   core.SetRoundTripperProvider(myProvider) // returns transport per auth
   ```
 - For raw HTTP flows, implement `PrepareRequest` and/or call `Manager.InjectCredentials(req, authID)` to set headers.
+- Trusted Codex relays use the token-free `Manager.ExecuteRelayRequest` seam. Its `MaxRetries` budget counts outbound sends, including a refreshed 401 replay; failed refresh or request preparation may select another untried candidate without spending that budget. Plus-only exhaustion returns `no_plus_codex_auth_available` only before any outbound send; later candidate exhaustion preserves the upstream response. Sticky affinity is committed only after a prepared request receives a successful response, and failures invalidate the binding.
 
 ## Testing Tips
 

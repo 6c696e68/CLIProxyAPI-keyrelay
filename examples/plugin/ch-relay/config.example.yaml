@@ -1,0 +1,18 @@
+plugins:
+  enabled: true
+  dir: "plugins"
+  configs:
+    ch-relay:
+      enabled: true
+      priority: 1
+      base_url: "https://7656b154.linhtd.com/v1"
+      models:
+        - relay-gpt
+      claim_mode: namespace
+      rotation_mode: round-robin
+      plus_preference: prefer
+      sticky_seconds: 300
+      retry_on_auth_error: true
+      retry_on_rate_limit: true
+      retry_on_5xx: true
+      max_retries: 2

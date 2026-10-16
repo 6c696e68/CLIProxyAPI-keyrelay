@@ -89,6 +89,7 @@ type Host struct {
 	streams                *streamBridge
 	httpStreams            *hostHTTPStreamBridge
 	httpOperations         *hostHTTPOperationBridge
+	relayStreams           *relayHostStreamBridge
 	modelStreams           *modelStreamBridge
 	callbackContexts       *callbackContextRegistry
 	snapshot               atomic.Value
@@ -120,6 +121,7 @@ func New() *Host {
 		streams:                newStreamBridge(),
 		httpStreams:            newHostHTTPStreamBridge(),
 		httpOperations:         newHostHTTPOperationBridge(),
+		relayStreams:           newRelayHostStreamBridge(),
 		modelStreams:           newModelStreamBridge(),
 		callbackContexts:       newCallbackContextRegistry(),
 	}
@@ -859,6 +861,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
 	}
+	if h.relayStreams != nil {
+		h.relayStreams.closeAll()
+	}
 	h.refreshThinkingProviders(nil)
 	h.RegisterFrontendAuthProviders()
 	for id, request := range loading {
@@ -873,6 +878,9 @@ func (h *Host) ShutdownAllContext(ctx context.Context) {
 	}
 	if h.httpStreams != nil {
 		h.httpStreams.closeAll()
+	}
+	if h.relayStreams != nil {
+		h.relayStreams.closeAll()
 	}
 }
 
@@ -1088,17 +1096,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 		return capabilityRecord{}, pluginFile{}, false
 	}
 	return capabilityRecord{
-			id:       lp.id,
-			path:     lp.path,
-			version:  lp.version,
-			priority: item.Priority,
-			meta:     plugin.Metadata,
-			plugin:   plugin,
-		}, pluginFile{
-			ID:      lp.id,
-			Path:    lp.path,
-			Version: lp.version,
-		}, true
+		id:       lp.id,
+		path:     lp.path,
+		version:  lp.version,
+		priority: item.Priority,
+		meta:     plugin.Metadata,
+		plugin:   plugin,
+	}, pluginFile{
+		ID:      lp.id,
+		Path:    lp.path,
+		Version: lp.version,
+	}, true
 }
 
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {

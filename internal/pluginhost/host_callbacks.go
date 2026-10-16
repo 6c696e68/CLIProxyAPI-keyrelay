@@ -183,6 +183,18 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
 		return h.callHostAffinityLookup(ctx, request)
 	case pluginabi.MethodHostRoutingResetCooldown:
 		return h.callHostRoutingResetCooldown(ctx, request)
+	case pluginabi.MethodHostRelayExecute:
+		return h.callHostRelayExecute(ctx, request)
+	case pluginabi.MethodHostRelayStreamOpen:
+		return h.callHostRelayStreamOpen(ctx, request)
+	case pluginabi.MethodHostRelayStreamRead:
+		return h.callHostRelayStreamRead(ctx, request)
+	case pluginabi.MethodHostRelayStreamClose:
+		return h.callHostRelayStreamClose(ctx, request)
+	case pluginabi.MethodHostRelayCancel:
+		return h.callHostRelayCancel(ctx, request)
+	case pluginabi.MethodHostRelayStatus:
+		return h.callHostRelayStatus(ctx, request)
 	default:
 		return nil, fmt.Errorf("unsupported host callback %s", method)
 	}

@@ -112,6 +112,12 @@ const (
 	MethodHostAffinityLookup     = "host.affinity.lookup"
 
 	MethodHostRoutingResetCooldown = "host.routing.reset_cooldown"
+	MethodHostRelayExecute         = "host.relay.execute"
+	MethodHostRelayStreamOpen      = "host.relay.stream_open"
+	MethodHostRelayStreamRead      = "host.relay.stream_read"
+	MethodHostRelayStreamClose     = "host.relay.stream_close"
+	MethodHostRelayCancel          = "host.relay.cancel"
+	MethodHostRelayStatus          = "host.relay.status"
 )
 
 type Envelope struct {

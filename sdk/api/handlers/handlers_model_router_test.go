@@ -6,16 +6,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 type handlerModelRouterTestHost struct {
@@ -587,18 +590,18 @@ func TestHandlerProvidersForExecutionUsesRouterProvider(t *testing.T) {
 	}
 }
 
-func TestHandlerProvidersForExecutionFallsBackToOriginalModel(t *testing.T) {
+func TestHandlerProvidersForExecutionProviderOnlyKeepsMappedModel(t *testing.T) {
 	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
 	decision := modelRouteDecision{Provider: "claude"}
-	providers, normalizedModel, errMsg := handler.providersForExecution("ignored-by-router", "original-model", false, decision, modelExecutionOptions{})
+	providers, normalizedModel, errMsg := handler.providersForExecution("mapped-model", "original-model", false, decision, modelExecutionOptions{})
 	if errMsg != nil {
 		t.Fatalf("providersForExecution() error = %+v", errMsg)
 	}
 	if fmt.Sprint(providers) != "[claude]" {
 		t.Fatalf("providers = %v, want [claude]", providers)
 	}
-	if normalizedModel != "original-model" {
-		t.Fatalf("normalizedModel = %q, want original-model", normalizedModel)
+	if normalizedModel != "mapped-model" {
+		t.Fatalf("normalizedModel = %q, want mapped-model", normalizedModel)
 	}
 }
 
@@ -667,7 +670,11 @@ func TestHandlerProvidersForExecutionRejectsImageOnlyModelOnProviderRoute(t *tes
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, errMsg := handler.providersForExecution("ignored", tc.originalModel, false, tc.decision, modelExecutionOptions{})
+			modelName := "ignored"
+			if tc.decision.Model == "" {
+				modelName = tc.originalModel
+			}
+			_, _, errMsg := handler.providersForExecution(modelName, tc.originalModel, false, tc.decision, modelExecutionOptions{})
 			if errMsg == nil || errMsg.StatusCode != http.StatusServiceUnavailable {
 				t.Fatalf("providersForExecution() error = %+v, want image-only service unavailable", errMsg)
 			}
@@ -843,5 +850,137 @@ func TestQueryFromContextNilURLDoesNotPanic(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "gin", c)
 	if got := queryFromContext(ctx); got != nil {
 		t.Fatalf("queryFromContext() = %#v, want nil when URL is nil", got)
+	}
+}
+
+type providerOnlyMappingCapture struct {
+	mu       sync.Mutex
+	model    string
+	payload  []byte
+	metadata map[string]any
+}
+
+func (e *providerOnlyMappingCapture) Identifier() string { return "provider-only-route" }
+
+func (e *providerOnlyMappingCapture) record(req coreexecutor.Request, opts coreexecutor.Options) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.model = req.Model
+	e.payload = cloneBytes(req.Payload)
+	e.metadata = opts.Metadata
+}
+
+func (e *providerOnlyMappingCapture) captured() (string, []byte, map[string]any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.model, cloneBytes(e.payload), e.metadata
+}
+
+func (e *providerOnlyMappingCapture) Execute(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.record(req, opts)
+	return coreexecutor.Response{Payload: []byte(fmt.Sprintf(`{"model":%q,"ok":true}`, req.Model))}, nil
+}
+
+func (e *providerOnlyMappingCapture) ExecuteStream(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (*coreexecutor.StreamResult, error) {
+	e.record(req, opts)
+	chunks := make(chan coreexecutor.StreamChunk, 1)
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(fmt.Sprintf(`{"model":%q}`, req.Model))}
+	close(chunks)
+	return &coreexecutor.StreamResult{Chunks: chunks}, nil
+}
+
+func (e *providerOnlyMappingCapture) Refresh(_ context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	return auth, nil
+}
+
+func (e *providerOnlyMappingCapture) CountTokens(_ context.Context, _ *coreauth.Auth, req coreexecutor.Request, opts coreexecutor.Options) (coreexecutor.Response, error) {
+	e.record(req, opts)
+	return coreexecutor.Response{Payload: []byte(fmt.Sprintf(`{"model":%q}`, req.Model))}, nil
+}
+
+func (e *providerOnlyMappingCapture) HttpRequest(context.Context, *coreauth.Auth, *http.Request) (*http.Response, error) {
+	return nil, &coreauth.Error{Code: "not_implemented", Message: "HttpRequest not implemented", HTTPStatus: http.StatusNotImplemented}
+}
+
+func TestProviderOnlyRouteKeepsMappedModelForExecuteCountStream(t *testing.T) {
+	const (
+		clientModel = "provider-only-client-alias"
+		mappedModel = "provider-only-mapped-upstream"
+		provider    = "provider-only-route"
+	)
+	for _, mode := range []string{"execute", "count", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			executor := &providerOnlyMappingCapture{}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
+			auth := &coreauth.Auth{
+				ID:       "provider-only-auth-" + mode,
+				Provider: provider,
+				Status:   coreauth.StatusActive,
+			}
+			if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+				t.Fatalf("Register auth: %v", errRegister)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: mappedModel}})
+			t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+			host := &handlerRouterOnlyTestHost{hasRouters: true}
+			host.route = func(context.Context, pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+				return pluginapi.ModelRouteResponse{
+					Handled:    true,
+					TargetKind: pluginapi.ModelRouteTargetProvider,
+					Target:     provider,
+				}, true
+			}
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+				ModelMapping: []internalconfig.ModelMappingRule{{Match: clientModel, Target: mappedModel}},
+			}, manager)
+			handler.SetModelRouterHost(host)
+			body := []byte(fmt.Sprintf(`{"model":%q}`, clientModel))
+
+			var got []byte
+			switch mode {
+			case "execute":
+				resp, _, errMsg := handler.ExecuteWithAuthManager(context.Background(), "openai", clientModel, body, "")
+				if errMsg != nil {
+					t.Fatalf("ExecuteWithAuthManager() error = %+v, want success on mapped model %q", errMsg, mappedModel)
+				}
+				got = resp
+			case "count":
+				resp, _, errMsg := handler.ExecuteCountWithAuthManager(context.Background(), "openai", clientModel, body, "")
+				if errMsg != nil {
+					t.Fatalf("ExecuteCountWithAuthManager() error = %+v, want success on mapped model %q", errMsg, mappedModel)
+				}
+				got = resp
+			case "stream":
+				dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), "openai", clientModel, body, "")
+				if dataChan == nil {
+					errMsg := <-errChan
+					t.Fatalf("ExecuteStreamWithAuthManager() error = %+v, want success on mapped model %q", errMsg, mappedModel)
+				}
+				for chunk := range dataChan {
+					got = append(got, chunk...)
+				}
+				if errMsg := <-errChan; errMsg != nil {
+					t.Fatalf("ExecuteStreamWithAuthManager() error = %+v, want success on mapped model %q", errMsg, mappedModel)
+				}
+			}
+			if !host.called {
+				t.Fatal("model router was not consulted")
+			}
+			model, payload, meta := executor.captured()
+			if model != mappedModel {
+				t.Fatalf("upstream model = %q, want mapped %q (provider-only route kept client alias)", model, mappedModel)
+			}
+			if gotModel := gjson.GetBytes(payload, "model").String(); gotModel != mappedModel {
+				t.Fatalf("upstream payload model = %q, want %q", gotModel, mappedModel)
+			}
+			if meta[coreexecutor.RequestedModelMetadataKey] != clientModel {
+				t.Fatalf("requested model metadata = %#v, want %q", meta[coreexecutor.RequestedModelMetadataKey], clientModel)
+			}
+			if echoed := gjson.GetBytes(got, "model").String(); echoed != clientModel {
+				t.Fatalf("echoed response model = %q, want original client model %q", echoed, clientModel)
+			}
+		})
 	}
 }

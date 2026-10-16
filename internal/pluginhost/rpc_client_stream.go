@@ -13,9 +13,17 @@ func (a *rpcPluginAdapter) ExecuteStream(ctx context.Context, req pluginapi.Exec
 	if a == nil || a.host == nil || a.host.streams == nil {
 		return pluginapi.ExecutorStreamResponse{}, fmt.Errorf("plugin stream bridge is unavailable")
 	}
+	ctx = withHostCallbackIdentity(ctx, a.id, a.instance)
 	streamID, chunks, cleanupStream := a.host.streams.open(ctx)
 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
 	cleanup := combinedCleanup(cleanupStream, closeCallback)
+	a.host.streams.mu.Lock()
+	streamState := a.host.streams.streams[streamID]
+	a.host.streams.mu.Unlock()
+	if streamState == nil {
+		cleanup()
+		return pluginapi.ExecutorStreamResponse{}, context.Canceled
+	}
 	rpcReq := rpcExecutorRequest{
 		ExecutorRequest: req,
 		StreamID:        streamID,
@@ -38,7 +46,7 @@ func (a *rpcPluginAdapter) ExecuteStream(ctx context.Context, req pluginapi.Exec
 	// Async streaming plugins can return before they finish emitting chunks, so keep callbacks alive until the stream ends.
 	return pluginapi.ExecutorStreamResponse{
 		Headers: resp.Headers,
-		Chunks:  cleanupWhenStreamDone(ctx, chunks, cleanup),
+		Chunks:  cleanupWhenStreamDone(ctx, chunks, streamState.abort, cleanup),
 	}, nil
 }
 
@@ -55,7 +63,7 @@ func combinedCleanup(cleanups ...func()) func() {
 	}
 }
 
-func cleanupWhenStreamDone(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChunk, cleanup func()) <-chan pluginapi.ExecutorStreamChunk {
+func cleanupWhenStreamDone(ctx context.Context, chunks <-chan pluginapi.ExecutorStreamChunk, aborted <-chan struct{}, cleanup func()) <-chan pluginapi.ExecutorStreamChunk {
 	out := make(chan pluginapi.ExecutorStreamChunk)
 	go func() {
 		defer func() {
@@ -68,11 +76,23 @@ func cleanupWhenStreamDone(ctx context.Context, chunks <-chan pluginapi.Executor
 		if ctx != nil {
 			done = ctx.Done()
 		}
-		for chunk := range chunks {
+		for {
 			select {
-			case out <- chunk:
+			case <-aborted:
+				return
 			case <-done:
 				return
+			case chunk, ok := <-chunks:
+				if !ok {
+					return
+				}
+				select {
+				case out <- chunk:
+				case <-done:
+					return
+				case <-aborted:
+					return
+				}
 			}
 		}
 	}()

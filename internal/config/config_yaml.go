@@ -69,6 +69,11 @@ func SaveConfigPreserveComments(configFile string, cfg *Config, migrateV8 ...boo
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-model-alias")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-request-scoped-errors")
 	pruneMappingToGeneratedKeys(original.Content[0], generated.Content[0], "oauth-settings")
+	// model-mapping is omitempty. A cleared list is absent from generated YAML;
+	// drop the flattened key or merge/restore keep the stale rules.
+	if findMapKeyIndex(generated.Content[0], "model-mapping") < 0 {
+		removeMapKey(original.Content[0], "model-mapping")
+	}
 	replacePluginConfigsSubtree(original.Content[0], generated.Content[0])
 
 	// Merge generated into original in-place, preserving comments/order of existing nodes.

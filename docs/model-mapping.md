@@ -77,8 +77,12 @@ Do not implement per-executor remaps. Keep the rewrite in the handler hook so Op
 
 - YAML is the source of truth.
 - TUI `--tui` can add / edit / delete / toggle rules.
-- Management API persists with comment-preserving YAML write and hot-reload. v8 writes store `routing.model-mapping`.
-- The downloaded web panel (`Cli-Proxy-API-Management-Center`) is a separate repo. It already has OAuth / per-provider aliases; a dedicated global `model-mapping` tab there is a follow-up.
+- Management API persists with comment-preserving YAML write and hot-reload. v8 writes store `routing.model-mapping`. `PUT []` or deleting the last rule removes that YAML key; reload is empty. Other settings and comments stay. HTTP 200 from a binary that predates this save is not proof the key is gone.
+- The custom management panel already has a global model-mapping tab. It uses `/v8/management/routing/model-mapping`. Do not add a `/v0/management` route or treat that tab as a follow-up.
+
+## Router
+
+GL-MT6000 `192.168.8.1` is musl OpenWrt plus Entware glibc. Do not start the GLIBC 2.17 plugin-capable linux/arm64 binary with the native musl interpreter (`/lib/ld-linux-aarch64.so.1`). Run it as `/opt/lib/ld-linux-aarch64.so.1 --library-path /opt/lib` with `LD_PRELOAD` unset. Do not ship `CGO_ENABLED=0` / `*_no-plugin`; `plugins.enabled: true` does not load `.so` plugins on that build. Set `plugins.dir` to an absolute path, and set `plugins.configs.<id>.enabled: true` per plugin. Plugin `.so` files must be GLIBC ABI <= 2.27. Replace only `/root/.cliproxyapi/cli-proxy-api`. Never overwrite `config.yaml` or the auth directory; mapping lives there and is not a plugin.
 
 ## Agent checklist
 

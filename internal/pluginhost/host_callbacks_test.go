@@ -860,6 +860,53 @@ func TestHostStreamCallbacksEmitAndClose(t *testing.T) {
 	}
 }
 
+func TestHostCallbackInstanceCloseAbortsBlockedDownstreamEmit(t *testing.T) {
+	host := New()
+	instance := &hostCallbackInstance{}
+	streamID, chunks, _ := host.streams.open(withHostCallbackIdentity(context.Background(), "plugin", instance))
+	for range streamBridgeBufferSize {
+		if errEmit := host.streams.emit(context.Background(), streamID, pluginapi.ExecutorStreamChunk{Payload: []byte("buffered")}); errEmit != nil {
+			t.Fatalf("fill downstream stream: %v", errEmit)
+		}
+	}
+
+	emitDone := make(chan error, 1)
+	go func() {
+		emitDone <- host.streams.emit(context.Background(), streamID, pluginapi.ExecutorStreamChunk{Payload: []byte("blocked")})
+	}()
+	select {
+	case errEmit := <-emitDone:
+		t.Fatalf("saturated emit returned before instance close: %v", errEmit)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	host.closeHostHTTPCallbackInstance("plugin", instance)
+	select {
+	case errEmit := <-emitDone:
+		if errEmit == nil || !strings.Contains(errEmit.Error(), "not open") {
+			t.Fatalf("blocked emit error = %v, want closed stream", errEmit)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback instance close left blocked emit running")
+	}
+	select {
+	case _, ok := <-chunks:
+		if ok {
+			t.Fatal("callback instance close retained downstream stream")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("callback instance close did not close downstream stream")
+	}
+	ctx := withHostCallbackIdentity(context.Background(), "plugin", instance)
+	request, errMarshal := json.Marshal(rpcStreamEmitRequest{StreamID: streamID, Payload: []byte("late")})
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+	if _, errCall := host.callFromPlugin(ctx, pluginabi.MethodHostStreamEmit, request); errCall == nil || !strings.Contains(errCall.Error(), "closed") {
+		t.Fatalf("late callback error = %v, want closed instance rejection", errCall)
+	}
+}
+
 func TestHostModelExecuteRejectsInvalidProxyURL(t *testing.T) {
 	host := New()
 	called := false
