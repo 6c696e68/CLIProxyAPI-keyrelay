@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API key dashboard</title>
+<style>
+body{margin:0;font:16px/1.5 ui-sans-serif,system-ui,sans-serif;background:#f6f7f9;color:#17202a}
+main{max-width:880px;margin:0 auto;padding:32px 20px}
+h1{font-size:32px;margin:0 0 8px}
+.card{background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:20px;margin:16px 0}
+label{display:block;font-weight:600;margin-bottom:8px}
+input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c5ced8;border-radius:8px}
+button{border:0;border-radius:8px;padding:10px 14px;background:#0b6e4f;color:#fff;font-weight:600}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:8px;border-bottom:1px solid #e6ebf0;font-size:14px}
+.muted{color:#5c6b7a}
+.row{display:flex;gap:16px;flex-wrap:wrap}
+.stat{flex:1;min-width:140px}
+</style>
+</head>
+<body>
+<main>
+<div class="row"><h1 data-vi="Xem API key của bạn" data-en="View your API key">Xem API key của bạn</h1><button id="lang" type="button">English</button></div>
+<p class="muted" data-vi="Chỉ xem usage của key này. Không đưa key vào URL." data-en="Only this key's usage is shown. Do not put the key in the URL.">Chỉ xem usage của key này. Không đưa key vào URL.</p>
+<section class="card">
+<label for="key" data-vi="API key" data-en="API key">API key</label>
+<input id="key" autocomplete="off" spellcheck="false">
+<label><input id="remember" type="checkbox"> <span data-vi="Ghi nhớ trên trình duyệt này" data-en="Remember in this browser">Ghi nhớ trên trình duyệt này</span></label>
+<p><button id="open" type="button" data-vi="Mở dashboard" data-en="Open dashboard">Mở dashboard</button></p>
+<p id="error" class="muted"></p>
+</section>
+<section id="out" hidden>
+<div class="card"><h2 data-vi="Hạn và hạn mức" data-en="Lifecycle and limits">Hạn và hạn mức</h2><div id="stats" class="row"></div><p id="base"></p></div>
+<div class="card"><h2 data-vi="Lượt gọi gần đây" data-en="Recent calls">Lượt gọi gần đây</h2><table><thead><tr><th data-vi="Thời gian" data-en="Time">Thời gian</th><th>Model</th><th data-vi="Trạng thái" data-en="Status">Trạng thái</th><th>Token</th></tr></thead><tbody id="rows"></tbody></table></div>
+</section>
+</main>
+<script>
+const text = {vi:{},en:{}};
+document.querySelectorAll("[data-vi]").forEach((el) => { text.vi[el.dataset.vi] = el; });
+let lang = "vi";
+document.getElementById("lang").onclick = () => {
+  lang = lang === "vi" ? "en" : "vi";
+  document.documentElement.lang = lang === "vi" ? "vi" : "en";
+  document.querySelectorAll("[data-vi]").forEach((el) => { el.textContent = el.dataset[lang]; });
+  document.getElementById("lang").textContent = lang === "vi" ? "English" : "Tiếng Việt";
+};
+const keyEl = document.getElementById("key");
+const remember = document.getElementById("remember");
+if (sessionStorage.getItem("keyshop.remember") === "1") {
+  remember.checked = true;
+  keyEl.value = sessionStorage.getItem("keyshop.key") || "";
+}
+document.getElementById("open").onclick = async () => {
+  const key = keyEl.value.trim();
+  document.getElementById("error").textContent = "";
+  if (remember.checked) {
+    sessionStorage.setItem("keyshop.remember", "1");
+    sessionStorage.setItem("keyshop.key", key);
+  } else {
+    sessionStorage.removeItem("keyshop.remember");
+    sessionStorage.removeItem("keyshop.key");
+  }
+  const res = await fetch("/key-dashboard/api/session", {headers:{Authorization:"Bearer "+key}});
+  const body = await res.json();
+  if (!res.ok) {
+    document.getElementById("error").textContent = body.error || "request failed";
+    return;
+  }
+  const keyInfo = body.Key || body.key || {};
+  const requests = body.Requests || body.requests || [];
+  document.getElementById("out").hidden = false;
+  document.getElementById("stats").innerHTML = [
+    ["Status", keyInfo.Status || keyInfo.status],
+    ["Used", keyInfo.TokensUsed || keyInfo.tokens_used || 0],
+    ["Limit", keyInfo.TokenLimit || keyInfo.token_limit || 0],
+    ["Expires", keyInfo.ExpiresAt || keyInfo.expires_at || "never"]
+  ].map(([k,v]) => `<div class="stat"><div class="muted">${k}</div><strong>${v}</strong></div>`).join("");
+  document.getElementById("base").textContent = "Base URL: " + location.origin + "/v1";
+  document.getElementById("rows").innerHTML = requests.map((row) => `<tr><td>${row.RequestedAt || row.requested_at || ""}</td><td>${row.Model || row.model || ""}</td><td>${row.Status || row.status || ""}</td><td>${row.Billed || row.billed || 0}</td></tr>`).join("") || `<tr><td colspan="4">${lang === "vi" ? "Chưa có lượt gọi." : "No calls yet."}</td></tr>`;
+};
+</script>
+</body>
+</html>
