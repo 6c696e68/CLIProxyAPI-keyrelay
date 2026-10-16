@@ -19,6 +19,7 @@ Custom flows that must survive:
 - `ch-relay` and `ch-relay-vippro` forward through host relay callbacks. The plugin does not receive or refresh Codex tokens.
 - VipPro management stays `GET /v0/management/ch-relay-vippro/stats` and `POST /v0/management/ch-relay-vippro/accounts/check`. The dashboard is a plugin resource iframe, not a public status route.
 - Request paths read config with `CurrentConfig()`. Management writes hold `h.mu` and call `persistLocked`. Payload rules stay the last semantic barrier in executors.
+- `key-shop` issues `ck_` client keys with expiry and token caps. Public pages are `GET /key-dashboard` and `GET /key-dashboard/api/session`, aliased onto the plugin resource. A direct dashboard resource URL redirects there. Do not drop the alias when syncing upstream.
 
 Panel flows that must survive:
 

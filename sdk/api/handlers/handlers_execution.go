@@ -82,6 +82,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+	ctx = coreusage.WithExecutionRequestID(ctx, lifecycle.requestID())
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,
@@ -155,6 +156,7 @@ func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handle
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, normalizedModel, originalRequestedModel, false, reqMeta, execOptions.SkipInterceptorPluginID)
+	ctx = coreusage.WithExecutionRequestID(ctx, lifecycle.requestID())
 	opts := coreexecutor.Options{
 		Stream:                      false,
 		Alt:                         alt,
@@ -204,6 +206,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, false))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(execCtx, entryProtocol, modelName, originalRequestedModel, false, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	execCtx = coreusage.WithExecutionRequestID(execCtx, lifecycle.requestID())
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(execCtx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
@@ -254,6 +257,7 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 	}
 	req, opts := h.pluginExecutorRequest(ctx, handlerType, handlerType, modelName, originalRequestedModel, rawJSON, alt, false, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(ctx, handlerType, modelName, originalRequestedModel, false, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	ctx = coreusage.WithExecutionRequestID(ctx, lifecycle.requestID())
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(ctx, handlerType, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {

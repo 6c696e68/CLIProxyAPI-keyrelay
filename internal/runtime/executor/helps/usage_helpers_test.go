@@ -1339,3 +1339,11 @@ func TestUsageReporter_DistinguishesNativeKey(t *testing.T) {
 		}
 	})
 }
+
+func TestUsageReporterUsesExecutionRequestID(t *testing.T) {
+	ctx := usage.WithExecutionRequestID(context.Background(), "lifecycle-id")
+	reporter := NewUsageReporter(ctx, "codex", "gpt-5.4", nil)
+	if reporter.RequestID() != "lifecycle-id" {
+		t.Fatalf("request id = %q", reporter.RequestID())
+	}
+}

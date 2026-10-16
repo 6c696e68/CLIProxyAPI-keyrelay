@@ -302,6 +302,11 @@ func (s *Server) pluginResourceNoRoute(c *gin.Context) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
+	if keyShopShouldRedirect(c.Request.URL.Path, c.GetHeader(keyShopAliasHeader)) {
+		c.Redirect(http.StatusFound, keyShopDashboardPath)
+		c.Abort()
+		return
+	}
 	if s.pluginHost.ServeResourceHTTP(c.Writer, c.Request) {
 		c.Abort()
 		return

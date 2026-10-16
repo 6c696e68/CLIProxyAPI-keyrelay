@@ -122,8 +122,12 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 	if traceID == "" {
 		traceID = internallogging.GetRequestID(ctx)
 	}
+	requestID := strings.TrimSpace(usage.ExecutionRequestIDFromContext(ctx))
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
 	reporter := &UsageReporter{
-		requestID:       uuid.NewString(),
+		requestID:       requestID,
 		traceID:         traceID,
 		provider:        provider,
 		baseURL:         baseURL,

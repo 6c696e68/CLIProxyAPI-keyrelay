@@ -45,6 +45,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	execCtx, nestedTracker := withNestedExecutionTracker(coreusage.WithStream(ctx, true))
 	req, opts := h.pluginExecutorRequest(execCtx, entryProtocol, responseProtocol, modelName, originalRequestedModel, rawJSON, alt, true, execOptions)
 	lifecycle := h.newRequestLifecycleTracker(execCtx, entryProtocol, modelName, originalRequestedModel, true, opts.Metadata, execOptions.SkipInterceptorPluginID)
+	execCtx = coreusage.WithExecutionRequestID(execCtx, lifecycle.requestID())
 	var interceptErr *interfaces.ErrorMessage
 	req, opts, interceptErr = h.applyRequestInterceptorsBeforeAuth(execCtx, entryProtocol, originalRequestedModel, lifecycle.requestID(), req, opts, execOptions.SkipInterceptorPluginID)
 	if interceptErr != nil {
@@ -329,6 +330,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	}
 	afterAuthCapture := &requestAfterAuthCapture{}
 	lifecycle := h.newRequestLifecycleTracker(ctx, entryProtocol, normalizedModel, originalRequestedModel, true, reqMeta, execOptions.SkipInterceptorPluginID)
+	ctx = coreusage.WithExecutionRequestID(ctx, lifecycle.requestID())
 	opts := coreexecutor.Options{
 		Stream:                      true,
 		Alt:                         alt,
