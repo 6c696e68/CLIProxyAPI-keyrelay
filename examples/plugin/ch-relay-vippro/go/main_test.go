@@ -1314,6 +1314,33 @@ models:
 	}
 }
 
+func TestUpstreamCacheKeepsStatsAndModels(t *testing.T) {
+	setup(t)
+	path := filepath.Join(t.TempDir(), "stats.json")
+	raw := `{"requests":9,"success":8,"failed":1,"since":"2026-10-09T00:00:00Z","buckets":[{"start":"2026-10-16T16:00:00Z","requests":9,"success":8,"failed":1}],"usage_by_email":[{"email":"a@b.com","success":8,"failed":1}]}`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustConfigure(t, `
+enabled: true
+base-url: http://127.0.0.1:11500/v1
+prefix: vippro
+stats-file: `+strconv.Quote(path)+`
+upstream-cache: false
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	cfg := currentConfig()
+	if cfg.Prefix != "vippro" || cfg.BaseURL != "http://127.0.0.1:11500/v1" || len(cfg.Models) != 1 {
+		t.Fatalf("live config dropped: prefix=%q base=%q models=%d", cfg.Prefix, cfg.BaseURL, len(cfg.Models))
+	}
+	snap := statsSnapshot()
+	if snap.Requests != 9 || len(snap.UsageByEmail) != 1 {
+		t.Fatalf("stats not loaded requests=%d emails=%d", snap.Requests, len(snap.UsageByEmail))
+	}
+}
+
 func TestChatGPTModelCooldownStreamKeepsRawBody(t *testing.T) {
 	const unsupported = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
 	f := setup(t)
