@@ -171,9 +171,9 @@ func TestHandlerProvidersForExecutionRejectsSpeechOnlyModelOnProviderRoute(t *te
 			decision:      modelRouteDecision{Provider: "xai", Model: "grok-tts"},
 		},
 		{
-			name:          "original-model-thinking-suffix",
-			modelName:     "ignored",
-			originalModel: "grok-voice-tts-1.0(auto)",
+			name:          "mapped-model-thinking-suffix",
+			modelName:     "grok-voice-tts-1.0(auto)",
+			originalModel: "client-alias",
 			decision:      modelRouteDecision{Provider: "xai"},
 		},
 		{

@@ -130,6 +130,19 @@ func PreparedStreamProviderRoute(ctx context.Context) (string, string) {
 	return strings.TrimSpace(decision.Provider), strings.TrimSpace(decision.Model)
 }
 
+// StreamRouteModel is the model for auth, passthrough, and compaction checks after PrepareStreamModelRoute.
+// A plugin provider target wins; otherwise the configured mapping of clientModel is used. The body is not rewritten.
+func (h *BaseAPIHandler) StreamRouteModel(ctx context.Context, clientModel string) string {
+	mapped, _, _ := h.applyConfiguredModelMapping(clientModel, nil)
+	if _, target := PreparedStreamProviderRoute(ctx); target != "" {
+		return target
+	}
+	if strings.TrimSpace(mapped) != "" {
+		return mapped
+	}
+	return strings.TrimSpace(clientModel)
+}
+
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
 func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
 	sessionID = strings.TrimSpace(sessionID)

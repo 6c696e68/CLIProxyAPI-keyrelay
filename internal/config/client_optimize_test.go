@@ -11,6 +11,31 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestClientCodexDisableSubagents(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"omitted", "config-version: 8\n", false},
+		{"disabled", "client: {codex: {disable-subagents: false}}\n", false},
+		{"enabled", "client: {codex: {disable-subagents: true}}\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if errValidate := ValidateV8Config([]byte(tc.raw)); errValidate != nil {
+				t.Fatalf("validate: %v", errValidate)
+			}
+			cfg, errParse := ParseConfigBytes([]byte(tc.raw))
+			if errParse != nil {
+				t.Fatalf("parse: %v", errParse)
+			}
+			if cfg.Client.Codex.DisableSubagents != tc.want {
+				t.Fatalf("DisableSubagents = %t, want %t", cfg.Client.Codex.DisableSubagents, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientCodexOptimizeMultiAgentV2(t *testing.T) {
 	for _, tc := range []struct {
 		name string

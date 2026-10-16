@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/subagentguard"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
@@ -267,6 +268,10 @@ func truncateWebsocketCloseReason(reason string, maxBytes int) string {
 // response events back as JSON websocket text messages. `response.interrupt`
 // is forwarded to the current Codex upstream socket without starting a new turn.
 func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
+	if h.disableSubagentsEnabled() && subagentguard.IsSpawnedSubagentRequest(c.Request.Header, nil) {
+		c.Data(http.StatusForbidden, "application/json", subagentguard.DisabledErrorPayload())
+		return
+	}
 	conn, err := responsesWebsocketUpgrader.Upgrade(c.Writer, c.Request, websocketUpgradeHeaders(c.Request))
 	if err != nil {
 		return
@@ -473,6 +478,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			requestModelName,
 			payload,
 		)
+		routeModel := h.StreamRouteModel(executionParent, requestModelName)
 		pluginExecutorID := handlers.PreparedStreamPluginExecutor(executionParent)
 		isPluginExecutorRoute := pluginExecutorID != ""
 		if pinnedAuthID != "" {
@@ -482,17 +488,17 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				providerKey = strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
 			}
 			state, hasState := pinnedAuthByProvider[providerKey]
-			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, requestModelName, state.modelKey, homeRuntime) {
+			if !ok || !hasState || state.authID != pinnedAuthID || !responsesWebsocketPinnedAuthMatchesModel(pinnedAuth, routeModel, state.modelKey, homeRuntime) {
 				pinnedAuthID = ""
 			}
 		}
 		if pinnedAuthID == "" {
-			providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(requestModelName))
+			providerSet, _ := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(routeModel))
 			if len(providerSet) == 1 {
 				for providerKey := range providerSet {
 					state, ok := pinnedAuthByProvider[providerKey]
 					candidateAuth, homeRuntime, okAuth := sessionAuthByIDWithSource(state.authID)
-					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, requestModelName, state.modelKey, homeRuntime) {
+					if ok && okAuth && responsesWebsocketPinnedAuthMatchesModel(candidateAuth, routeModel, state.modelKey, homeRuntime) {
 						pinnedAuthID = state.authID
 					} else {
 						delete(pinnedAuthByProvider, providerKey)
@@ -500,7 +506,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				}
 			}
 		}
-		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(requestModelName)
+		useUpstreamWebsocketPassthrough := h.responsesWebsocketUsesUpstreamWebsocketPassthrough(routeModel)
 		if pinnedAuthID != "" {
 			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && responsesWebsocketAuthSupportsIncrementalInput(pinnedAuth) {
 				provider := strings.ToLower(strings.TrimSpace(pinnedAuth.Provider))
@@ -570,7 +576,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 									observedCompactionSupported = true
 									observedCompactionReplayAuthID = observedCompaction.authID
 								}
-							} else if responsesWebsocketPinnedAuthMatchesModel(compactionAuth, requestModelName, observedCompaction.modelKey, false) {
+							} else if responsesWebsocketPinnedAuthMatchesModel(compactionAuth, routeModel, observedCompaction.modelKey, false) {
 								observedCompactionSupported = true
 								observedCompactionReplayAuthID = observedCompaction.authID
 							}
@@ -586,7 +592,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 					allowCompactionReplayBypass = allowCompactionReplayBypass || responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 				}
 			} else {
-				allowCompactionReplayBypass = allowCompactionReplayBypass || h.websocketUpstreamSupportsCompactionReplayForModel(requestModelName)
+				allowCompactionReplayBypass = allowCompactionReplayBypass || h.websocketUpstreamSupportsCompactionReplayForModel(routeModel)
 			}
 		}
 
@@ -659,6 +665,40 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				return
 			}
 			continue
+		}
+
+		if h.disableSubagentsEnabled() {
+			if subagentguard.IsSpawnedSubagentRequest(c.Request.Header, payload) ||
+				subagentguard.IsSpawnedSubagentRequest(nil, requestJSON) {
+				errMsg = &interfaces.ErrorMessage{
+					StatusCode: http.StatusForbidden,
+					Error:      fmt.Errorf("Sub-agents are disabled on this server"),
+				}
+				h.LoggingAPIResponseError(context.WithValue(context.Background(), "gin", c), errMsg)
+				markAPIResponseTimestamp(c)
+				errorPayload, errWrite := writeResponsesWebsocketError(writer, wsTimelineLog, errMsg)
+				log.Infof(
+					"responses websocket: downstream_out id=%s type=%d event=%s payload=%s",
+					passthroughSessionID,
+					websocket.TextMessage,
+					websocketPayloadEventType(errorPayload),
+					websocketPayloadPreview(errorPayload),
+				)
+				if errWrite != nil {
+					log.Warnf(
+						"responses websocket: downstream_out write failed id=%s event=%s error=%v",
+						passthroughSessionID,
+						websocketPayloadEventType(errorPayload),
+						errWrite,
+					)
+					return
+				}
+				continue
+			}
+			if updated, removed := subagentguard.StripSubagentTools(requestJSON); len(removed) > 0 {
+				log.Infof("subagent_tools_stripped namespaces=%s", strings.Join(removed, ","))
+				requestJSON = updated
+			}
 		}
 
 		requestJSON = h.prepareCodexMultiAgentV2Tools(c, requestJSON)
@@ -811,7 +851,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		if upstreamMode == responsesWebsocketUpstreamModeWS {
 			upstreamWebsocketAuthID = lastAttemptedAuthID
 			if lastAttemptedAuthID != "" {
-				rememberPinnedAuth(lastAttemptedAuthID, modelName)
+				rememberPinnedAuth(lastAttemptedAuthID, routeModel)
 			}
 			passthroughModelName = modelName
 			lastRequest = nil
@@ -824,7 +864,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 			lastRequest = nextLastRequest
 			lastResponseOutput = completedOutput
 			if inputContainsFullTranscript(gjson.ParseBytes(completedOutput)) {
-				_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(modelName))
+				_, modelKey := responsesWebsocketProviderSetForModel(responsesWebsocketResolvedModelName(routeModel))
 				if isPluginExecutorRoute {
 					observedCompaction = responsesWebsocketObservedCompactionState{
 						modelName: modelName,

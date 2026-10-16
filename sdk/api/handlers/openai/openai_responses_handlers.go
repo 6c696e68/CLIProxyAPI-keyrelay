@@ -18,7 +18,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	multiagentv2 "github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/optimize-multi-agent-v2"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/client/codex/subagentguard"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
@@ -26,6 +27,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -607,6 +609,32 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context,
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
+func (h *OpenAIResponsesAPIHandler) disableSubagentsEnabled() bool {
+	return h != nil && h.Cfg != nil && h.Cfg.Client.Codex.DisableSubagents
+}
+
+// applyDisableSubagentsHTTP enforces layer B (reject spawned threads) then layer A
+// (strip spawn namespaces). Returns false when the request was already answered.
+func (h *OpenAIResponsesAPIHandler) applyDisableSubagentsHTTP(c *gin.Context, rawJSON []byte) ([]byte, bool) {
+	if !h.disableSubagentsEnabled() {
+		return rawJSON, true
+	}
+	var headers http.Header
+	if c != nil && c.Request != nil {
+		headers = c.Request.Header
+	}
+	if subagentguard.IsSpawnedSubagentRequest(headers, rawJSON) {
+		c.Data(http.StatusForbidden, "application/json", subagentguard.DisabledErrorPayload())
+		return rawJSON, false
+	}
+	updated, removed := subagentguard.StripSubagentTools(rawJSON)
+	if len(removed) > 0 {
+		log.Infof("subagent_tools_stripped namespaces=%s", strings.Join(removed, ","))
+		return updated, true
+	}
+	return rawJSON, true
+}
+
 func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	rawJSON, err := handlers.ReadRequestBody(c)
 	// If data retrieval fails, return a 400 Bad Request error.
@@ -617,6 +645,12 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 				Type:    "invalid_request_error",
 			},
 		})
+		return
+	}
+
+	var ok bool
+	rawJSON, ok = h.applyDisableSubagentsHTTP(c, rawJSON)
+	if !ok {
 		return
 	}
 

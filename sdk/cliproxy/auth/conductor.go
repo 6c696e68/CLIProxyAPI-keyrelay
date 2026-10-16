@@ -198,7 +198,9 @@ type Manager struct {
 	homeSessionLocks      sync.Map
 	homeSessionAliases    homeSessionAliasCache
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
-	providerOffsets             map[string]int
+	providerOffsets map[string]int
+	// relayLastPicked tracks the last selected auth identity so relay round-robin survives candidate subsets.
+	relayLastPicked             map[string]string
 	homeDispatchBundle          atomic.Pointer[HomeDispatchBundle]
 	homeInFlightPublisherConfig atomic.Pointer[HomeInFlightPublisherConfig]
 
@@ -265,6 +267,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		homeSessionSelections: make(map[string]map[homeSessionSelectionKey]*HomeDispatchSelection),
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
+		relayLastPicked:       make(map[string]string),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

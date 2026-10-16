@@ -124,7 +124,7 @@ func nativeInteractionsExecutionError() *interfaces.ErrorMessage {
 
 // providersForExecution resolves the providers and normalized model for a request. When a model
 // router selected a built-in provider, it skips model->provider resolution and uses the router's
-// provider (with an optional target model); otherwise it falls back to the registry-based path.
+// provider. An explicit route target wins; otherwise the already-mapped modelName is kept.
 func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel string, allowImageModel bool, routeDecision modelRouteDecision, execOptions modelExecutionOptions) ([]string, string, *interfaces.ErrorMessage) {
 	forcedProvider := strings.ToLower(strings.TrimSpace(execOptions.ForcedProvider))
 	if forcedProvider != "" {
@@ -147,7 +147,10 @@ func (h *BaseAPIHandler) providersForExecution(modelName, originalRequestedModel
 		return []string{forcedProvider}, normalizedModel, nil
 	}
 	if routeDecision.Provider != "" {
-		normalizedModel := originalRequestedModel
+		normalizedModel := strings.TrimSpace(modelName)
+		if normalizedModel == "" {
+			normalizedModel = strings.TrimSpace(originalRequestedModel)
+		}
 		if routeDecision.Model != "" {
 			normalizedModel = routeDecision.Model
 		}

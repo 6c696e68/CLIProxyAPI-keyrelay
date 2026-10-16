@@ -935,6 +935,69 @@ type HTTPResponse struct {
 }
 
 // HTTPStreamResponse describes a streaming host HTTP response.
+
+// HostRelayExecuteRequest describes a token-free host-mediated Codex relay request.
+// HostCallbackID must be the host-minted scope received with the current plugin call.
+type HostRelayExecuteRequest struct {
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+	Provider       string      `json:"provider"`
+	Path           string      `json:"path"`
+	Method         string      `json:"method"`
+	Headers        http.Header `json:"headers,omitempty"`
+	Body           []byte      `json:"body,omitempty"`
+}
+
+// HostRelayStreamRequest asks the host to open an incremental relay response.
+type HostRelayStreamRequest struct {
+	HostCallbackID string      `json:"host_callback_id,omitempty"`
+	Provider       string      `json:"provider"`
+	Path           string      `json:"path"`
+	Method         string      `json:"method"`
+	Headers        http.Header `json:"headers,omitempty"`
+	Body           []byte      `json:"body,omitempty"`
+}
+
+// HostRelayStreamReadRequest reads the next incremental relay payload.
+type HostRelayStreamReadRequest struct {
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+	StreamID       string `json:"stream_id"`
+}
+
+// HostRelayStreamCloseRequest closes a host-owned relay stream.
+type HostRelayStreamCloseRequest struct {
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+	StreamID       string `json:"stream_id"`
+}
+
+// HostRelayCancelRequest cancels a host-owned relay stream.
+type HostRelayCancelRequest struct {
+	HostCallbackID string `json:"host_callback_id,omitempty"`
+	StreamID       string `json:"stream_id"`
+}
+
+// HostRelayResponse carries sanitized upstream response data or one stream chunk.
+type HostRelayResponse struct {
+	StatusCode int         `json:"status_code,omitempty"`
+	Headers    http.Header `json:"headers,omitempty"`
+	Body       []byte      `json:"body,omitempty"`
+	StreamID   string      `json:"stream_id,omitempty"`
+	Payload    []byte      `json:"payload,omitempty"`
+	Done       bool        `json:"done,omitempty"`
+	Error      string      `json:"error,omitempty"`
+}
+
+// HostRelayStatusResponse reports aggregate, credential-free Codex relay status.
+type HostRelayStatusResponse struct {
+	Total            int    `json:"total"`
+	Eligible         int    `json:"eligible"`
+	Plus             int    `json:"plus"`
+	Disabled         int    `json:"disabled"`
+	Cooling          int    `json:"cooling"`
+	RotationMode     string `json:"rotation_mode,omitempty"`
+	PlusPreference   string `json:"plus_preference,omitempty"`
+	MaxRetries       int    `json:"max_retries,omitempty"`
+	StickyTTLSeconds int    `json:"sticky_ttl_seconds,omitempty"`
+}
 type HTTPStreamResponse struct {
 	// StatusCode is the upstream HTTP status code.
 	StatusCode int

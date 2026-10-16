@@ -338,6 +338,11 @@ client:
     # Default false. Applies to both OAuth and API-key credentials across providers.
     # Legacy provider paths migrate here; this path wins conflicts, including explicit false.
     optimize-multi-agent-v2: false
+    # When true, strip Codex spawn_agent namespaces (multi_agent_v1 / collaboration) from
+    # Responses tools and reject spawned sub-agent threads (x-openai-subagent=collab_spawn
+    # or turn-metadata subagent_kind=thread_spawn) on HTTP and WebSocket. MCP tools are kept.
+    # Default false.
+    disable-subagents: false
 
 # Shared upstream behavior applies to OAuth and API-key credentials.
 upstream:
@@ -1238,6 +1243,33 @@ plugins:
       config-object:
         mode: "safe"
 
+    # ch-relay-vippro forwards Chat Completions and OpenAI Responses with a Codex
+    # access token. It does not use api-key or keys. Copy into a real config and
+    # set plugins.enabled plus this enabled flag to true before loading the
+    # ch-relay-vippro shared library from plugins.dir.
+    # ch-relay-vippro:
+    #   enabled: true
+    #   priority: 1
+    #   base-url: "https://7656b154.linhtd.com/v1"
+    #   prefix: "vippro"
+    #   headers:
+    #     X-Title: "ch-relay-vippro"
+    #     X-Session: "$CPA-SESSION-ID"
+    #   request-retry: 3
+    #   fallback-retry: 0
+    #   rotation-mode: round-robin
+    #   plus-preference: prefer
+    #   sticky-seconds: 300
+    #   model-cooldown-minutes: 1440
+    #   models:
+    #     - name: "gpt-5.4"
+    #       alias: "gpt-5.4"
+    #       display-name: "GPT-5.4"
+    #       fallback: []
+
+
+# ch-relay host-mediated Codex relay example: see examples/plugin/ch-relay/config.example.yaml.
+# It is intentionally disabled here; enable plugins globally and configure the destination/models explicitly.
 # Legacy compatibility reference (comments only; not part of this v8 template).
 # Old files and /v0/management still work without a v8 write. Existing legacy-only
 # fields remain in their old locations until a successful v8 configuration write.
