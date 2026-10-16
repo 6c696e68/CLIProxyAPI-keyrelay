@@ -143,6 +143,10 @@ PackyCode provides special discounts for our software users: register using <a h
 
 CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
+## Customer API keys
+
+The `key-shop` plugin issues expiring, token-capped `ck_` keys and a public page at `/key-dashboard`. Operator keys in `access.api-keys` stay unlimited. See [examples/plugin/key-shop/README.md](examples/plugin/key-shop/README.md) and [docs/key-shop.md](docs/key-shop.md).
+
 ## Management API
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)

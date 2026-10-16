@@ -26,6 +26,7 @@ This directory contains standard dynamic library plugin examples for the CLIProx
 - `host-callback/`: minimal plugin resource that demonstrates host callbacks.
 - `host-callback-auth-files/`: Go-only plugin resource that calls host auth file callbacks.
 - `host-model-callback/`: Go-only plugin resource that calls the host model execution callbacks.
+- `key-shop/`: customer API keys with expiry, token caps, an admin page, and `/key-dashboard`. See `key-shop/README.md`.
 
 Most standard capability examples contain `go/`, `c/`, and `rust/` subdirectories. Specialized examples may provide only the implementation language they need.
 
