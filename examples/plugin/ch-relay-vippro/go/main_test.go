@@ -1344,6 +1344,15 @@ models:
 func TestChatGPTModelCooldownStreamKeepsRawBody(t *testing.T) {
 	const unsupported = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
 	f := setup(t)
+	streamClosed := make(chan struct{}, 2)
+	previousHost := hostCallOverride
+	hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+		raw, errCall := previousHost(method, payload)
+		if method == pluginabi.MethodHostStreamClose {
+			streamClosed <- struct{}{}
+		}
+		return raw, errCall
+	}
 	start := time.Date(2026, 10, 16, 0, 0, 0, 0, time.UTC)
 	nowFn = func() time.Time { return start }
 	f.codex("1", tokenA, "plus", nil)
@@ -1373,6 +1382,8 @@ models:
 	if len(calls) != 3 || bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenB || bearer(t, calls[2]) != "Bearer "+tokenB {
 		t.Fatalf("stream cooldown bearers, calls=%d", len(calls))
 	}
+	waitCh(t, streamClosed, "first success stream close")
+	waitCh(t, streamClosed, "second success stream close")
 
 	f2 := setup(t)
 	nowFn = func() time.Time { return start }

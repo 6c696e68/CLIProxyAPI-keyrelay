@@ -610,7 +610,11 @@ func (h *OpenAIResponsesAPIHandler) prepareCodexOrphanDelegation(c *gin.Context,
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 func (h *OpenAIResponsesAPIHandler) disableSubagentsEnabled() bool {
-	return h != nil && h.Cfg != nil && h.Cfg.Client.Codex.DisableSubagents
+	if h == nil {
+		return false
+	}
+	cfg := h.CurrentConfig()
+	return cfg != nil && cfg.Client.Codex.DisableSubagents
 }
 
 // applyDisableSubagentsHTTP enforces layer B (reject spawned threads) then layer A

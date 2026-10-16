@@ -12,8 +12,10 @@ import (
 
 func (h *BaseAPIHandler) applyConfiguredModelMapping(modelName string, rawJSON []byte) (string, []byte, modelmapping.Result) {
 	var rules []config.ModelMappingRule
-	if h != nil && h.Cfg != nil {
-		rules = h.Cfg.ModelMapping
+	if h != nil {
+		if cfg := h.CurrentConfig(); cfg != nil {
+			rules = cfg.ModelMapping
+		}
 	}
 	result := modelmapping.Apply(rules, modelName)
 	if !result.Changed {

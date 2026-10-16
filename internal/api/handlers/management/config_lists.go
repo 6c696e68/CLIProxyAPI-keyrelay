@@ -2262,7 +2262,10 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 
 // model-mapping: []ModelMappingRule
 func (h *Handler) GetModelMapping(c *gin.Context) {
-	c.JSON(200, gin.H{"model-mapping": sanitizedModelMapping(h.cfg.ModelMapping)})
+	h.mu.Lock()
+	rules := sanitizedModelMapping(h.cfg.ModelMapping)
+	h.mu.Unlock()
+	c.JSON(200, gin.H{"model-mapping": rules})
 }
 
 func (h *Handler) PutModelMapping(c *gin.Context) {
@@ -2289,8 +2292,10 @@ func (h *Handler) PutModelMapping(c *gin.Context) {
 			rules = wrapper.Items
 		}
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.cfg.ModelMapping = sanitizedModelMapping(rules)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) PatchModelMapping(c *gin.Context) {
@@ -2317,6 +2322,8 @@ func (h *Handler) PatchModelMapping(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid rule"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	next := append([]config.ModelMappingRule(nil), h.cfg.ModelMapping...)
 	if body.Index != nil {
 		if *body.Index < 0 || *body.Index >= len(next) {
@@ -2335,7 +2342,7 @@ func (h *Handler) PatchModelMapping(c *gin.Context) {
 		next = append(next, normalized[0])
 	}
 	h.cfg.ModelMapping = sanitizedModelMapping(next)
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func (h *Handler) DeleteModelMapping(c *gin.Context) {
@@ -2349,13 +2356,15 @@ func (h *Handler) DeleteModelMapping(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid index"})
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if index < 0 || index >= len(h.cfg.ModelMapping) {
 		c.JSON(404, gin.H{"error": "index not found"})
 		return
 	}
 	next := append([]config.ModelMappingRule(nil), h.cfg.ModelMapping...)
 	h.cfg.ModelMapping = sanitizedModelMapping(append(next[:index], next[index+1:]...))
-	h.persist(c)
+	h.persistLocked(c)
 }
 
 func sanitizedModelMapping(rules []config.ModelMappingRule) []config.ModelMappingRule {
