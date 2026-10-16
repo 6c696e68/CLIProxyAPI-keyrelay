@@ -72,9 +72,9 @@ tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent
       <h1>API Keys</h1>
       <p class="desc">Tạo key để bán. Mặc định 7 ngày và 100.000.000 token. Secret chỉ hiện một lần.</p>
     </div>
-    <div class="row">
-      <input id="mgmt" type="password" placeholder="Management key">
-      <button id="save" class="secondary" type="button">Lưu phiên</button>
+    <div class="row" id="mgmt-row">
+      <input id="mgmt" type="password" placeholder="Mật khẩu đăng nhập management" autocomplete="current-password">
+      <button id="save" class="secondary" type="button">Dùng key này</button>
     </div>
   </header>
   <section class="card">
@@ -120,13 +120,59 @@ tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent
   try { apply(parent.document.documentElement.dataset.theme); } catch (e) {}
   if (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches) apply("dark");
 })();
+const ENC_PREFIX = "enc::v1::";
+function deobfuscate(payload) {
+  if (!payload || !payload.startsWith(ENC_PREFIX)) return payload;
+  const binary = atob(payload.slice(ENC_PREFIX.length));
+  const encrypted = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) encrypted[i] = binary.charCodeAt(i);
+  const keyBytes = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent);
+  const out = new Uint8Array(encrypted.length);
+  for (let i = 0; i < encrypted.length; i++) out[i] = encrypted[i] ^ keyBytes[i % keyBytes.length];
+  return new TextDecoder().decode(out);
+}
+function panelKey() {
+  const stores = [localStorage];
+  try { if (parent && parent.localStorage) stores.push(parent.localStorage); } catch (e) {}
+  for (const store of stores) {
+    for (const name of ["cli-proxy-auth", "managementKey"]) {
+      try {
+        const raw = store.getItem(name);
+        if (!raw) continue;
+        const parsed = JSON.parse(deobfuscate(raw));
+        const state = parsed && parsed.state ? parsed.state : parsed;
+        const key = state && (state.managementKey || state);
+        if (typeof key === "string" && key.trim()) return key.trim();
+      } catch (e) {}
+    }
+  }
+  return "";
+}
+function typedKey() {
+  return document.getElementById("mgmt").value.trim().replace(/^Bearer\s+/i, "");
+}
+let activeKey = panelKey() || sessionStorage.getItem("keyshop.mgmt") || "";
 const mgmt = document.getElementById("mgmt");
-mgmt.value = sessionStorage.getItem("keyshop.mgmt") || "";
-document.getElementById("save").onclick = () => sessionStorage.setItem("keyshop.mgmt", mgmt.value);
+if (panelKey()) document.getElementById("mgmt-row").hidden = true;
+else mgmt.value = activeKey;
+document.getElementById("save").onclick = () => {
+  activeKey = typedKey();
+  sessionStorage.setItem("keyshop.mgmt", activeKey);
+  load();
+};
 async function api(method, path, body) {
-  const res = await fetch(path, {method, headers:{"Authorization":"Bearer "+mgmt.value, "Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
+  const key = panelKey() || activeKey || typedKey();
+  const res = await fetch(path, {method, headers:{"Authorization":"Bearer " + key, "Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
   const text = await res.text();
-  try { return JSON.parse(text); } catch (e) { return {error: text || res.statusText}; }
+  let data;
+  try { data = JSON.parse(text); } catch (e) { data = {error: text || res.statusText}; }
+  if (res.status === 401) {
+    sessionStorage.removeItem("keyshop.mgmt");
+    activeKey = "";
+    document.getElementById("mgmt-row").hidden = false;
+    data.error = data.error || "Sai mật khẩu management. Dùng mật khẩu đăng nhập panel, không dùng API key khách.";
+  }
+  return data;
 }
 function idOf(key) { return key.ID || key.id; }
 async function load() {

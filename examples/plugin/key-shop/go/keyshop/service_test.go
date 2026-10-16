@@ -241,6 +241,20 @@ func TestSessionReturnsBaseURL(t *testing.T) {
 	}
 }
 
+func TestSecondInterceptDoesNotFailTheStore(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 100)
+	body := interceptBody(secret, "same-request", "/v1/chat/completions", true)
+	first := call(t, svc, "request.intercept_before", body)
+	if strings.Contains(string(first), `"Terminate":true`) {
+		t.Fatal("first intercept terminated")
+	}
+	after := call(t, svc, "request.intercept_after", body)
+	if strings.Contains(string(after), "key_store_unavailable") || strings.Contains(string(after), `"Terminate":true`) {
+		t.Fatal("after intercept failed the store")
+	}
+}
+
 func TestClosedStoreTerminatesInsteadOfPassing(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 100)

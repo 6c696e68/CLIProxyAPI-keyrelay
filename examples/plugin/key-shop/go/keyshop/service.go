@@ -50,8 +50,10 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 		return ok(map[string]string{"identifier": "key-shop"})
 	case "frontend_auth.authenticate":
 		return ok(s.authenticate(payload))
-	case "request.intercept_before", "request.intercept_after":
+	case "request.intercept_before":
 		return ok(s.intercept(payload))
+	case "request.intercept_after":
+		return ok(map[string]any{})
 	case "usage.handle":
 		s.noteUsage(payload)
 		return ok(map[string]any{})

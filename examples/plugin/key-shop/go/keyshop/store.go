@@ -430,7 +430,8 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 		}
 		amount = want
 	}
-	if _, err = tx.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)`,
+	if _, err = tx.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)
+ON CONFLICT(request_id) DO NOTHING`,
 		in.RequestID, row.id, amount, now.Format(time.RFC3339Nano)); err != nil {
 		return Admission{}, err
 	}
