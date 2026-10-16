@@ -58,6 +58,7 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -67,6 +68,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,6 +95,7 @@ const (
 	maxFallbackRetries          = 3
 	maxStickySeconds            = 86400
 	redactedToken               = "[REDACTED]"
+	cooldownReasonUnsupported   = "chatgpt_model_unsupported"
 )
 
 type envelope struct {
@@ -322,8 +325,16 @@ type preparedCall struct {
 	protocol   string
 }
 
+type cooldownRecord struct {
+	AuthIndex string    `json:"auth_index,omitempty"`
+	TokenHash string    `json:"token_hash,omitempty"`
+	Until     time.Time `json:"until"`
+	Reason    string    `json:"reason,omitempty"`
+}
+
 var (
 	runtimeMu        sync.Mutex
+	cooldownFileMu   sync.Mutex
 	runtime          runtimeState
 	nowFn            = time.Now
 	hostCallOverride func(method string, payload []byte) (json.RawMessage, error)
@@ -452,6 +463,7 @@ func configure(raw []byte) {
 	runtime.configured = true
 	runtimeMu.Unlock()
 	setStatsFile(cfg.StatsFile)
+	loadCooldowns(cooldownFilePath(cfg.StatsFile))
 	if accountCheckAutoStart {
 		startAccountChecker()
 	}
@@ -744,7 +756,7 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "rotation-mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"round-robin", "fill-first", "least-recent", "sticky"}, Description: "Codex account rotation. round-robin keeps a successful access token and moves to the next account after one upstream error."},
 		{Name: "plus-preference", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "prefer", "only"}, Description: "plus is the ChatGPT plan inside the account token. A stale plan_type of plus is ignored when the token says free. prefer stays on Plus while any enabled Plus account exists. ignore is stored as off."},
 		{Name: "sticky-seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Sticky session lifetime in seconds. Default 300."},
-		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token after the upstream says the model is not supported for a ChatGPT account. 0 disables. Default 1440. Maximum 10080."},
+		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token after the upstream says the model is not supported for a ChatGPT account. 0 disables. Default 1440. Maximum 10080. The skip is saved beside stats-file and survives restart."},
 		{Name: "stats-file", Type: pluginapi.ConfigFieldTypeString, Description: "JSON file for hourly request and token buckets kept for 90 days. Empty disables persistence."},
 		{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model name plus optional client alias. The same alias with different names is one pool. An exact duplicate name and alias is skipped. A fallback list is stored and is not sent."},
 	}
@@ -986,6 +998,9 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 			return attemptResult{rewrite: errPost}
 		}
 		if status >= 200 && status < 300 {
+			if chatgptModelUnsupported(body) {
+				markModelCooldown(at.index, at.token, cfg.modelCooldown())
+			}
 			if stream && resp.streamID() == "" {
 				lastStatus = http.StatusBadGateway
 				lastBody = []byte("missing upstream stream id")
@@ -1110,31 +1125,161 @@ func cooled(index, token string, now time.Time) bool {
 	if until, ok := runtime.cooldownIndex[index]; ok && index != "" && now.Before(until) {
 		return true
 	}
-	if until, ok := runtime.cooldownToken[token]; ok && token != "" && now.Before(until) {
+	key := tokenKey(token)
+	if until, ok := runtime.cooldownToken[key]; ok && key != "" && now.Before(until) {
 		return true
 	}
 	return false
 }
 
+func tokenKey(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:])
+}
+
 func markModelCooldown(index, token string, d time.Duration) {
-	if d <= 0 {
+	if d <= 0 || (index == "" && token == "") {
 		return
 	}
 	until := nowFn().Add(d)
 	runtimeMu.Lock()
-	defer runtimeMu.Unlock()
+	ensureCooldownMapsLocked()
+	if index != "" {
+		if prev, ok := runtime.cooldownIndex[index]; !ok || until.After(prev) {
+			runtime.cooldownIndex[index] = until
+		}
+	}
+	if key := tokenKey(token); key != "" {
+		if prev, ok := runtime.cooldownToken[key]; !ok || until.After(prev) {
+			runtime.cooldownToken[key] = until
+		}
+	}
+	path := cooldownFilePath(runtime.cfg.StatsFile)
+	runtimeMu.Unlock()
+	persistCooldowns(path)
+}
+
+func ensureCooldownMapsLocked() {
 	if runtime.cooldownIndex == nil {
 		runtime.cooldownIndex = map[string]time.Time{}
 	}
 	if runtime.cooldownToken == nil {
 		runtime.cooldownToken = map[string]time.Time{}
 	}
-	if index != "" {
-		runtime.cooldownIndex[index] = until
+}
+
+func cooldownFilePath(statsFile string) string {
+	statsFile = strings.TrimSpace(statsFile)
+	if statsFile == "" {
+		return ""
 	}
-	if token != "" {
-		runtime.cooldownToken[token] = until
+	return statsFile + ".cooldowns.json"
+}
+
+func loadCooldowns(path string) {
+	if path == "" {
+		return
 	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil || len(bytes.TrimSpace(raw)) == 0 {
+		return
+	}
+	var records []cooldownRecord
+	if errUnmarshal := json.Unmarshal(raw, &records); errUnmarshal != nil {
+		return
+	}
+	now := nowFn()
+	runtimeMu.Lock()
+	ensureCooldownMapsLocked()
+	for _, record := range records {
+		if !now.Before(record.Until) {
+			continue
+		}
+		if record.AuthIndex != "" {
+			if prev, ok := runtime.cooldownIndex[record.AuthIndex]; !ok || record.Until.After(prev) {
+				runtime.cooldownIndex[record.AuthIndex] = record.Until
+			}
+		}
+		if record.TokenHash != "" {
+			if prev, ok := runtime.cooldownToken[record.TokenHash]; !ok || record.Until.After(prev) {
+				runtime.cooldownToken[record.TokenHash] = record.Until
+			}
+		}
+	}
+	runtimeMu.Unlock()
+	persistCooldowns(path)
+}
+
+func persistCooldowns(path string) {
+	if path == "" {
+		return
+	}
+	cooldownFileMu.Lock()
+	defer cooldownFileMu.Unlock()
+	now := nowFn()
+	runtimeMu.Lock()
+	records := cooldownRecordsLocked(now)
+	runtimeMu.Unlock()
+	_ = writeCooldownFile(path, records)
+}
+
+func cooldownRecordsLocked(now time.Time) []cooldownRecord {
+	ensureCooldownMapsLocked()
+	out := make([]cooldownRecord, 0, len(runtime.cooldownIndex)+len(runtime.cooldownToken))
+	for index, until := range runtime.cooldownIndex {
+		if index == "" || !now.Before(until) {
+			delete(runtime.cooldownIndex, index)
+			continue
+		}
+		out = append(out, cooldownRecord{AuthIndex: index, Until: until, Reason: cooldownReasonUnsupported})
+	}
+	for hash, until := range runtime.cooldownToken {
+		if hash == "" || !now.Before(until) {
+			delete(runtime.cooldownToken, hash)
+			continue
+		}
+		out = append(out, cooldownRecord{TokenHash: hash, Until: until, Reason: cooldownReasonUnsupported})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AuthIndex != out[j].AuthIndex {
+			return out[i].AuthIndex < out[j].AuthIndex
+		}
+		return out[i].TokenHash < out[j].TokenHash
+	})
+	return out
+}
+
+func writeCooldownFile(path string, records []cooldownRecord) error {
+	raw, errMarshal := json.Marshal(records)
+	if errMarshal != nil {
+		return errMarshal
+	}
+	dir := filepath.Dir(path)
+	if errDir := os.MkdirAll(dir, 0o755); errDir != nil {
+		return errDir
+	}
+	tmp, errCreate := os.CreateTemp(dir, ".ch-relay-vippro-cooldown-*")
+	if errCreate != nil {
+		return errCreate
+	}
+	tmpName := tmp.Name()
+	if _, errWrite := tmp.Write(raw); errWrite != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return errWrite
+	}
+	if errClose := tmp.Close(); errClose != nil {
+		_ = os.Remove(tmpName)
+		return errClose
+	}
+	if errRename := os.Rename(tmpName, path); errRename != nil {
+		_ = os.Remove(tmpName)
+		return errRename
+	}
+	return nil
 }
 
 func bindSticky(session, index string, seconds int) {
@@ -1220,7 +1365,11 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 		used := append([]string(nil), result.tokens...)
 		callbackID := prepared.callbackID
 		protocol := prepared.protocol
-		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email)
+		token := ""
+		if len(used) > 0 {
+			token = used[len(used)-1]
+		}
+		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, cfg.modelCooldown())
 		return okEnvelope(map[string]any{
 			"headers": responseHeaders(result.resp, "text/event-stream"),
 		})
@@ -1231,7 +1380,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 	return errorEnvelope("upstream_error", failureMessage(result.status, result.body, result.tokens), result.status), nil
 }
 
-func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email string) {
+func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email, index, token string, cooldown time.Duration) {
 	var buffer helps.StreamUsageBuffer
 	failed := false
 	errText := ""
@@ -1255,6 +1404,21 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 	}()
 	var pending []byte
 	var compatParam any
+	var scan []byte
+	cooledStream := false
+	noteUnsupported := func(part []byte) {
+		if cooledStream || cooldown <= 0 || len(part) == 0 {
+			return
+		}
+		scan = append(scan, part...)
+		if len(scan) > 16384 {
+			scan = append([]byte(nil), scan[len(scan)-16384:]...)
+		}
+		if chatgptModelUnsupported(scan) {
+			cooledStream = true
+			markModelCooldown(index, token, cooldown)
+		}
+	}
 	// One empty delta opens the client response immediately. Without it the
 	// client sits on a silent socket and aborts at about 15s, which ch-relay
 	// records as client cancelled.
@@ -1291,6 +1455,10 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 			failed = true
 			finish(errRead.Error())
 			return
+		}
+		noteUnsupported(chunk.payload())
+		if text := chunk.errText(); text != "" {
+			noteUnsupported([]byte(text))
 		}
 		if !emitChunk(chunk.payload(), chunk.done()) {
 			return

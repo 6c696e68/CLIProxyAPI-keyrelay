@@ -75,7 +75,7 @@ plugins:
 | `rotation-mode` | `round-robin`, `fill-first`, `least-recent`, or `sticky`. |
 | `plus-preference` | `off`, `prefer`, or `only`. `ignore` is stored as `off`. Default `prefer`. |
 | `sticky-seconds` | Sticky session lifetime. Default `300`. Maximum `86400`. |
-| `model-cooldown-minutes` | After the upstream says the model is not supported for a ChatGPT account, skip that account and that access token for this many minutes. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. |
+| `model-cooldown-minutes` | After the upstream says the model is not supported for a ChatGPT account, skip that account and that access token for this many minutes. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. When `stats-file` is set, the skip is saved in `stats-file + ".cooldowns.json"` and survives restart. The file stores a token hash, not the access token. |
 | `stats-file` | JSON file of hourly buckets kept for 90 days. Empty does not write a file. |
 | `models` | Rows of upstream model name, optional alias, optional fallback names, and optional OpenAI model fields. |
 
@@ -91,7 +91,7 @@ Optional row fields follow the OpenAI-compatible model object: `display-name`, `
 
 `fallback` and `fallback-retry` are stored so existing config still loads. Requests are not switched to those names. The upstream model is the row `name`.
 
-A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls. Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for `model-cooldown-minutes`.
+A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls. Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for `model-cooldown-minutes`, including when the error arrives inside a 2xx stream.
 
 ## Accounts
 
@@ -130,7 +130,7 @@ A 2xx body or stream is returned as the base URL sent it. The plugin does not re
 
 Chat streams pass each upstream line through `ConvertOpenAIResponseToOpenAI`. Responses streams are the original bytes. The request is `POST {base-url}/chat/completions` or `POST {base-url}/responses` with `Authorization: Bearer` set to the selected Codex access token. Stream requests also send `Accept: text/event-stream` and `Cache-Control: no-cache`.
 
-A non-2xx response tries the next account with the same model, up to `1 + request-retry` calls. The error `model is not supported` with `ChatGPT account` cools that account index and that access token until `model-cooldown-minutes` elapse. Later requests do not select either one. `0` still switches accounts inside the current request and does not remember the skip. The last upstream error body is returned unchanged.
+A non-2xx response tries the next account with the same model, up to `1 + request-retry` calls. The error `model is not supported` with `ChatGPT account` cools that account index and that access token until `model-cooldown-minutes` elapse. Later requests do not select either one. The same match inside a 2xx stream body cools the account after that stream is opened. `0` still switches accounts inside the current request and does not remember the skip. When `stats-file` is set, active cooldowns are reloaded after restart. The last upstream error body is returned unchanged.
 
 ## Protocols
 

@@ -1408,6 +1408,98 @@ models:
 	}
 }
 
+func TestChatGPTModelCooldownSurvivesRestart(t *testing.T) {
+	const unsupported = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
+	stats := filepath.Join(t.TempDir(), "stats.json")
+	cfg := `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+model-cooldown-minutes: 1440
+stats-file: ` + strconv.Quote(stats) + `
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`
+	f := setup(t)
+	start := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return start }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(unsupported)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, cfg)
+	mustExec(t, "openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	raw, errRead := os.ReadFile(stats + ".cooldowns.json")
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	if strings.Contains(string(raw), tokenA) || strings.Contains(string(raw), tokenB) {
+		t.Fatalf("cooldown file stored a token: %s", raw)
+	}
+	if !strings.Contains(string(raw), "chatgpt_model_unsupported") {
+		t.Fatalf("cooldown file = %s", raw)
+	}
+
+	f2 := setup(t)
+	nowFn = func() time.Time { return start.Add(time.Hour) }
+	f2.codex("1", tokenA, "plus", nil)
+	f2.codex("2", tokenB, "plus", nil)
+	f2.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, cfg)
+	mustExec(t, "openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	calls := f2.httpCalls(t)
+	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenB {
+		t.Fatalf("restarted cooldown bearer, calls=%d", len(calls))
+	}
+}
+
+func TestChatGPTModelCooldownHTTP200Stream(t *testing.T) {
+	const unsupported = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
+	f := setup(t)
+	closed := make(chan struct{}, 1)
+	previousHost := hostCallOverride
+	hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+		raw, errCall := previousHost(method, payload)
+		if method == pluginabi.MethodHostStreamClose {
+			closed <- struct{}{}
+		}
+		return raw, errCall
+	}
+	nowFn = func() time.Time { return time.Date(2026, 10, 17, 1, 0, 0, 0, time.UTC) }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusOK, streamID: "http-200-err", chunks: []readChunk{
+			{payload: []byte(`data: {"detail":"The 'gpt-6-astra' model is not sup`)},
+			{payload: []byte(`ported when using Codex with a ChatGPT account."}` + "\n\n"), done: true},
+		}},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 0
+model-cooldown-minutes: 1440
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	req := execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	req.StreamID = "exec-200-err"
+	callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+	waitCh(t, closed, "200 stream close")
+	mustExec(t, "openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 || bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenB {
+		t.Fatalf("200 stream cooldown bearers, calls=%d", len(calls))
+	}
+}
+
 func TestOpenAICompatPayloads(t *testing.T) {
 	var pending []byte
 	var param any
