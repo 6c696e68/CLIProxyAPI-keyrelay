@@ -3,41 +3,148 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API key dashboard</title>
+<title>Key Dashboard</title>
 <style>
-body{margin:0;font:16px/1.5 ui-sans-serif,system-ui,sans-serif;background:#f6f7f9;color:#17202a}
-main{max-width:880px;margin:0 auto;padding:32px 20px}
-h1{font-size:32px;margin:0 0 8px}
-.card{background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:20px;margin:16px 0}
-label{display:block;font-weight:600;margin-bottom:8px}
-input{width:100%;box-sizing:border-box;padding:10px;border:1px solid #c5ced8;border-radius:8px}
-button{border:0;border-radius:8px;padding:10px 14px;background:#0b6e4f;color:#fff;font-weight:600}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:8px;border-bottom:1px solid #e6ebf0;font-size:14px}
-.muted{color:#5c6b7a}
-.row{display:flex;gap:16px;flex-wrap:wrap}
-.stat{flex:1;min-width:140px}
+:root {
+  --bg-secondary: #faf9f5;
+  --bg-primary: #f0eee8;
+  --bg-tertiary: #e9e6df;
+  --text-primary: #2d2a26;
+  --text-secondary: #6d6760;
+  --text-tertiary: #a29c95;
+  --border-color: #e3e1db;
+  --border-hover: #cecac4;
+  --primary-color: #8b8680;
+  --primary-hover: #7f7a74;
+  --primary-contrast: #ffffff;
+  --success-color: #10b981;
+  --warning-color: #c65746;
+  --success-badge-bg: #d1fae5;
+  --success-badge-text: #065f46;
+  --failure-badge-bg: rgba(198, 87, 70, 0.14);
+  --failure-badge-text: #8a3a30;
+  --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.1);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+[data-theme="dark"] {
+  --bg-secondary: #151412; --bg-primary: #1d1b18; --bg-tertiary: #262320;
+  --text-primary: #f6f4f1; --text-secondary: #c9c3bb; --text-tertiary: #9c958d;
+  --border-color: #3a3530; --border-hover: #5a544d;
+  --primary-hover: #9a948e; --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
+  --success-badge-bg: rgba(6, 78, 59, 0.3); --success-badge-text: #6ee7b7;
+  --failure-badge-bg: rgba(198, 87, 70, 0.24); --failure-badge-text: #f1b0a6;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; font-family: var(--font); color: var(--text-primary); background: var(--bg-secondary); }
+.shell { min-height: 100vh; display: flex; }
+.brand {
+  flex: 1; display: flex; align-items: center; justify-content: flex-end;
+  background: #000; color: #fff; padding: 48px; overflow: hidden;
+}
+.brand-words { width: 100%; text-align: right; }
+.brand-words span {
+  display: block; font-size: 12vw; font-weight: 900; letter-spacing: -0.02em;
+  line-height: 0.85; text-transform: uppercase;
+}
+.brand-words span:nth-child(1) { opacity: 0.95; }
+.brand-words span:nth-child(2) { opacity: 0.7; }
+.brand-words span:nth-child(3) { opacity: 0.45; }
+.panel { flex: 1.1; display: flex; flex-direction: column; padding: 32px 40px 48px; }
+.top { display: flex; justify-content: flex-end; }
+.lang {
+  border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-secondary);
+  border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.content { width: min(760px, 100%); margin: auto; display: flex; flex-direction: column; gap: 24px; }
+.card {
+  background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 12px;
+  box-shadow: var(--shadow-lg); padding: 32px; display: flex; flex-direction: column; gap: 16px;
+}
+h1 { margin: 0; font-size: 22px; font-weight: 800; text-align: center; }
+.sub { margin: 0; color: var(--text-secondary); font-size: 14px; text-align: center; }
+label { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+input[type="text"], input[type="password"] {
+  width: 100%; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 8px;
+  background: var(--bg-secondary); color: var(--text-primary); font: inherit;
+}
+input:focus { outline: none; border-color: var(--border-hover); }
+.check { display: flex; gap: 8px; align-items: center; color: var(--text-secondary); font-size: 14px; font-weight: 500; }
+.btn {
+  border: 0; border-radius: 8px; padding: 12px 16px; background: var(--primary-color);
+  color: var(--primary-contrast); font: inherit; font-weight: 700; cursor: pointer;
+}
+.btn:hover { background: var(--primary-hover); }
+.error {
+  display: none; background: rgba(198, 87, 70, 0.1); border: 1px solid rgba(198, 87, 70, 0.4);
+  color: var(--warning-color); border-radius: 8px; padding: 8px 12px; font-size: 14px;
+}
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.stat {
+  border: 1px solid var(--border-color); border-radius: 14px; background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+  padding: 15px 16px; display: flex; flex-direction: column; gap: 6px;
+}
+.stat span { color: var(--text-secondary); font-size: 12px; }
+.stat strong { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; }
+.meter { height: 6px; border-radius: 999px; background: var(--bg-tertiary); overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: var(--success-color); }
+.base {
+  background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 8px;
+  padding: 12px 14px; font-family: var(--mono); font-size: 13px;
+}
+.table-wrap { border: 1px solid var(--border-color); border-radius: 8px; overflow: auto; background: var(--bg-primary); }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+th { background: var(--bg-tertiary); color: var(--text-secondary); font-weight: 500; font-size: 12px; text-align: left; padding: 10px 14px; }
+td { padding: 12px 14px; border-top: 1px solid var(--border-color); }
+tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); }
+.badge { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
+.ok { background: var(--success-badge-bg); color: var(--success-badge-text); }
+.bad { background: var(--failure-badge-bg); color: var(--failure-badge-text); }
+@media (max-width: 768px) {
+  .brand { display: none; }
+  .panel { padding: 20px; }
+  .card { box-shadow: none; border: 0; background: transparent; padding: 8px 0; }
+  .stats { grid-template-columns: 1fr 1fr; }
+}
 </style>
 </head>
 <body>
-<main>
-<div class="row"><h1 data-vi="Xem API key của bạn" data-en="View your API key">Xem API key của bạn</h1><button id="lang" type="button">English</button></div>
-<p class="muted" data-vi="Chỉ xem usage của key này. Không đưa key vào URL." data-en="Only this key's usage is shown. Do not put the key in the URL.">Chỉ xem usage của key này. Không đưa key vào URL.</p>
-<section class="card">
-<label for="key" data-vi="API key" data-en="API key">API key</label>
-<input id="key" autocomplete="off" spellcheck="false">
-<label><input id="remember" type="checkbox"> <span data-vi="Ghi nhớ trên trình duyệt này" data-en="Remember in this browser">Ghi nhớ trên trình duyệt này</span></label>
-<p><button id="open" type="button" data-vi="Mở dashboard" data-en="Open dashboard">Mở dashboard</button></p>
-<p id="error" class="muted"></p>
-</section>
-<section id="out" hidden>
-<div class="card"><h2 data-vi="Hạn và hạn mức" data-en="Lifecycle and limits">Hạn và hạn mức</h2><div id="stats" class="row"></div><p id="base"></p></div>
-<div class="card"><h2 data-vi="Lượt gọi gần đây" data-en="Recent calls">Lượt gọi gần đây</h2><table><thead><tr><th data-vi="Thời gian" data-en="Time">Thời gian</th><th>Model</th><th data-vi="Trạng thái" data-en="Status">Trạng thái</th><th>Token</th></tr></thead><tbody id="rows"></tbody></table></div>
-</section>
-</main>
+<div class="shell">
+  <aside class="brand" aria-hidden="true"><div class="brand-words"><span>CLI</span><span>Proxy</span><span>API</span></div></aside>
+  <main class="panel">
+    <div class="top"><button id="lang" class="lang" type="button">English</button></div>
+    <div class="content">
+      <section class="card" id="gate">
+        <div>
+          <h1 data-vi="Xem API key của bạn" data-en="View your API key">Xem API key của bạn</h1>
+          <p class="sub" data-vi="Chỉ xem usage của key này. Không đưa key vào URL." data-en="Only this key's usage is shown. Do not put the key in the URL.">Chỉ xem usage của key này. Không đưa key vào URL.</p>
+        </div>
+        <label for="key" data-vi="API key" data-en="API key">API key</label>
+        <input id="key" type="password" autocomplete="off" spellcheck="false">
+        <label class="check"><input id="remember" type="checkbox"> <span data-vi="Ghi nhớ trên trình duyệt này" data-en="Remember in this browser">Ghi nhớ trên trình duyệt này</span></label>
+        <button id="open" class="btn" type="button" data-vi="Mở dashboard" data-en="Open dashboard">Mở dashboard</button>
+        <p id="error" class="error"></p>
+      </section>
+      <section id="out" hidden>
+        <div class="stats" id="stats"></div>
+        <div class="meter" aria-hidden="true"><i id="bar"></i></div>
+        <div class="base" id="base"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-vi="Thời gian" data-en="Time">Thời gian</th><th>Model</th><th data-vi="Trạng thái" data-en="Status">Trạng thái</th><th>Token</th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
 <script>
-const text = {vi:{},en:{}};
-document.querySelectorAll("[data-vi]").forEach((el) => { text.vi[el.dataset.vi] = el; });
+(function syncTheme() {
+  const apply = (theme) => { if (theme) document.documentElement.dataset.theme = theme; };
+  try { apply(parent.document.documentElement.dataset.theme); } catch (e) {}
+  if (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches) apply("dark");
+})();
 let lang = "vi";
 document.getElementById("lang").onclick = () => {
   lang = lang === "vi" ? "en" : "vi";
@@ -51,9 +158,14 @@ if (sessionStorage.getItem("keyshop.remember") === "1") {
   remember.checked = true;
   keyEl.value = sessionStorage.getItem("keyshop.key") || "";
 }
+function badge(status) {
+  const ok = status === "active" || status === "succeeded";
+  return `<span class="badge ${ok ? "ok" : "bad"}">${status || ""}</span>`;
+}
 document.getElementById("open").onclick = async () => {
   const key = keyEl.value.trim();
-  document.getElementById("error").textContent = "";
+  const error = document.getElementById("error");
+  error.style.display = "none";
   if (remember.checked) {
     sessionStorage.setItem("keyshop.remember", "1");
     sessionStorage.setItem("keyshop.key", key);
@@ -64,20 +176,25 @@ document.getElementById("open").onclick = async () => {
   const res = await fetch("/key-dashboard/api/session", {headers:{Authorization:"Bearer "+key}});
   const body = await res.json();
   if (!res.ok) {
-    document.getElementById("error").textContent = body.error || "request failed";
+    error.textContent = body.error || "request failed";
+    error.style.display = "block";
     return;
   }
   const keyInfo = body.Key || body.key || {};
   const requests = body.Requests || body.requests || [];
+  const used = Number(keyInfo.TokensUsed || keyInfo.tokens_used || 0);
+  const limit = Number(keyInfo.TokenLimit || keyInfo.token_limit || 0);
+  const remain = limit > 0 ? Math.max(limit - used, 0) : "∞";
   document.getElementById("out").hidden = false;
   document.getElementById("stats").innerHTML = [
-    ["Status", keyInfo.Status || keyInfo.status],
-    ["Used", keyInfo.TokensUsed || keyInfo.tokens_used || 0],
-    ["Limit", keyInfo.TokenLimit || keyInfo.token_limit || 0],
-    ["Expires", keyInfo.ExpiresAt || keyInfo.expires_at || "never"]
-  ].map(([k,v]) => `<div class="stat"><div class="muted">${k}</div><strong>${v}</strong></div>`).join("");
-  document.getElementById("base").textContent = "Base URL: " + (body.base_url || (location.origin + "/v1"));
-  document.getElementById("rows").innerHTML = requests.map((row) => `<tr><td>${row.RequestedAt || row.requested_at || ""}</td><td>${row.Model || row.model || ""}</td><td>${row.Status || row.status || ""}</td><td>${row.Billed || row.billed || 0}</td></tr>`).join("") || `<tr><td colspan="4">${lang === "vi" ? "Chưa có lượt gọi." : "No calls yet."}</td></tr>`;
+    [lang === "vi" ? "Trạng thái" : "Status", badge(keyInfo.Status || keyInfo.status)],
+    [lang === "vi" ? "Đã dùng" : "Used", used],
+    [lang === "vi" ? "Còn lại" : "Remaining", remain],
+    [lang === "vi" ? "Hết hạn" : "Expires", keyInfo.ExpiresAt || keyInfo.expires_at || (lang === "vi" ? "không" : "never")]
+  ].map(([k,v]) => `<div class="stat"><span>${k}</span><strong>${v}</strong></div>`).join("");
+  document.getElementById("bar").style.width = limit > 0 ? Math.min(100, (used / limit) * 100) + "%" : "8%";
+  document.getElementById("base").textContent = "Base URL  " + (body.base_url || (location.origin + "/v1"));
+  document.getElementById("rows").innerHTML = requests.map((row) => `<tr><td>${row.RequestedAt || row.requested_at || ""}</td><td>${row.Model || row.model || ""}</td><td>${badge(row.Status || row.status || "")}</td><td>${row.Billed || row.billed || 0}</td></tr>`).join("") || `<tr><td colspan="4">${lang === "vi" ? "Chưa có lượt gọi." : "No calls yet."}</td></tr>`;
 };
 </script>
 </body>

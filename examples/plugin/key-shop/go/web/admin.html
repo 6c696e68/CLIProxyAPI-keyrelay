@@ -5,53 +5,121 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>API Keys</title>
 <style>
-body{margin:0;font:16px/1.5 ui-sans-serif,system-ui,sans-serif;background:#f6f7f9;color:#17202a}
-main{max-width:1100px;margin:0 auto;padding:28px 20px}
-.card{background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:16px;margin:12px 0}
-input,button{padding:8px;border-radius:8px;border:1px solid #c5ced8}
-button{background:#12344d;color:#fff;border:0;font-weight:600}
-table{width:100%;border-collapse:collapse}
-th,td{text-align:left;padding:8px;border-bottom:1px solid #e6ebf0;font-size:14px}
-.secret{font-family:ui-monospace,monospace}
+:root {
+  --bg-secondary: #faf9f5; --bg-primary: #f0eee8; --bg-tertiary: #e9e6df;
+  --text-primary: #2d2a26; --text-secondary: #6d6760; --text-tertiary: #a29c95;
+  --border-color: #e3e1db; --border-hover: #cecac4;
+  --primary-color: #8b8680; --primary-hover: #7f7a74; --primary-contrast: #fff;
+  --error-color: #c65746;
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+[data-theme="dark"] {
+  --bg-secondary: #151412; --bg-primary: #1d1b18; --bg-tertiary: #262320;
+  --text-primary: #f6f4f1; --text-secondary: #c9c3bb; --text-tertiary: #9c958d;
+  --border-color: #3a3530; --border-hover: #5a544d; --primary-hover: #9a948e;
+  --shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg-secondary); color: var(--text-primary); font-family: var(--font); }
+main { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; display: flex; flex-direction: column; gap: 18px; }
+.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; }
+h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.4px; }
+.desc { margin: 6px 0 0; color: var(--text-secondary); font-size: 14px; }
+.card {
+  display: flex; flex-direction: column; gap: 16px; padding: 22px 24px;
+  border: 1px solid var(--border-color); border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
+}
+.card-head { display: flex; gap: 10px; align-items: center; padding-bottom: 14px; border-bottom: 1px solid var(--border-color); }
+.index {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 28px;
+  border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-secondary);
+  font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: 0.08em;
+}
+h2 { margin: 0; font-size: 16px; font-weight: 700; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+input {
+  min-width: 140px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px;
+  background: var(--bg-secondary); color: var(--text-primary); font: inherit;
+}
+input:focus { outline: none; border-color: var(--border-hover); }
+button {
+  display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent;
+  border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
+}
+.primary { background: var(--primary-color); border-color: var(--primary-color); color: var(--primary-contrast); }
+.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+.secondary { background: var(--bg-tertiary); border-color: var(--border-color); color: var(--text-primary); }
+.ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
+.ghost:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.danger { background: var(--error-color); border-color: var(--error-color); color: #fff; }
+.table-wrap { border: 1px solid var(--border-color); border-radius: 8px; overflow: auto; background: var(--bg-primary); }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+th { background: var(--bg-tertiary); color: var(--text-secondary); font-size: 12px; font-weight: 500; text-align: left; padding: 10px 14px; }
+td { padding: 12px 14px; border-top: 1px solid var(--border-color); vertical-align: middle; }
+tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.secret { font-family: var(--mono); color: var(--error-color); min-height: 1.4em; }
+.check { color: var(--text-secondary); font-size: 14px; font-weight: 500; display: inline-flex; gap: 6px; align-items: center; }
 </style>
 </head>
 <body>
 <main>
-<h1>API Keys</h1>
-<section class="card">
-<label>Management key <input id="mgmt" type="password"></label>
-<button id="save" type="button">Lưu phiên</button>
-</section>
-<section class="card">
-<h2>Tạo key</h2>
-<input id="label" placeholder="label">
-<input id="customer" placeholder="customer">
-<input id="ttl" type="number" value="604800" title="ttl seconds, 0 with never means unlimited">
-<input id="limit" type="number" value="100000000">
-<label><input id="never" type="checkbox"> Không hết hạn</label>
-<label><input id="unlimited" type="checkbox"> Không giới hạn token</label>
-<button id="create" type="button">Tạo</button>
-<p id="once" class="secret"></p>
-</section>
-<section class="card">
-<table><thead><tr><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
-</section>
-<section class="card">
-<h2>Sửa key</h2>
-<input id="edit-id" placeholder="id">
-<input id="edit-ttl" type="number" placeholder="ttl seconds">
-<input id="edit-limit" type="number" placeholder="token limit">
-<button id="save-edit" type="button">Lưu hạn</button>
-<button id="enable" type="button">Bật</button>
-</section>
-<section class="card">
-<h2>Request</h2>
-<input id="req-id" placeholder="key id">
-<button id="load-req" type="button">Xem request</button>
-<table><thead><tr><th>Thời gian</th><th>Model</th><th>Status</th><th>Token</th></tr></thead><tbody id="reqs"></tbody></table>
-</section>
+  <header class="page-head">
+    <div>
+      <h1>API Keys</h1>
+      <p class="desc">Tạo key để bán. Mặc định 7 ngày và 100.000.000 token. Secret chỉ hiện một lần.</p>
+    </div>
+    <div class="row">
+      <input id="mgmt" type="password" placeholder="Management key">
+      <button id="save" class="secondary" type="button">Lưu phiên</button>
+    </div>
+  </header>
+  <section class="card">
+    <div class="card-head"><span class="index">01</span><h2>Tạo key</h2></div>
+    <div class="row">
+      <input id="label" placeholder="label">
+      <input id="customer" placeholder="customer">
+      <input id="ttl" type="number" value="604800" title="giây">
+      <input id="limit" type="number" value="100000000">
+      <label class="check"><input id="never" type="checkbox"> Không hết hạn</label>
+      <label class="check"><input id="unlimited" type="checkbox"> Không giới hạn token</label>
+      <button id="create" class="primary" type="button">Tạo</button>
+    </div>
+    <p id="once" class="secret"></p>
+  </section>
+  <section class="card">
+    <div class="card-head"><span class="index">02</span><h2>Danh sách</h2></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head"><span class="index">03</span><h2>Sửa hạn</h2></div>
+    <div class="row">
+      <input id="edit-id" placeholder="id">
+      <input id="edit-ttl" type="number" placeholder="ttl seconds">
+      <input id="edit-limit" type="number" placeholder="token limit">
+      <button id="save-edit" class="primary" type="button">Lưu</button>
+      <button id="enable" class="secondary" type="button">Bật</button>
+    </div>
+  </section>
+  <section class="card">
+    <div class="card-head"><span class="index">04</span><h2>Request</h2></div>
+    <div class="row"><input id="req-id" placeholder="key id"><button id="load-req" class="secondary" type="button">Xem</button></div>
+    <div class="table-wrap">
+      <table><thead><tr><th>Thời gian</th><th>Model</th><th>Status</th><th>Token</th></tr></thead><tbody id="reqs"></tbody></table>
+    </div>
+  </section>
 </main>
 <script>
+(function syncTheme() {
+  const apply = (theme) => { if (theme) document.documentElement.dataset.theme = theme; };
+  try { apply(parent.document.documentElement.dataset.theme); } catch (e) {}
+  if (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches) apply("dark");
+})();
 const mgmt = document.getElementById("mgmt");
 mgmt.value = sessionStorage.getItem("keyshop.mgmt") || "";
 document.getElementById("save").onclick = () => sessionStorage.setItem("keyshop.mgmt", mgmt.value);
@@ -63,13 +131,13 @@ function idOf(key) { return key.ID || key.id; }
 async function load() {
   const data = await api("GET", "/v0/management/plugins/key-shop/keys");
   const keys = data.keys || [];
-  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td>${key.Display || key.display}</td><td>${key.Status || key.status}</td><td>${key.TokensUsed || 0}</td><td>${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
-    <button data-id="${idOf(key)}" data-act="disable">Tắt</button>
-    <button data-id="${idOf(key)}" data-act="reset">Reset</button>
-    <button data-id="${idOf(key)}" data-act="rotate">Rotate</button>
-    <button data-id="${idOf(key)}" data-act="delete">Xóa</button>
-    <button data-id="${idOf(key)}" data-act="logs">Log</button>
-  </td></tr>`).join("");
+  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td class="mono">${key.Display || key.display}</td><td>${key.Status || key.status}</td><td class="mono">${key.TokensUsed || 0}</td><td class="mono">${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
+    <button class="ghost" data-id="${idOf(key)}" data-act="disable">Tắt</button>
+    <button class="ghost" data-id="${idOf(key)}" data-act="reset">Reset</button>
+    <button class="ghost" data-id="${idOf(key)}" data-act="rotate">Rotate</button>
+    <button class="danger" data-id="${idOf(key)}" data-act="delete">Xóa</button>
+    <button class="ghost" data-id="${idOf(key)}" data-act="logs">Log</button>
+  </td></tr>`).join("") || "<tr><td colspan='6'>Chưa có key.</td></tr>";
 }
 document.getElementById("create").onclick = async () => {
   const data = await api("POST", "/v0/management/plugins/key-shop/keys", {
@@ -87,7 +155,7 @@ async function logs(id) {
   document.getElementById("req-id").value = id;
   const data = await api("GET", "/v0/management/plugins/key-shop/requests?id=" + encodeURIComponent(id) + "&limit=30");
   const rows = data.requests || [];
-  document.getElementById("reqs").innerHTML = rows.map((row) => `<tr><td>${row.RequestedAt || ""}</td><td>${row.Model || ""}</td><td>${row.Status || ""}</td><td>${row.Billed || 0}</td></tr>`).join("") || "<tr><td colspan='4'>Chưa có request.</td></tr>";
+  document.getElementById("reqs").innerHTML = rows.map((row) => `<tr><td>${row.RequestedAt || ""}</td><td>${row.Model || ""}</td><td>${row.Status || ""}</td><td class="mono">${row.Billed || 0}</td></tr>`).join("") || "<tr><td colspan='4'>Chưa có request.</td></tr>";
 }
 document.getElementById("rows").onclick = async (ev) => {
   const btn = ev.target.closest("button");
