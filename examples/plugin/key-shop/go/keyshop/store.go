@@ -153,12 +153,16 @@ func Open(cfg Config) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
 	store := &Store{db: db, cfg: cfg}
 	if err := store.migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -371,7 +375,12 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row, err := s.lookup(HashSecret(in.Secret))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Admission{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	row, err := s.lookupOn(tx, HashSecret(in.Secret))
 	if err == sql.ErrNoRows {
 		return Admission{Code: "key_not_found"}, nil
 	}
@@ -388,7 +397,7 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 	if row.expires != nil && !row.expires.After(now) {
 		return Admission{Code: "key_expired", KeyID: row.id}, nil
 	}
-	reserved, err := s.reserved(row.id)
+	reserved, err := s.reservedOn(tx, row.id)
 	if err != nil {
 		return Admission{}, err
 	}
@@ -410,12 +419,36 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 		}
 		amount = want
 	}
-	_, err = s.db.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)`,
-		in.RequestID, row.id, amount, now.Format(time.RFC3339Nano))
-	if err != nil {
+	if _, err = tx.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)`,
+		in.RequestID, row.id, amount, now.Format(time.RFC3339Nano)); err != nil {
+		return Admission{}, err
+	}
+	if err := tx.Commit(); err != nil {
 		return Admission{}, err
 	}
 	return Admission{Allowed: true, KeyID: row.id, Reserved: amount}, nil
+}
+
+func (s *Store) RecordRejection(requestID, keyID string, httpStatus int) error {
+	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(keyID) == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var exists int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM requests WHERE request_id=?`, requestID).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		return nil
+	}
+	now := s.cfg.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.Exec(`UPDATE keys SET request_count=request_count+1, last_used_at=? WHERE id=?`, now, keyID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO requests (request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		requestID, keyID, "", "http", "", "rejected", httpStatus, 0, 0, 0, 0, 0, 0, 0, now, now)
+	return err
 }
 
 func (s *Store) NoteUsage(note UsageNote) error {
@@ -503,8 +536,15 @@ func (s *Store) Requests(q RequestQuery) ([]Request, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at FROM requests WHERE (?='' OR key_id=?) AND (?='' OR status=?) AND (?='' OR model=?) ORDER BY requested_at DESC LIMIT ?`,
-		q.KeyID, q.KeyID, q.Status, q.Status, q.Model, q.Model, limit)
+	from, to := formatTime(&q.From), formatTime(&q.To)
+	if q.From.IsZero() {
+		from = ""
+	}
+	if q.To.IsZero() {
+		to = ""
+	}
+	rows, err := s.db.Query(`SELECT request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at FROM requests WHERE (?='' OR key_id=?) AND (?='' OR status=?) AND (?='' OR model=?) AND (?='' OR requested_at>=?) AND (?='' OR requested_at<=?) ORDER BY requested_at DESC LIMIT ?`,
+		q.KeyID, q.KeyID, q.Status, q.Status, q.Model, q.Model, from, from, to, to, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -581,10 +621,18 @@ type keyRow struct {
 	deleted                                          bool
 }
 
+type rowQuery interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func (s *Store) lookup(hash []byte) (keyRow, error) {
+	return s.lookupOn(s.db, hash)
+}
+
+func (s *Store) lookupOn(q rowQuery, hash []byte) (keyRow, error) {
 	var row keyRow
 	var created, expires, lastUsed, deleted sql.NullString
-	err := s.db.QueryRow(`SELECT id, status, display_prefix, display_last4, label, customer, note, created_at, expires_at, token_limit, tokens_used, request_count, last_used_at, deleted_at FROM keys WHERE secret_hash=?`, hash).
+	err := q.QueryRow(`SELECT id, status, display_prefix, display_last4, label, customer, note, created_at, expires_at, token_limit, tokens_used, request_count, last_used_at, deleted_at FROM keys WHERE secret_hash=?`, hash).
 		Scan(&row.id, &row.status, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &deleted)
 	if err != nil {
 		return keyRow{}, err
@@ -630,8 +678,12 @@ func (s *Store) computed(row keyRow, reserved int64) string {
 }
 
 func (s *Store) reserved(id string) (int64, error) {
+	return s.reservedOn(s.db, id)
+}
+
+func (s *Store) reservedOn(q rowQuery, id string) (int64, error) {
 	var n sql.NullInt64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(reserved_tokens),0) FROM reservations WHERE key_id=?`, id).Scan(&n)
+	err := q.QueryRow(`SELECT COALESCE(SUM(reserved_tokens),0) FROM reservations WHERE key_id=?`, id).Scan(&n)
 	return n.Int64, err
 }
 

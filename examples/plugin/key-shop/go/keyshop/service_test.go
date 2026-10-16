@@ -1,6 +1,7 @@
 package keyshop
 
 import (
+	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -151,6 +152,51 @@ func TestHostABIDecodesAdmission(t *testing.T) {
 	decodeResult(t, call(t, svc, "request.intercept_before", interceptBody(secret, "abi2", "/v1/chat/completions", false)), &denied)
 	if !denied.Terminate || denied.StatusCode != 402 {
 		t.Fatalf("denied = %+v", denied)
+	}
+}
+
+func TestQuotaDenialUsesInsufficientQuotaAndLogsRejection(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 1)
+	_ = call(t, svc, "request.intercept_before", interceptBody(secret, "bill", "/v1/chat/completions", true))
+	_ = call(t, svc, "usage.handle", `{"RequestID":"bill","Failed":false,"Detail":{"InputTokens":1}}`)
+	_ = call(t, svc, "request.complete", `{"RequestID":"bill","Outcome":"succeeded"}`)
+	raw := call(t, svc, "request.intercept_before", interceptBody(secret, "over", "/v1/chat/completions", true))
+	var denied struct {
+		StatusCode   int
+		ResponseBody []byte
+	}
+	decodeResult(t, raw, &denied)
+	if denied.StatusCode != 402 || !bytes.Contains(denied.ResponseBody, []byte(`"type":"insufficient_quota"`)) {
+		t.Fatalf("denial body missing quota type")
+	}
+	var listedEnv struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/requests","Query":{"status":["rejected"]}}`), &listedEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(listedEnv.Result.Body, []byte(`"rejected"`)) {
+		t.Fatal("rejected request was not logged")
+	}
+}
+
+func TestSessionReturnsBaseURL(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 10)
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Headers":{"Authorization":["Bearer `+secret+`"],"Host":["192.168.8.1:8330"],"X-Forwarded-Proto":["http"]}}`)
+	var env struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(env.Result.Body, []byte(`"base_url":"http://192.168.8.1:8330/v1"`)) {
+		t.Fatal("session missing base_url")
 	}
 }
 

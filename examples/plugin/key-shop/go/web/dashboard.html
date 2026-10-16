@@ -76,7 +76,7 @@ document.getElementById("open").onclick = async () => {
     ["Limit", keyInfo.TokenLimit || keyInfo.token_limit || 0],
     ["Expires", keyInfo.ExpiresAt || keyInfo.expires_at || "never"]
   ].map(([k,v]) => `<div class="stat"><div class="muted">${k}</div><strong>${v}</strong></div>`).join("");
-  document.getElementById("base").textContent = "Base URL: " + location.origin + "/v1";
+  document.getElementById("base").textContent = "Base URL: " + (body.base_url || (location.origin + "/v1"));
   document.getElementById("rows").innerHTML = requests.map((row) => `<tr><td>${row.RequestedAt || row.requested_at || ""}</td><td>${row.Model || row.model || ""}</td><td>${row.Status || row.status || ""}</td><td>${row.Billed || row.billed || 0}</td></tr>`).join("") || `<tr><td colspan="4">${lang === "vi" ? "Chưa có lượt gọi." : "No calls yet."}</td></tr>`;
 };
 </script>

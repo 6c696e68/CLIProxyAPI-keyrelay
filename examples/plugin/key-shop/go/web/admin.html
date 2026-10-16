@@ -6,7 +6,7 @@
 <title>API Keys</title>
 <style>
 body{margin:0;font:16px/1.5 ui-sans-serif,system-ui,sans-serif;background:#f6f7f9;color:#17202a}
-main{max-width:980px;margin:0 auto;padding:28px 20px}
+main{max-width:1100px;margin:0 auto;padding:28px 20px}
 .card{background:#fff;border:1px solid #d8dee6;border-radius:12px;padding:16px;margin:12px 0}
 input,button{padding:8px;border-radius:8px;border:1px solid #c5ced8}
 button{background:#12344d;color:#fff;border:0;font-weight:600}
@@ -26,13 +26,29 @@ th,td{text-align:left;padding:8px;border-bottom:1px solid #e6ebf0;font-size:14px
 <h2>Tạo key</h2>
 <input id="label" placeholder="label">
 <input id="customer" placeholder="customer">
-<input id="ttl" type="number" value="604800">
+<input id="ttl" type="number" value="604800" title="ttl seconds, 0 with never means unlimited">
 <input id="limit" type="number" value="100000000">
+<label><input id="never" type="checkbox"> Không hết hạn</label>
+<label><input id="unlimited" type="checkbox"> Không giới hạn token</label>
 <button id="create" type="button">Tạo</button>
 <p id="once" class="secret"></p>
 </section>
 <section class="card">
-<table><thead><tr><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+<table><thead><tr><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+</section>
+<section class="card">
+<h2>Sửa key</h2>
+<input id="edit-id" placeholder="id">
+<input id="edit-ttl" type="number" placeholder="ttl seconds">
+<input id="edit-limit" type="number" placeholder="token limit">
+<button id="save-edit" type="button">Lưu hạn</button>
+<button id="enable" type="button">Bật</button>
+</section>
+<section class="card">
+<h2>Request</h2>
+<input id="req-id" placeholder="key id">
+<button id="load-req" type="button">Xem request</button>
+<table><thead><tr><th>Thời gian</th><th>Model</th><th>Status</th><th>Token</th></tr></thead><tbody id="reqs"></tbody></table>
 </section>
 </main>
 <script>
@@ -43,26 +59,64 @@ async function api(method, path, body) {
   const res = await fetch(path, {method, headers:{"Authorization":"Bearer "+mgmt.value, "Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
   return res.json();
 }
+function idOf(key) { return key.ID || key.id; }
 async function load() {
   const data = await api("GET", "/v0/management/plugins/key-shop/keys");
   const keys = data.keys || [];
-  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td>${key.Display || key.display}</td><td>${key.Status || key.status}</td><td>${key.TokensUsed || 0}</td><td>${key.TokenLimit || 0}</td><td><button data-id="${key.ID || key.id}" data-act="disable">Disable</button> <button data-id="${key.ID || key.id}" data-act="rotate">Rotate</button></td></tr>`).join("");
+  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td>${key.Display || key.display}</td><td>${key.Status || key.status}</td><td>${key.TokensUsed || 0}</td><td>${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
+    <button data-id="${idOf(key)}" data-act="disable">Tắt</button>
+    <button data-id="${idOf(key)}" data-act="reset">Reset</button>
+    <button data-id="${idOf(key)}" data-act="rotate">Rotate</button>
+    <button data-id="${idOf(key)}" data-act="delete">Xóa</button>
+    <button data-id="${idOf(key)}" data-act="logs">Log</button>
+  </td></tr>`).join("");
 }
 document.getElementById("create").onclick = async () => {
-  const data = await api("POST", "/v0/management/plugins/key-shop/keys", {label: document.getElementById("label").value, customer: document.getElementById("customer").value, ttl_seconds: Number(document.getElementById("ttl").value), token_limit: Number(document.getElementById("limit").value)});
+  const data = await api("POST", "/v0/management/plugins/key-shop/keys", {
+    label: document.getElementById("label").value,
+    customer: document.getElementById("customer").value,
+    ttl_seconds: Number(document.getElementById("ttl").value),
+    token_limit: Number(document.getElementById("limit").value),
+    never_expires: document.getElementById("never").checked,
+    unlimited_tokens: document.getElementById("unlimited").checked
+  });
   document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : "create failed";
   await load();
 };
+async function logs(id) {
+  document.getElementById("req-id").value = id;
+  const data = await api("GET", "/v0/management/plugins/key-shop/requests?id=" + encodeURIComponent(id) + "&limit=30");
+  const rows = data.requests || [];
+  document.getElementById("reqs").innerHTML = rows.map((row) => `<tr><td>${row.RequestedAt || ""}</td><td>${row.Model || ""}</td><td>${row.Status || ""}</td><td>${row.Billed || 0}</td></tr>`).join("") || "<tr><td colspan='4'>Chưa có request.</td></tr>";
+}
 document.getElementById("rows").onclick = async (ev) => {
   const btn = ev.target.closest("button");
   if (!btn) return;
-  if (btn.dataset.act === "disable") await api("POST", "/v0/management/plugins/key-shop/keys/update", {id: btn.dataset.id, status: "disabled"});
+  const id = btn.dataset.id;
+  if (btn.dataset.act === "disable") await api("POST", "/v0/management/plugins/key-shop/keys/update", {id, status: "disabled"});
+  if (btn.dataset.act === "reset") await api("POST", "/v0/management/plugins/key-shop/keys/reset-usage", {id});
+  if (btn.dataset.act === "delete") await api("POST", "/v0/management/plugins/key-shop/keys/delete", {id});
   if (btn.dataset.act === "rotate") {
-    const data = await api("POST", "/v0/management/plugins/key-shop/keys/rotate", {id: btn.dataset.id});
+    const data = await api("POST", "/v0/management/plugins/key-shop/keys/rotate", {id});
     document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : "rotate failed";
   }
+  if (btn.dataset.act === "logs") { await logs(id); return; }
   await load();
 };
+document.getElementById("save-edit").onclick = async () => {
+  const body = {id: document.getElementById("edit-id").value};
+  const ttl = document.getElementById("edit-ttl").value;
+  const limit = document.getElementById("edit-limit").value;
+  if (ttl !== "") body.ttl_seconds = Number(ttl);
+  if (limit !== "") body.token_limit = Number(limit);
+  await api("POST", "/v0/management/plugins/key-shop/keys/update", body);
+  await load();
+};
+document.getElementById("enable").onclick = async () => {
+  await api("POST", "/v0/management/plugins/key-shop/keys/update", {id: document.getElementById("edit-id").value, status: "active"});
+  await load();
+};
+document.getElementById("load-req").onclick = () => logs(document.getElementById("req-id").value);
 if (mgmt.value) load();
 </script>
 </body>

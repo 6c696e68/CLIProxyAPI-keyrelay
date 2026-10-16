@@ -2,6 +2,7 @@ package keyshop
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -184,6 +185,46 @@ func TestUnlimitedLimitIsNeverExhausted(t *testing.T) {
 	admission, err := store.Admit(AdmitInput{Secret: secret, RequestID: "u2", Path: "/v1/chat/completions", Generate: true})
 	if err != nil || !admission.Allowed {
 		t.Fatalf("unlimited admission=%+v err=%v", admission, err)
+	}
+}
+
+func TestDatabaseFileIsOwnerOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "keys.db")
+	store, err := Open(Config{DataFile: path, Now: func() time.Time { return time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestRequestsFilterByTimeAndRejectionIsLogged(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: -60, TokenLimit: 10, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := store.Admit(AdmitInput{Secret: secret, RequestID: "denied", Path: "/v1/chat/completions", Generate: true})
+	if err != nil || admission.Code != "key_expired" {
+		t.Fatalf("admission=%+v err=%v", admission, err)
+	}
+	if err := store.RecordRejection("denied", key.ID, 403); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.Requests(RequestQuery{KeyID: key.ID, From: now.Add(-time.Minute), To: now.Add(time.Minute)})
+	if err != nil || len(rows) != 1 || rows[0].Status != "rejected" || rows[0].Billed != 0 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	later, err := store.Requests(RequestQuery{KeyID: key.ID, From: now.Add(time.Hour)})
+	if err != nil || len(later) != 0 {
+		t.Fatalf("later=%+v err=%v", later, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -119,21 +120,20 @@ func (s *Service) intercept(payload []byte) map[string]any {
 		MaxTokens: maxTokens(req.Body), Generate: generate,
 	})
 	if err != nil {
-		return terminate(http.StatusServiceUnavailable, "key_store_unavailable", "key store unavailable")
+		return terminate(http.StatusServiceUnavailable, "key_store_unavailable", "key store unavailable", "server_error")
 	}
 	if admission.Allowed || admission.Ignored {
 		return map[string]any{}
 	}
+	status, errType := http.StatusUnauthorized, "invalid_request_error"
 	switch admission.Code {
 	case "token_limit_exceeded":
-		return terminate(http.StatusPaymentRequired, "token_limit_exceeded", "token limit exceeded")
-	case "key_expired":
-		return terminate(http.StatusForbidden, "key_expired", "api key expired")
-	case "key_disabled":
-		return terminate(http.StatusForbidden, "key_disabled", "api key disabled")
-	default:
-		return terminate(http.StatusUnauthorized, "invalid_api_key", "invalid api key")
+		status, errType = http.StatusPaymentRequired, "insufficient_quota"
+	case "key_expired", "key_disabled":
+		status = http.StatusForbidden
 	}
+	_ = s.store.RecordRejection(req.RequestID, admission.KeyID, status)
+	return terminate(status, admission.Code, denialMessage(admission.Code), errType)
 }
 
 func (s *Service) noteUsage(payload []byte) {
@@ -315,7 +315,8 @@ func (s *Service) delete(body []byte) map[string]any {
 }
 
 func (s *Service) requests(q map[string][]string) map[string]any {
-	rows, err := s.store.Requests(RequestQuery{KeyID: queryOne(q, "id"), Status: queryOne(q, "status"), Model: queryOne(q, "model")})
+	limit, _ := strconv.Atoi(queryOne(q, "limit"))
+	rows, err := s.store.Requests(RequestQuery{KeyID: queryOne(q, "id"), Status: queryOne(q, "status"), Model: queryOne(q, "model"), From: parseTimeQuery(queryOne(q, "from")), To: parseTimeQuery(queryOne(q, "to")), Limit: limit})
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "requests failed")
 	}
@@ -352,7 +353,9 @@ func (s *Service) session(headers map[string][]string) map[string]any {
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "session failed")
 	}
-	return jsonResponse(http.StatusOK, session)
+	return jsonResponse(http.StatusOK, map[string]any{
+		"Key": session.Key, "Requests": session.Requests, "base_url": requestBaseURL(headers),
+	})
 }
 
 func unsupportedPath(path string) bool {
@@ -368,9 +371,57 @@ func unsupportedPath(path string) bool {
 	}
 }
 
-func terminate(status int, code, message string) map[string]any {
-	body, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "invalid_request_error", "code": code}})
+func terminate(status int, code, message, errType string) map[string]any {
+	body, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
 	return map[string]any{"Terminate": true, "StatusCode": status, "ResponseBody": body}
+}
+
+func denialMessage(code string) string {
+	switch code {
+	case "token_limit_exceeded":
+		return "token limit exceeded"
+	case "key_expired":
+		return "api key expired"
+	case "key_disabled":
+		return "api key disabled"
+	default:
+		return "invalid api key"
+	}
+}
+
+func requestBaseURL(headers map[string][]string) string {
+	host := headerValue(headers, "Host")
+	if host == "" {
+		host = headerValue(headers, "X-Forwarded-Host")
+	}
+	if host == "" {
+		return ""
+	}
+	scheme := headerValue(headers, "X-Forwarded-Proto")
+	if scheme == "" {
+		scheme = "http"
+	}
+	return scheme + "://" + host + "/v1"
+}
+
+func headerValue(headers map[string][]string, name string) string {
+	for key, values := range headers {
+		if strings.EqualFold(key, name) && len(values) > 0 {
+			return strings.TrimSpace(values[0])
+		}
+	}
+	return ""
+}
+
+func parseTimeQuery(value string) time.Time {
+	if value == "" {
+		return time.Time{}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func maxTokens(body []byte) int64 {
