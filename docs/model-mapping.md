@@ -82,7 +82,7 @@ Do not implement per-executor remaps. Keep the rewrite in the handler hook so Op
 
 ## Router
 
-GL-MT6000 `192.168.8.1` is musl OpenWrt plus Entware glibc. Do not start the GLIBC 2.17 plugin-capable linux/arm64 binary with the native musl interpreter (`/lib/ld-linux-aarch64.so.1`). Run it as `/opt/lib/ld-linux-aarch64.so.1 --library-path /opt/lib` with `LD_PRELOAD` unset. Do not ship `CGO_ENABLED=0` / `*_no-plugin`; `plugins.enabled: true` does not load `.so` plugins on that build. Set `plugins.dir` to an absolute path, and set `plugins.configs.<id>.enabled: true` per plugin. Plugin `.so` files must be GLIBC ABI <= 2.27. Replace only `/root/.cliproxyapi/cli-proxy-api`. Never overwrite `config.yaml` or the auth directory; mapping lives there and is not a plugin.
+GL-MT6000 `192.168.8.1` is musl OpenWrt plus Entware glibc. The live service `/etc/init.d/cliproxyapi` runs `/root/.cliproxyapi/run-protected.sh`, which execs `/root/.cliproxyapi/cli-proxy-api` directly on port `8319`. The binary's ELF interpreter must be `/opt/ld-linux-aarch64.so.1`, not the musl `/lib/ld-linux-aarch64.so.1`. `LD_PRELOAD` must be unset. Do not ship `CGO_ENABLED=0` / `*_no-plugin`. Plugin `.so` files must be GLIBC ABI <= 2.27 and are loaded from `/root/.cliproxyapi/plugins/linux/arm64/`. Replace only the server binary, `ch-relay-vippro.so`, and `static/management.html`. Never overwrite `config.yaml` or the auth directory. See the Fork rule in `AGENTS.md`.
 
 ## Agent checklist
 

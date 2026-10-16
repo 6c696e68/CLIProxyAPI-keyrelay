@@ -2,6 +2,40 @@
 
 Go 1.26+ proxy server providing OpenAI/Gemini/Claude/Codex compatible APIs with OAuth and round-robin load balancing.
 
+## Fork rule
+
+This checkout is the custom fork. Before any upstream sync, panel change, plugin change, or router deploy, follow this section. Do not drop a custom flow because upstream moved.
+
+- Branch: `feat/model-mapping`. Sync source is `upstream/main` only. Do not merge old `origin/feat/model-mapping` history.
+- Push only when asked, to `origin` (`lantrinh1999/CLIProxyAPI` and `lantrinh1999/Cli-Proxy-API-Management-Center`). Git HTTPS may be logged in as `6c696e68`; use the `lantrinh1999` GitHub account. After a rebase, `--force-with-lease` that feature branch only. Never force `main`.
+- Panel repo: `../Cli-Proxy-API-Management-Center`, same branch. Keep both repos in step.
+- Backup before sync or deploy: branch `feat/model-mapping-pre-sync-<date>` plus a bundle under `/Volumes/SSD/Developments/fork/backups/`. Never touch live `~/.cliproxyapi/config.yaml` or `auth/` except a disposable copy for smoke.
+
+Custom flows that must survive:
+
+- Global model mapping runs before provider routing. First enabled rule wins. Thinking suffixes stay attached. Default `force-mapping` echoes the client model. v8 key is `routing.model-mapping`. No `/v0/management` route, no `/v1/models` injection, no per-executor remap.
+- `disable-subagents` rejects spawned Codex threads, then strips spawn tool namespaces, on HTTP Responses and the Responses websocket.
+- Websocket auth, passthrough, and compaction use `StreamRouteModel`, not the raw client model.
+- `ch-relay` and `ch-relay-vippro` forward through host relay callbacks. The plugin does not receive or refresh Codex tokens.
+- VipPro management stays `GET /v0/management/ch-relay-vippro/stats` and `POST /v0/management/ch-relay-vippro/accounts/check`. The dashboard is a plugin resource iframe, not a public status route.
+- Request paths read config with `CurrentConfig()`. Management writes hold `h.mu` and call `persistLocked`. Payload rules stay the last semantic barrier in executors.
+
+Panel flows that must survive:
+
+- Model Mapping tab reads and writes `/v8/management/routing/model-mapping`, with the grouped searchable target select.
+- Auth Files and Quota keep sort-by-plan: Plus/Pro before Free, filename-suffix fallback, unknown last. Put that sort on the current upstream cards, not a copy of the old page.
+- Plugin config editing stays in `PluginConfigSheet`, including `ch-relay-vippro` model editing and validation. Do not move the editor back into `PluginsPage`.
+- Plugin menus open `/plugins/:pluginId` (`PluginResourcePage` iframe). Do not mount `VipProPage` in `MainRoutes`.
+- Restyle custom UI onto the current upstream layout. Do not restore the old shell. Add new i18n keys to all six locales.
+
+Conflict rule: take upstream infrastructure (keepalive, ETag, shadow-copy plugin loading, `CurrentConfig`, `persistLocked`, new quota cards). Keep the custom decision. If the custom implementation is outdated, rewrite it and keep the flow. Do not edit `/v0/management` except to compile.
+
+Router, only when asked to deploy:
+
+- GL-MT6000 `root@192.168.8.1`, service `/etc/init.d/cliproxyapi`, port `8319`, start script `/root/.cliproxyapi/run-protected.sh`. That script execs the binary directly. Build `CGO_ENABLED=1 GOOS=linux GOARCH=arm64` with `CC='zig cc -target aarch64-linux-gnu.2.27'`. Do not pass `--dynamic-linker` to zig. If the ELF interpreter is `/lib/ld-linux-aarch64.so.1`, rewrite that exact string to `/opt/ld-linux-aarch64.so.1`. `LD_PRELOAD` must be unset. Do not ship `CGO_ENABLED=0`.
+- Replace only `/root/.cliproxyapi/cli-proxy-api`, `/root/.cliproxyapi/plugins/linux/arm64/ch-relay-vippro.so`, and `/root/.cliproxyapi/static/management.html`. Date-suffix backups first. Never replace `config.yaml` or auth. Do not touch `cliproxyapi-v8030`. `disable-auto-update-panel` is already true; do not change other config keys.
+- Rebuild the `.so` against the new host. Restart the init script. Confirm the log says `ch-relay-vippro` loaded and `management.html` size matches the artifact. Test locally before any router copy.
+
 ## Repository
 - GitHub: https://github.com/router-for-me/CLIProxyAPI
 
