@@ -57,6 +57,7 @@ type CreateInput struct {
 
 type UpdateInput struct {
 	ID, Label, Customer, Note, Status string
+	LabelSet, CustomerSet, NoteSet    bool
 	StatusSet                         bool
 	TTLSeconds                        int64
 	TTLSet, NeverExpires              bool
@@ -300,6 +301,16 @@ func (s *Store) Update(in UpdateInput) (Key, error) {
 	if in.StatusSet {
 		status = in.Status
 	}
+	label, customer, note := key.Label, key.Customer, key.Note
+	if in.LabelSet {
+		label = in.Label
+	}
+	if in.CustomerSet {
+		customer = in.Customer
+	}
+	if in.NoteSet {
+		note = in.Note
+	}
 	expires := key.ExpiresAt
 	if in.NeverExpires {
 		expires = nil
@@ -313,7 +324,7 @@ func (s *Store) Update(in UpdateInput) (Key, error) {
 		limit = in.TokenLimit
 	}
 	_, err = s.db.Exec(`UPDATE keys SET label=?, customer=?, note=?, status=?, expires_at=?, token_limit=? WHERE id=? AND deleted_at IS NULL`,
-		in.Label, in.Customer, in.Note, status, formatTime(expires), limit, in.ID)
+		label, customer, note, status, formatTime(expires), limit, in.ID)
 	if err != nil {
 		return Key{}, err
 	}

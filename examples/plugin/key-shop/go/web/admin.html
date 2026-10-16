@@ -93,7 +93,7 @@ tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent
   <section class="card">
     <div class="card-head"><span class="index">02</span><h2>Danh sách</h2></div>
     <div class="table-wrap">
-      <table><thead><tr><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+      <table><thead><tr><th>Tên</th><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
     </div>
   </section>
   <section class="card">
@@ -125,19 +125,20 @@ mgmt.value = sessionStorage.getItem("keyshop.mgmt") || "";
 document.getElementById("save").onclick = () => sessionStorage.setItem("keyshop.mgmt", mgmt.value);
 async function api(method, path, body) {
   const res = await fetch(path, {method, headers:{"Authorization":"Bearer "+mgmt.value, "Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
-  return res.json();
+  const text = await res.text();
+  try { return JSON.parse(text); } catch (e) { return {error: text || res.statusText}; }
 }
 function idOf(key) { return key.ID || key.id; }
 async function load() {
   const data = await api("GET", "/v0/management/plugins/key-shop/keys");
   const keys = data.keys || [];
-  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td class="mono">${key.Display || key.display}</td><td>${key.Status || key.status}</td><td class="mono">${key.TokensUsed || 0}</td><td class="mono">${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
+  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td>${key.Label || key.label || "—"}</td><td class="mono">${key.Display || key.display}</td><td>${key.Status || key.status}</td><td class="mono">${key.TokensUsed || 0}</td><td class="mono">${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
     <button class="ghost" data-id="${idOf(key)}" data-act="disable">Tắt</button>
     <button class="ghost" data-id="${idOf(key)}" data-act="reset">Reset</button>
     <button class="ghost" data-id="${idOf(key)}" data-act="rotate">Rotate</button>
     <button class="danger" data-id="${idOf(key)}" data-act="delete">Xóa</button>
     <button class="ghost" data-id="${idOf(key)}" data-act="logs">Log</button>
-  </td></tr>`).join("") || "<tr><td colspan='6'>Chưa có key.</td></tr>";
+  </td></tr>`).join("") || "<tr><td colspan='7'>Chưa có key.</td></tr>";
 }
 document.getElementById("create").onclick = async () => {
   const data = await api("POST", "/v0/management/plugins/key-shop/keys", {
@@ -148,7 +149,7 @@ document.getElementById("create").onclick = async () => {
     never_expires: document.getElementById("never").checked,
     unlimited_tokens: document.getElementById("unlimited").checked
   });
-  document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : "create failed";
+  document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : (data.error || "create failed");
   await load();
 };
 async function logs(id) {

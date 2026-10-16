@@ -279,8 +279,9 @@ func (s *Service) update(body []byte) map[string]any {
 	}
 	key, err := s.store.Update(UpdateInput{
 		ID: in.ID, Label: in.Label, Customer: in.Customer, Note: in.Note, Status: in.Status,
-		StatusSet: bytes.Contains(body, []byte(`"status"`)), TTLSeconds: in.TTLSeconds,
-		TTLSet: bytes.Contains(body, []byte(`"ttl_seconds"`)), NeverExpires: in.NeverExpires,
+		LabelSet: bytes.Contains(body, []byte(`"label"`)), CustomerSet: bytes.Contains(body, []byte(`"customer"`)),
+		NoteSet: bytes.Contains(body, []byte(`"note"`)), StatusSet: bytes.Contains(body, []byte(`"status"`)),
+		TTLSeconds: in.TTLSeconds, TTLSet: bytes.Contains(body, []byte(`"ttl_seconds"`)), NeverExpires: in.NeverExpires,
 		TokenLimit: in.TokenLimit, TokenLimitSet: bytes.Contains(body, []byte(`"token_limit"`)),
 		UnlimitedTokens: in.UnlimitedTokens,
 	})

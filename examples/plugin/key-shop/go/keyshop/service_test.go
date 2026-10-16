@@ -97,6 +97,47 @@ func TestInterceptBeforeDeniesExhaustedAndExpired(t *testing.T) {
 	}
 }
 
+func TestCreateWithoutNameKeepsNameOnLaterUpdate(t *testing.T) {
+	svc := testService(t)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"","ttl_seconds":3600,"token_limit":10}}`)
+	var created struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(raw, &created); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Secret string
+		Key    struct {
+			ID string
+		}
+	}
+	if err := json.Unmarshal(created.Result.Body, &payload); err != nil || payload.Secret == "" || payload.Key.ID == "" {
+		t.Fatal("empty name create failed")
+	}
+	named := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"shop","ttl_seconds":3600,"token_limit":10}}`)
+	if err := json.Unmarshal(named, &created); err != nil {
+		t.Fatal(err)
+	}
+	var namedPayload struct {
+		Key struct {
+			ID, Label string
+		}
+	}
+	if err := json.Unmarshal(created.Result.Body, &namedPayload); err != nil || namedPayload.Key.Label != "shop" {
+		t.Fatal("name was not saved")
+	}
+	updated := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/update","Body":{"id":"`+namedPayload.Key.ID+`","status":"disabled"}}`)
+	if err := json.Unmarshal(updated, &created); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(created.Result.Body, []byte(`"Label":"shop"`)) {
+		t.Fatal("status update cleared the name")
+	}
+}
+
 func TestManagementCreateAndPublicSession(t *testing.T) {
 	svc := testService(t)
 	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"buyer","token_limit":50}}`)
