@@ -198,11 +198,11 @@ type account struct {
 }
 
 type attempt struct {
-	index     string
-	token     string
-	email     string
-	model     string
-	fallbacks []string
+	index    string
+	token    string
+	email    string
+	model    string
+	fallback bool
 }
 
 type stickyBind struct {
@@ -319,6 +319,7 @@ type preparedCall struct {
 	spanStart  int
 	spanEnd    int
 	attempts   []attempt
+	fallbacks  []attempt
 	path       string
 	session    string
 	client     http.Header
@@ -601,7 +602,14 @@ func privateBaseHost(host string) bool {
 		return true
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || sharedAddress(ip))
+}
+
+// sharedAddress reports the RFC 6598 carrier-grade NAT range 100.64.0.0/10.
+// Tailscale assigns addresses from this range, and Go's IsPrivate does not include it.
+func sharedAddress(ip net.IP) bool {
+	ip4 := ip.To4()
+	return ip4 != nil && ip4[0] == 100 && ip4[1]&0xc0 == 0x40
 }
 
 // normalizePrefix matches normalizeModelPrefix: trim spaces and slashes, and drop values that still contain a slash.
@@ -660,22 +668,28 @@ func normalizeModels(models []modelSpec) ([]modelSpec, error) {
 		model.Name = name
 		model.Alias = alias
 		model.DisplayName = strings.TrimSpace(model.DisplayName)
-		model.Fallback = normalizeFallback(model.Fallback)
+		model.Fallback = normalizeFallback(name, model.Fallback)
 		out = append(out, model)
 	}
 	return out, nil
 }
 
-func normalizeFallback(raw []string) []string {
+// normalizeFallback trims names, drops duplicates, and drops the row's own name.
+func normalizeFallback(self string, raw []string) []string {
 	if len(raw) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(raw))
+	seen := map[string]struct{}{self: {}}
 	for _, item := range raw {
 		name := strings.TrimSpace(item)
 		if name == "" {
 			continue
 		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
 		out = append(out, name)
 	}
 	if len(out) == 0 {
@@ -752,13 +766,13 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "prefix", Type: pluginapi.ConfigFieldTypeString, Description: "Client model prefix. A value that still contains a slash claims nothing."},
 		{Name: "headers", Type: pluginapi.ConfigFieldTypeObject, Description: "Extra upstream headers. $NAME copies a client header. $CPA-SESSION-ID uses the executor session."},
 		{Name: "request-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts on the next account with the same upstream model. 0 sends once. Default 3. Maximum 32. Values outside 0 to 32 are clamped so the plugin stays registered."},
-		{Name: "fallback-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Stored so existing config loads. Requests are not switched to fallback model names. Maximum 3."},
+		{Name: "fallback-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts with the model fallback names after every primary attempt failed because the upstream refused the model. Only the request model changes; response bytes are not touched. 0 disables fallback. Maximum 3."},
 		{Name: "rotation-mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"round-robin", "fill-first", "least-recent", "sticky"}, Description: "Codex account rotation. round-robin keeps a successful access token and moves to the next account after one upstream error."},
 		{Name: "plus-preference", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "prefer", "only"}, Description: "plus is the ChatGPT plan inside the account token. A stale plan_type of plus is ignored when the token says free. prefer stays on Plus while any enabled Plus account exists. ignore is stored as off."},
 		{Name: "sticky-seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Sticky session lifetime in seconds. Default 300."},
 		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token after the upstream says the model is not supported for a ChatGPT account. 0 disables. Default 1440. Maximum 10080. The skip is saved beside stats-file and survives restart."},
 		{Name: "stats-file", Type: pluginapi.ConfigFieldTypeString, Description: "JSON file for hourly request and token buckets kept for 90 days. Empty disables persistence."},
-		{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model name plus optional client alias. The same alias with different names is one pool. An exact duplicate name and alias is skipped. A fallback list is stored and is not sent."},
+		{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model name plus optional client alias. The same alias with different names is one pool. An exact duplicate name and alias is skipped. fallback lists upstream names tried in order when fallback-retry is above 0."},
 	}
 }
 
@@ -811,10 +825,35 @@ func modelList(cfg pluginConfig) pluginapi.ModelResponse {
 				Name:        pool.names[0],
 				DisplayName: pool.display,
 				UserDefined: true,
+				Thinking:    pool.thinking(),
 			})
 		}
 	}
 	return pluginapi.ModelResponse{Provider: pluginID, Models: models}
+}
+
+func (p modelPool) thinking() *pluginapi.ThinkingSupport {
+	for _, model := range currentConfig().Models {
+		if model.publicName() != p.alias {
+			continue
+		}
+		levels := make([]string, 0)
+		if raw, ok := model.Thinking["levels"].([]any); ok {
+			for _, item := range raw {
+				if level, ok := item.(string); ok && strings.TrimSpace(level) != "" {
+					levels = append(levels, strings.TrimSpace(level))
+				}
+			}
+		}
+		if len(levels) == 0 && (strings.EqualFold(model.Name, "gpt-6-astra") || strings.EqualFold(model.Alias, "gpt-6-astra")) {
+			levels = []string{"low", "medium", "high"}
+		}
+		if len(levels) == 0 {
+			return nil
+		}
+		return &pluginapi.ThinkingSupport{Levels: levels, DynamicAllowed: true, ZeroAllowed: true}
+	}
+	return nil
 }
 
 func routeModel(raw []byte) ([]byte, error) {
@@ -909,21 +948,31 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	if len(accounts) == 0 {
 		return errorEnvelope("no_account", "no eligible codex account is available", http.StatusServiceUnavailable), nil
 	}
-	beforeCooldown := len(accounts)
-	accounts = withoutCooldown(accounts, now)
-	if len(accounts) == 0 {
-		if beforeCooldown > 0 {
+	ready, cooling := splitCooldown(accounts, now)
+	fallbackNames := fallbackModels(names, fallbacks)
+	canFallback := cfg.fallbackRetry() > 0 && len(fallbackNames) > 0
+	if len(ready) == 0 && !canFallback {
+		if len(cooling) > 0 {
 			return errorEnvelope("accounts_cooling", "codex accounts are in model cooldown", http.StatusServiceUnavailable), nil
 		}
 		return errorEnvelope("no_account", "no eligible codex account is available", http.StatusServiceUnavailable), nil
 	}
 	session := sessionID(req.Metadata, req.Headers)
 	runtimeMu.Lock()
-	ordered := planAccountsLocked(cfg, accounts, session, now)
-	plannedNames, plannedFallbacks := planNamesLocked(alias, names, fallbacks, explicit)
+	ordered := planAccountsLocked(cfg, ready, session, now)
+	plannedNames := planNamesLocked(alias, names, explicit)
 	runtimeMu.Unlock()
-	attempts := buildAttempts(ordered, plannedNames, plannedFallbacks, 1+cfg.retry(), suffix)
-	if len(attempts) == 0 {
+	attempts := buildAttempts(ordered, plannedNames, 1+cfg.retry(), suffix)
+	var fallbackAttempts []attempt
+	if canFallback {
+		// Cooldown only means the primary model was refused, so cooled accounts may still serve a fallback name.
+		pool := append(append([]account(nil), ordered...), sortAccounts(cooling, false)...)
+		fallbackAttempts = buildAttempts(pool, fallbackNames, cfg.fallbackRetry(), suffix)
+		for i := range fallbackAttempts {
+			fallbackAttempts[i].fallback = true
+		}
+	}
+	if len(attempts) == 0 && len(fallbackAttempts) == 0 {
 		return errorEnvelope("no_account", "no eligible codex account is available", http.StatusServiceUnavailable), nil
 	}
 	prepared := preparedCall{
@@ -932,6 +981,7 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		spanStart:  start,
 		spanEnd:    end,
 		attempts:   attempts,
+		fallbacks:  fallbackAttempts,
 		path:       path,
 		session:    session,
 		client:     req.Headers,
@@ -956,15 +1006,16 @@ func upstreamPath(format, source string) (string, error) {
 }
 
 type attemptResult struct {
-	success bool
-	rewrite error
-	resp    hostHTTPResult
-	status  int
-	body    []byte
-	tokens  []string
-	index   string
-	email   string
-	noted   bool
+	success      bool
+	rewrite      error
+	resp         hostHTTPResult
+	status       int
+	body         []byte
+	tokens       []string
+	index        string
+	email        string
+	noted        bool
+	modelMissing bool
 }
 
 func postModel(cfg pluginConfig, prepared preparedCall, token, model string, stream bool) (hostHTTPResult, int, []byte, error) {
@@ -980,6 +1031,28 @@ func postModel(cfg pluginConfig, prepared preparedCall, token, model string, str
 	return resp, resp.status(), resp.body(), nil
 }
 
+// runAttempts sends the primary model first. Fallback names are tried only after
+// every primary attempt failed with a model error. A non-2xx reply has not reached
+// the client yet, so only the request model changes; response bytes stay as-is.
+func runAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attemptResult {
+	result := performAttempts(cfg, prepared, stream)
+	if result.success || result.rewrite != nil || len(prepared.fallbacks) == 0 {
+		return result
+	}
+	if !result.modelMissing && len(result.tokens) > 0 {
+		return result
+	}
+	next := prepared
+	next.attempts = prepared.fallbacks
+	fallback := performAttempts(cfg, next, stream)
+	if fallback.rewrite != nil || len(fallback.tokens) == 0 {
+		return result
+	}
+	fallback.tokens = append(append([]string(nil), result.tokens...), fallback.tokens...)
+	fallback.noted = fallback.noted || result.noted
+	return fallback
+}
+
 // performAttempts sends the configured upstream model with the selected access token.
 // A 2xx response is returned unchanged. A non-2xx response tries the next account.
 // The ChatGPT model-not-supported error cools that account and access token.
@@ -988,8 +1061,10 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 	lastStatus := http.StatusBadGateway
 	var lastBody []byte
 	var lastResp hostHTTPResult
+	modelMissing := false
 	for _, at := range prepared.attempts {
-		if cooled(at.index, at.token, nowFn()) {
+		if !at.fallback && cooled(at.index, at.token, nowFn()) {
+			modelMissing = true
 			continue
 		}
 		tokens = append(tokens, at.token)
@@ -1045,11 +1120,14 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 		if chatgptModelUnsupported(body) {
 			markModelCooldown(at.index, at.token, cfg.modelCooldown())
 		}
+		if modelUnavailable(body) {
+			modelMissing = true
+		}
 		if cfg.RotationMode == "round-robin" {
 			pinRoundRobin(at.index, true)
 		}
 	}
-	return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, noted: len(tokens) > 0}
+	return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, noted: len(tokens) > 0, modelMissing: modelMissing}
 }
 
 func stickRoundRobinLocked(primary []account) []account {
@@ -1091,6 +1169,15 @@ func chatgptModelUnsupported(body []byte) bool {
 	return strings.Contains(text, "model is not supported") && strings.Contains(text, "chatgpt account")
 }
 
+// modelUnavailable reports an upstream refusal of the model itself, not of the request.
+func modelUnavailable(body []byte) bool {
+	if chatgptModelUnsupported(body) {
+		return true
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "model_not_found") || (strings.Contains(text, "model") && strings.Contains(text, "does not exist"))
+}
+
 // readStreamBody copies upstream bytes as-is, then closes the host stream.
 func readStreamBody(callbackID, streamID string) []byte {
 	var body []byte
@@ -1108,15 +1195,15 @@ func readStreamBody(callbackID, streamID string) []byte {
 	return body
 }
 
-func withoutCooldown(accounts []account, now time.Time) []account {
-	out := make([]account, 0, len(accounts))
+func splitCooldown(accounts []account, now time.Time) (ready, cooling []account) {
 	for _, item := range accounts {
 		if cooled(item.index, item.token, now) {
+			cooling = append(cooling, item)
 			continue
 		}
-		out = append(out, item)
+		ready = append(ready, item)
 	}
-	return out
+	return ready, cooling
 }
 
 func cooled(index, token string, now time.Time) bool {
@@ -1301,7 +1388,7 @@ func bindSticky(session, index string, seconds int) {
 }
 
 func sendSerial(cfg pluginConfig, prepared preparedCall) ([]byte, error) {
-	result := performAttempts(cfg, prepared, false)
+	result := runAttempts(cfg, prepared, false)
 	if result.rewrite != nil {
 		return errorEnvelope("invalid_payload", result.rewrite.Error(), http.StatusBadRequest), nil
 	}
@@ -1357,7 +1444,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 	if strings.TrimSpace(executorStreamID) == "" {
 		return errorEnvelope("executor_error", "stream_id is required", http.StatusBadRequest), nil
 	}
-	result := performAttempts(cfg, prepared, true)
+	result := runAttempts(cfg, prepared, true)
 	if result.rewrite != nil {
 		return errorEnvelope("invalid_payload", result.rewrite.Error(), http.StatusBadRequest), nil
 	}
@@ -1965,23 +2052,17 @@ func accountIndex(accounts []account, index string) int {
 	return -1
 }
 
-func planNamesLocked(alias string, names []string, fallbacks [][]string, explicit bool) ([]string, [][]string) {
+func planNamesLocked(alias string, names []string, explicit bool) []string {
 	names = append([]string(nil), names...)
-	fallbacks = cloneFallbacks(fallbacks)
-	if len(fallbacks) < len(names) {
-		grown := make([][]string, len(names))
-		copy(grown, fallbacks)
-		fallbacks = grown
-	}
 	if explicit || len(names) < 2 {
-		return names, fallbacks
+		return names
 	}
 	if runtime.nameCursor == nil {
 		runtime.nameCursor = map[string]int{}
 	}
 	start := runtime.nameCursor[alias] % len(names)
 	runtime.nameCursor[alias] = (start + 1) % len(names)
-	return rotateStrings(names, start), rotateFallbacks(fallbacks, start)
+	return rotateStrings(names, start)
 }
 
 func cloneFallbacks(in [][]string) [][]string {
@@ -1998,17 +2079,22 @@ func cloneFallbacks(in [][]string) [][]string {
 	return out
 }
 
-func rotateFallbacks(in [][]string, start int) [][]string {
-	if len(in) == 0 {
-		return nil
+// fallbackModels joins the fallback rows in config order and skips the primary names.
+func fallbackModels(names []string, fallbacks [][]string) []string {
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		seen[name] = struct{}{}
 	}
-	start %= len(in)
-	if start == 0 {
-		return cloneFallbacks(in)
+	var out []string
+	for _, row := range fallbacks {
+		for _, name := range row {
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
 	}
-	out := make([][]string, 0, len(in))
-	out = append(out, cloneFallbacks(in[start:])...)
-	out = append(out, cloneFallbacks(in[:start])...)
 	return out
 }
 
@@ -2027,8 +2113,8 @@ func rotateStrings(in []string, start int) []string {
 }
 
 // buildAttempts walks account and name pairs together, then fills unused pairs.
-// The caller caps the slice at 1+request-retry. Each account/name pair is used once.
-func buildAttempts(accounts []account, names []string, fallbacks [][]string, budget int, suffix string) []attempt {
+// The caller caps the slice at its retry budget. Each account/name pair is used once.
+func buildAttempts(accounts []account, names []string, budget int, suffix string) []attempt {
 	accountCount := len(accounts)
 	nameCount := len(names)
 	if accountCount == 0 || nameCount == 0 || budget < 1 {
@@ -2046,14 +2132,7 @@ func buildAttempts(accounts []account, names []string, fallbacks [][]string, bud
 			return
 		}
 		used[key] = struct{}{}
-		var alts []string
-		if nameIndex < len(fallbacks) {
-			alts = make([]string, len(fallbacks[nameIndex]))
-			for i, alt := range fallbacks[nameIndex] {
-				alts[i] = alt + suffix
-			}
-		}
-		out = append(out, attempt{index: item.index, token: item.token, email: item.email, model: name + suffix, fallbacks: alts})
+		out = append(out, attempt{index: item.index, token: item.token, email: item.email, model: name + suffix})
 	}
 	limit := accountCount * nameCount
 	for step := 0; step < limit && len(out) < budget; step++ {

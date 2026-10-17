@@ -27,8 +27,8 @@ Auth runs first and cannot set an HTTP status. A key that is already expired, di
 
 ## Host changes that must stay
 
-- `GET /key-dashboard` and `GET /key-dashboard/api/session` rewrite onto the plugin resource and then abort the Gin context.
-- `GET /v0/resource/plugins/key-shop/dashboard` without `X-Key-Shop-Alias: 1` redirects to `/key-dashboard` before the plugin is called.
+- `GET /client` and `GET /client/api/session` rewrite onto the plugin resource and then abort the Gin context.
+- `GET /v0/resource/plugins/key-shop/dashboard` without `X-Key-Shop-Alias: 1` redirects to `/client` before the plugin is called.
 - `NewUsageReporter` uses the lifecycle request id from `usage.WithExecutionRequestID` when the handler set it. Without that, usage and completion cannot share an id, and every success bills 0.
 
 These are recorded in `AGENTS.md`. Do not drop them when taking upstream infrastructure.

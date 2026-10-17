@@ -67,11 +67,11 @@ plugins:
 | Field | Meaning |
 | --- | --- |
 | `enabled` | When false, the plugin claims no models and the executor rejects requests. |
-| `base-url` | HTTPS origin plus optional path. Empty uses `https://7656b154.linhtd.com/v1`. `http` is accepted only for localhost and private IPs such as `192.168.8.1`. Userinfo, query, and fragment are rejected. |
+| `base-url` | HTTPS origin plus optional path. Empty uses `https://7656b154.linhtd.com/v1`. `http` is accepted only for localhost, private IPs such as `192.168.8.1`, and shared addresses in `100.64.0.0/10` (Tailscale). Userinfo, query, and fragment are rejected. |
 | `prefix` | Client model prefix. Trimmed of slashes. A value that still contains `/` claims nothing. |
 | `headers` | Extra upstream headers. `$NAME` copies that client header. `$CPA-SESSION-ID` uses the executor session. A missing source drops the header. |
 | `request-retry` | Extra attempts on the next account with the same upstream model. `0` sends once. Default `3`. Maximum `32`. A value outside that range is clamped. The total number of account attempts is `1 + request-retry`. |
-| `fallback-retry` | Stored so existing config loads. Requests are not switched to fallback model names. Maximum `3`. |
+| `fallback-retry` | Extra attempts with the row `fallback` names after every primary attempt failed because the upstream refused the model. `0` disables fallback even when a list is filled in. Default `0`. Maximum `3`. These calls do not spend `request-retry`. |
 | `rotation-mode` | `round-robin`, `fill-first`, `least-recent`, or `sticky`. |
 | `plus-preference` | `off`, `prefer`, or `only`. `ignore` is stored as `off`. Default `prefer`. |
 | `sticky-seconds` | Sticky session lifetime. Default `300`. Maximum `86400`. |
@@ -89,7 +89,9 @@ Several rows with the same alias are one catalog model. The plugin rotates those
 
 Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`.
 
-`fallback` and `fallback-retry` are stored so existing config still loads. Requests are not switched to those names. The upstream model is the row `name`.
+`fallback` is an ordered list of upstream names. The row's own name and repeats are dropped. With `fallback-retry` above `0`, the plugin first tries the row `name` on the selected accounts. When every one of those attempts fails with a model refusal (the ChatGPT model-not-supported error, `model_not_found`, or "model ... does not exist"), or every account is in model cooldown, it sends the fallback names instead. A thinking suffix such as `(high)` stays attached. Fallback calls may use accounts in model cooldown, because that cooldown only means the primary model was refused.
+
+Fallback only changes the `model` value in the request. Response bytes and stream bytes are passed through unchanged, so the response `model` field shows the fallback name. Fallback never starts after a 2xx response, including a 2xx stream that carries an error, because the client may already have bytes. Other errors such as 429 or 5xx keep the primary model. A Responses request that carries `previous_response_id` or encrypted reasoning from another model may still be refused by the fallback model.
 
 A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls. Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for `model-cooldown-minutes`, including when the error arrives inside a 2xx stream.
 

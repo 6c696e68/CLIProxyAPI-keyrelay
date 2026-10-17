@@ -1244,7 +1244,7 @@ plugins:
         mode: "safe"
 
     # key-shop sells ck_ client keys. Build plugins/<os>/<arch>/key-shop and set
-    # plugins.enabled plus this enabled flag. Public page: /key-dashboard.
+    # plugins.enabled plus this enabled flag. Public page: /client.
     # key-shop:
     #   enabled: true
     #   priority: 100
@@ -1254,6 +1254,7 @@ plugins:
     #   reserve_tokens: 32768
     #   reservation_ttl: 15m
     #   retention_days: 30
+    #   deleted_retention_days: 90
 
     # ch-relay-vippro forwards Chat Completions and OpenAI Responses with a Codex
     # access token. It does not use api-key or keys. Copy into a real config and

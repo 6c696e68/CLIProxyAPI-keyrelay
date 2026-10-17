@@ -27,6 +27,28 @@ func testStore(t *testing.T, now time.Time) *Store {
 	return store
 }
 
+func TestStatsSummary(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	if _, _, err := store.Create(CreateInput{Label: "a", TTLSeconds: 3600, TokenLimit: 100, TokenLimitSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	disabled, _, err := store.Create(CreateInput{Label: "b", TTLSeconds: 3600, TokenLimit: 50, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(UpdateInput{ID: disabled.ID, Status: "disabled", StatusSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := store.StatsSummary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.KeysTotal != 2 || summary.KeysActive != 1 || summary.KeysDisabled != 1 {
+		t.Fatalf("summary=%+v", summary)
+	}
+}
+
 func TestStoreCreateHidesSecretOnList(t *testing.T) {
 	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
 	store := testStore(t, now)
@@ -40,6 +62,92 @@ func TestStoreCreateHidesSecretOnList(t *testing.T) {
 	}
 	if listed[0].Display == "" || listed[0].ID != key.ID {
 		t.Fatal("list missing display")
+	}
+}
+
+func TestListTreatsOpenReservationAsExhausted(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	_, secret, err := store.Create(CreateInput{Label: "held", TTLSeconds: 3600, TokenLimit: 10, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admission, err := store.Admit(AdmitInput{Secret: secret, RequestID: "hold", Path: "/v1/chat/completions", Generate: true, MaxTokens: 10})
+	if err != nil || !admission.Allowed || admission.Reserved < 1 {
+		t.Fatalf("admission=%+v err=%v", admission, err)
+	}
+	exhausted, total, err := store.ListPageFiltered("", "exhausted", 1, 25)
+	if err != nil || total != 1 || len(exhausted) != 1 || exhausted[0].Status != "exhausted" {
+		t.Fatalf("exhausted=%+v total=%d err=%v", exhausted, total, err)
+	}
+	active, activeTotal, err := store.ListPageFiltered("", "active", 1, 25)
+	if err != nil || activeTotal != 0 || len(active) != 0 {
+		t.Fatalf("active=%+v total=%d err=%v", active, activeTotal, err)
+	}
+}
+
+func TestListPageDoesNotDeadlockWithOneConnection(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	if _, _, err := store.Create(CreateInput{Label: "live", TokenLimit: 10, TokenLimitSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	type listResult struct {
+		count int
+		total int
+		err   error
+	}
+	done := make(chan listResult, 1)
+	go func() {
+		keys, total, err := store.ListPageFiltered("", "", 1, 25)
+		done <- listResult{count: len(keys), total: total, err: err}
+	}()
+	select {
+	case result := <-done:
+		if result.err != nil || result.total != 1 || result.count != 1 {
+			t.Fatalf("keys=%d total=%d err=%v", result.count, result.total, result.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("list deadlocked while the only sqlite connection was busy")
+	}
+}
+
+func TestListPageFiltersAndBoundsResults(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	for i := 0; i < 3; i++ {
+		if _, _, err := store.Create(CreateInput{Label: "page", TokenLimit: 100, TokenLimitSet: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys, total, err := store.ListPageFiltered("page", "active", 2, 2)
+	if err != nil || total != 3 || len(keys) != 1 {
+		t.Fatalf("keys=%d total=%d err=%v", len(keys), total, err)
+	}
+}
+
+func TestRequestsPageUsesStableCursor(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TokenLimit: 100, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"a", "b", "c"} {
+		if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: id, Generate: false}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Finalize(FinalizeInput{RequestID: id, Outcome: "succeeded", RequestedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, page, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Limit: 2})
+	if err != nil || len(first) != 2 || !page.HasMore || page.NextCursor == "" {
+		t.Fatalf("first=%d page=%+v err=%v", len(first), page, err)
+	}
+	second, page, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Limit: 2, Cursor: page.NextCursor})
+	if err != nil || len(second) != 1 || page.HasMore || second[0].RequestID == first[0].RequestID || second[0].RequestID == first[1].RequestID {
+		t.Fatalf("second=%+v page=%+v err=%v", second, page, err)
 	}
 }
 
@@ -126,6 +234,10 @@ func TestFinalizeBillsOnceAndFailureBillsZero(t *testing.T) {
 	session, err := store.Session(secret, 10)
 	if err != nil || session.Key.TokensUsed != 5 {
 		t.Fatalf("used=%d err=%v", session.Key.TokensUsed, err)
+	}
+	var notes int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM usage_notes WHERE request_id=?`, "ok").Scan(&notes); err != nil || notes != 0 {
+		t.Fatalf("notes=%d err=%v", notes, err)
 	}
 	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "bad", Path: "/v1/chat/completions", Generate: true}); err != nil {
 		t.Fatal(err)

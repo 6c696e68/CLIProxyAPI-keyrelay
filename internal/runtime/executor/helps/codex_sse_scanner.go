@@ -275,21 +275,32 @@ func (s *CodexSSEScanner) Err() error { return s.lines.Err() }
 // assemble returns the event held as lines data lines: compacted onto one line when its data is
 // valid JSON, otherwise as held.
 func (s *CodexSSEScanner) assemble(held []byte, lines int, joined []byte) []byte {
-	if lines == 1 {
-		s.diagnose(held, lines, bytes.TrimSpace(joined))
-		return held
-	}
-	if json.Valid(joined) {
-		var compacted bytes.Buffer
-		compacted.Grow(len(codexSSEDataPrefix) + 1 + len(joined))
-		compacted.Write(codexSSEDataPrefix)
-		compacted.WriteByte(' ')
-		if errCompact := json.Compact(&compacted, joined); errCompact == nil {
-			return compacted.Bytes()
+	data := bytes.TrimSpace(joined)
+	if json.Valid(data) {
+		if lines == 1 {
+			return held
+		}
+		if compacted, ok := compactCodexSSEDataLine(data); ok {
+			return compacted
+		}
+	} else if repaired, ok := RepairObjectKeySeparators(data); ok {
+		if compacted, okCompact := compactCodexSSEDataLine(repaired); okCompact {
+			return compacted
 		}
 	}
-	s.diagnose(held, lines, joined)
+	s.diagnose(held, lines, data)
 	return held
+}
+
+func compactCodexSSEDataLine(data []byte) ([]byte, bool) {
+	var compacted bytes.Buffer
+	compacted.Grow(len(codexSSEDataPrefix) + 1 + len(data))
+	compacted.Write(codexSSEDataPrefix)
+	compacted.WriteByte(' ')
+	if errCompact := json.Compact(&compacted, data); errCompact != nil {
+		return nil, false
+	}
+	return compacted.Bytes(), true
 }
 
 // diagnose logs one bounded warning for the first event in the stream whose data is not valid

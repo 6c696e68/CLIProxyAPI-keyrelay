@@ -57,6 +57,53 @@ func TestRegisterDeclaresAdmissionCapabilities(t *testing.T) {
 	}
 }
 
+func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
+	svc := testService(t)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"count":3,"label":"November","customer":"Acme","token_limit":5000}}`)
+	var env struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		Keys []struct {
+			Secret string
+			Key    Key
+		}
+	}
+	if err := json.Unmarshal(env.Result.Body, &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Keys) != 3 {
+		t.Fatalf("got %d created keys, want 3", len(created.Keys))
+	}
+	seen := map[string]bool{}
+	for _, item := range created.Keys {
+		if item.Secret == "" || seen[item.Secret] {
+			t.Fatalf("bulk create returned missing or duplicate secret")
+		}
+		seen[item.Secret] = true
+		if item.Key.Label != "November" || item.Key.Customer != "Acme" || item.Key.TokenLimit != 5000 {
+			t.Fatalf("bulk create returned incorrect key metadata: %+v", item.Key)
+		}
+	}
+	listed := call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/keys"}`)
+	var listedEnv struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(listed, &listedEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(listedEnv.Result.Body), `"Label":"November"`) {
+		t.Fatal("bulk-created keys were not persisted")
+	}
+}
+
 func TestAuthenticateRejectsExpiredAndUnsupportedPaths(t *testing.T) {
 	svc := testService(t)
 	expired := createSecret(t, svc, -60, 100)
@@ -156,6 +203,20 @@ func TestManagementCreateAndPublicSession(t *testing.T) {
 	missing := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Query":{"key":["ck_query"]}}`)
 	if !strings.Contains(string(missing), `"StatusCode":401`) {
 		t.Fatal("query key was accepted")
+	}
+}
+
+func TestManagementPaginationMetadata(t *testing.T) {
+	svc := testService(t)
+	for i := 0; i < 2; i++ {
+		createSecret(t, svc, 3600, 10)
+	}
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/keys","Query":{"page":["2"],"page_size":["1"]}}`)
+	var envelope struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || !bytes.Contains(envelope.Result.Body, []byte(`"total":2`)) || !bytes.Contains(envelope.Result.Body, []byte(`"page":2`)) {
+		t.Fatalf("pagination metadata missing: %s", raw)
 	}
 }
 

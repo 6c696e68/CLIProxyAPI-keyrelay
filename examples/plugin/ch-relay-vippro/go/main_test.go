@@ -520,6 +520,20 @@ models:
 		}
 	})
 
+	t.Run("shared http base url is accepted", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		mustConfigure(t, "enabled: true\nbase-url: http://100.105.177.35:11500/v1\nmodels:\n  - {name: gpt-5.4, alias: gpt-5.4}\n")
+		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 || calls[0].URL != "http://100.105.177.35:11500/v1/chat/completions" {
+			t.Fatalf("shared http = %#v", calls)
+		}
+		if privateBaseHost("100.63.255.255") || privateBaseHost("100.128.0.1") || privateBaseHost("8.8.8.8") {
+			t.Fatal("public address accepted for http")
+		}
+	})
+
 	t.Run("private http base url is accepted", func(t *testing.T) {
 		f := setup(t)
 		f.codex("1", tokenA, "plus", nil)
@@ -683,6 +697,27 @@ models:
 `)
 	assertRoute("vippro/gpt-5.6", true)
 	assertRoute("gpt-5.6", false)
+	if err := json.Unmarshal(callOK(t, pluginabi.MethodModelStatic, map[string]any{}), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Models) != 1 || listed.Models[0].Thinking == nil {
+		t.Fatalf("thinking capability = %+v", listed.Models)
+	}
+	if got := listed.Models[0].Thinking.Levels; len(got) != 2 || got[0] != "low" || got[1] != "high" {
+		t.Fatalf("thinking levels = %#v", got)
+	}
+	mustConfigure(t, `
+enabled: true
+prefix: vippro
+models:
+  - name: gpt-6-astra
+`)
+	if err := json.Unmarshal(callOK(t, pluginabi.MethodModelStatic, map[string]any{}), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Models) != 1 || listed.Models[0].Thinking == nil {
+		t.Fatalf("gpt-6-astra thinking capability = %+v", listed.Models)
+	}
 }
 
 func TestPayloadRewriteAndReject(t *testing.T) {
@@ -2427,12 +2462,130 @@ models:
 		}
 	})
 
+	t.Run("model error switches to fallback after primary accounts", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		const notFound = `{"error":{"message":"The model does not exist","code":"model_not_found"}}`
+		f.scripts = []httpScript{
+			{status: http.StatusBadRequest, body: []byte(unsupported)},
+			{status: http.StatusNotFound, body: []byte(notFound)},
+			{status: http.StatusOK, body: []byte(`{"ok":true,"model":"other-model"}`)},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		resp := mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 3 || bearer(t, calls[2]) != "Bearer "+tokenA {
+			t.Fatalf("calls=%d", len(calls))
+		}
+		if requestModel(t, calls[0]) != "primary-model(high)" || requestModel(t, calls[1]) != "primary-model(high)" || requestModel(t, calls[2]) != "other-model(high)" {
+			t.Fatalf("models = %s %s %s", calls[0].Body, calls[1].Body, calls[2].Body)
+		}
+		if string(resp.Payload) != `{"ok":true,"model":"other-model"}` {
+			t.Fatalf("payload = %s", resp.Payload)
+		}
+	})
+
+	t.Run("cooled accounts serve the fallback", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		markModelCooldown("1", tokenA, time.Hour)
+		mustExec(t, "openai", "primary-model", []byte(primaryBody))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "other-model" {
+			t.Fatalf("calls=%d", len(calls))
+		}
+	})
+
+	t.Run("cooled accounts without fallback keep accounts_cooling", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+fallback-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		markModelCooldown("1", tokenA, time.Hour)
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(primaryBody)))
+		if env.OK || env.Error == nil || env.Error.Code != "accounts_cooling" || len(f.httpCalls(t)) != 0 {
+			t.Fatalf("env=%+v", env.Error)
+		}
+	})
+
+	t.Run("stream fallback forwards upstream bytes unchanged", func(t *testing.T) {
+		f := setup(t)
+		f.streamFinished = make(chan struct{})
+		f.codex("1", tokenA, "plus", nil)
+		const raw = "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"pong\"}\n\n"
+		f.scripts = []httpScript{
+			{status: http.StatusBadRequest, streamID: "http-miss", chunks: []readChunk{{payload: []byte(unsupported), done: true}}},
+			{status: http.StatusOK, streamID: "http-fallback", chunks: []readChunk{{payload: []byte(raw), done: true}}},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		req := execReq("openai-response", "primary-model", []byte(primaryBody))
+		req.StreamID = "exec-fallback"
+		callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+		waitCh(t, f.streamFinished, "fallback stream")
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || requestModel(t, calls[0]) != "primary-model" || requestModel(t, calls[1]) != "other-model" {
+			t.Fatalf("stream calls=%d", len(calls))
+		}
+		var emitted []string
+		for _, call := range f.snapshot() {
+			if call.method != pluginabi.MethodHostStreamEmit {
+				continue
+			}
+			var ref struct {
+				Payload []byte `json:"payload"`
+			}
+			_ = json.Unmarshal(call.payload, &ref)
+			emitted = append(emitted, string(ref.Payload))
+		}
+		if len(emitted) != 1 || emitted[0] != raw {
+			t.Fatalf("emit = %q", emitted)
+		}
+	})
+
 	t.Run("duplicate name and alias keeps the first fallback", func(t *testing.T) {
 		setup(t)
 		mustConfigure(t, `
 enabled: true
 models:
-  - {name: primary-model, alias: primary-model, fallback: ["kept-model"]}
+  - {name: primary-model, alias: primary-model, fallback: ["primary-model", "kept-model", "kept-model"]}
   - {name: primary-model, alias: primary-model, fallback: ["dropped-model"]}
 `)
 		models := currentConfig().Models

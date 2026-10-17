@@ -1,6 +1,6 @@
 # key-shop
 
-`key-shop` issues customer API keys for one CLIProxyAPI process. Each key has an expiry and a token cap. The operator creates keys in the management panel. A customer opens `/key-dashboard`, pastes only their own key, and sees usage.
+`key-shop` issues customer API keys for one CLIProxyAPI process. Each key has an expiry and a token cap. The operator creates keys in the management panel. A customer opens `/client`, pastes only their own key, and sees usage.
 
 The plugin id, shared-library stem, and `plugins.configs` key are all `key-shop`. Secrets use the prefix `ck_`. They are not written into `config.yaml` or `auth/`.
 
@@ -10,7 +10,7 @@ Existing `access.api-keys` keep working and are not quota-limited. Do not enable
 
 - Base URL: `http://<host>:<port>/v1`
 - API key: the `ck_...` secret shown once at create or rotate
-- Dashboard: `http://<host>:<port>/key-dashboard`
+- Dashboard: `http://<host>:<port>/client`
 
 Send the key in `Authorization: Bearer <key>`, `X-Api-Key`, or `X-Goog-Api-Key`. Do not put the key in the URL. Query `key` and `auth_token` are ignored.
 
@@ -45,6 +45,7 @@ plugins:
       reserve_tokens: 32768
       reservation_ttl: 15m
       retention_days: 30
+      deleted_retention_days: 90
 ```
 
 Empty `data_file` uses `~/.cliproxyapi/key-shop/key-shop.db`. On a router, set an absolute path such as `/root/.cliproxyapi-v8030/key-shop/key-shop.db`. The process home may be `/`, so the default path is wrong there. The database file is mode `0600`. The parent directory is mode `0700`.
@@ -78,7 +79,7 @@ If the ELF interpreter is `/lib/ld-linux-aarch64.so.1` and the host uses `/opt/l
 
 Copy the library to `plugins/<os>/<arch>/key-shop.so`. The file stem must stay `key-shop`.
 
-The public alias `/key-dashboard` lives in the host, not only in the plugin. A binary built before that alias will still load the plugin, but customers will only have `/v0/resource/plugins/key-shop/dashboard`. Rebuild the server when you need the short URL.
+The public alias `/client` lives in the host, not only in the plugin. A binary built before that alias will still load the plugin, but customers will only have `/v0/resource/plugins/key-shop/dashboard`. Rebuild the server when you need the short URL.
 
 ## Operator UI
 
@@ -93,12 +94,13 @@ Create accepts an empty name. A later disable, enable, or expiry edit does not c
 | Action | Method | Path | Body |
 | --- | --- | --- | --- |
 | Create | POST | `/v0/management/plugins/key-shop/keys` | `label`, `customer`, `note`, `ttl_seconds`, `never_expires`, `token_limit`, `unlimited_tokens` |
-| List | GET | `/v0/management/plugins/key-shop/keys` | query `q` |
+| Bulk create | POST | `/v0/management/plugins/key-shop/keys/bulk` | Same fields plus `count` (1–500); returns each secret once |
+| List | GET | `/v0/management/plugins/key-shop/keys` | query `q`, `status`, `page`, `page_size` |
 | Update | POST | `/v0/management/plugins/key-shop/keys/update` | `id` plus only the fields to change |
 | Rotate | POST | `/v0/management/plugins/key-shop/keys/rotate` | `id` |
 | Reset usage | POST | `/v0/management/plugins/key-shop/keys/reset-usage` | `id` |
 | Delete | POST | `/v0/management/plugins/key-shop/keys/delete` | `id` |
-| Requests | GET | `/v0/management/plugins/key-shop/requests` | `id`, `status`, `model`, `from`, `to`, `limit` |
+| Requests | GET | `/v0/management/plugins/key-shop/requests` | `id`, `status`, `model`, `from`, `to`, `limit`, `cursor` |
 | Stats | GET | `/v0/management/plugins/key-shop/stats` | none |
 
 Omitted `ttl_seconds` means 7 days. `never_expires: true` ignores `ttl_seconds`. Omitted `token_limit` means 100000000. `unlimited_tokens: true` ignores `token_limit`. Update `status` accepts only `active` or `disabled`.
@@ -109,9 +111,9 @@ These routes require the management secret because they sit under `/v0/managemen
 
 ## Customer dashboard
 
-`GET /key-dashboard` serves the page. `GET /key-dashboard/api/session` returns that key's lifecycle, limits, and the latest 30 requests. Send `Authorization: Bearer ck_...`.
+`GET /client` serves the page. `GET /client/api/session` returns that key's lifecycle, limits, and a bounded request page. Send `Authorization: Bearer ck_...`; use `limit` and `cursor` to load more.
 
-A direct `GET /v0/resource/plugins/key-shop/dashboard` redirects to `/key-dashboard`. Unknown paths such as `/key-dashboard/missing` return 404.
+A direct `GET /v0/resource/plugins/key-shop/dashboard` redirects to `/client`. Unknown paths such as `/client/missing` return 404.
 
 The session JSON includes `base_url`, which is the request host plus `/v1`.
 
@@ -170,7 +172,9 @@ go build -o /tmp/cli-proxy-api ./cmd/server
 ## Hướng dẫn ngắn
 
 - Khách dùng `http://<host>:<port>/v1` và key `ck_...`.
-- Trang khách: `http://<host>:<port>/key-dashboard`.
+- Trang khách: `http://<host>:<port>/client`.
 - Tạo key trong panel, menu **API Keys**, bằng mật khẩu đăng nhập management. Không dán hash bcrypt và không dán key khách.
 - Không nhập tên vẫn tạo được. Sửa hạn hoặc tắt key không xóa tên đã lưu.
 - Hết hạn hoặc hết token thì request bị chặn trước upstream. Request lỗi không trừ token.
+
+Legacy `/key-dashboard` redirects to `/client`; the legacy session URL remains supported.

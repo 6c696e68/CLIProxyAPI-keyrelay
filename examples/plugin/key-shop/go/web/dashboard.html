@@ -1,201 +1,549 @@
 <!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Key Dashboard</title>
-<style>
-:root {
-  --bg-secondary: #faf9f5;
-  --bg-primary: #f0eee8;
-  --bg-tertiary: #e9e6df;
-  --text-primary: #2d2a26;
-  --text-secondary: #6d6760;
-  --text-tertiary: #a29c95;
-  --border-color: #e3e1db;
-  --border-hover: #cecac4;
-  --primary-color: #8b8680;
-  --primary-hover: #7f7a74;
-  --primary-contrast: #ffffff;
-  --success-color: #10b981;
-  --warning-color: #c65746;
-  --success-badge-bg: #d1fae5;
-  --success-badge-text: #065f46;
-  --failure-badge-bg: rgba(198, 87, 70, 0.14);
-  --failure-badge-text: #8a3a30;
-  --shadow-lg: 0 10px 18px -3px rgb(0 0 0 / 0.1);
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-}
-[data-theme="dark"] {
-  --bg-secondary: #151412; --bg-primary: #1d1b18; --bg-tertiary: #262320;
-  --text-primary: #f6f4f1; --text-secondary: #c9c3bb; --text-tertiary: #9c958d;
-  --border-color: #3a3530; --border-hover: #5a544d;
-  --primary-hover: #9a948e; --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3);
-  --success-badge-bg: rgba(6, 78, 59, 0.3); --success-badge-text: #6ee7b7;
-  --failure-badge-bg: rgba(198, 87, 70, 0.24); --failure-badge-text: #f1b0a6;
-}
-* { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; font-family: var(--font); color: var(--text-primary); background: var(--bg-secondary); }
-.shell { min-height: 100vh; display: flex; }
-.brand {
-  flex: 1; display: flex; align-items: center; justify-content: flex-end;
-  background: #000; color: #fff; padding: 48px; overflow: hidden;
-}
-.brand-words { width: 100%; text-align: right; }
-.brand-words span {
-  display: block; font-size: 12vw; font-weight: 900; letter-spacing: -0.02em;
-  line-height: 0.85; text-transform: uppercase;
-}
-.brand-words span:nth-child(1) { opacity: 0.95; }
-.brand-words span:nth-child(2) { opacity: 0.7; }
-.brand-words span:nth-child(3) { opacity: 0.45; }
-.panel { flex: 1.1; display: flex; flex-direction: column; padding: 32px 40px 48px; }
-.top { display: flex; justify-content: flex-end; }
-.lang {
-  border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-secondary);
-  border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px; cursor: pointer;
-}
-.content { width: min(760px, 100%); margin: auto; display: flex; flex-direction: column; gap: 24px; }
-.card {
-  background: var(--bg-primary); border: 1px solid var(--border-color); border-radius: 12px;
-  box-shadow: var(--shadow-lg); padding: 32px; display: flex; flex-direction: column; gap: 16px;
-}
-h1 { margin: 0; font-size: 22px; font-weight: 800; text-align: center; }
-.sub { margin: 0; color: var(--text-secondary); font-size: 14px; text-align: center; }
-label { font-size: 14px; font-weight: 600; color: var(--text-primary); }
-input[type="text"], input[type="password"] {
-  width: 100%; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 8px;
-  background: var(--bg-secondary); color: var(--text-primary); font: inherit;
-}
-input:focus { outline: none; border-color: var(--border-hover); }
-.check { display: flex; gap: 8px; align-items: center; color: var(--text-secondary); font-size: 14px; font-weight: 500; }
-.btn {
-  border: 0; border-radius: 8px; padding: 12px 16px; background: var(--primary-color);
-  color: var(--primary-contrast); font: inherit; font-weight: 700; cursor: pointer;
-}
-.btn:hover { background: var(--primary-hover); }
-.error {
-  display: none; background: rgba(198, 87, 70, 0.1); border: 1px solid rgba(198, 87, 70, 0.4);
-  color: var(--warning-color); border-radius: 8px; padding: 8px 12px; font-size: 14px;
-}
-.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.stat {
-  border: 1px solid var(--border-color); border-radius: 14px; background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
-  padding: 15px 16px; display: flex; flex-direction: column; gap: 6px;
-}
-.stat span { color: var(--text-secondary); font-size: 12px; }
-.stat strong { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 18px; }
-.meter { height: 6px; border-radius: 999px; background: var(--bg-tertiary); overflow: hidden; }
-.meter i { display: block; height: 100%; width: 0; background: var(--success-color); }
-.base {
-  background: var(--bg-secondary); border: 1px dashed var(--border-color); border-radius: 8px;
-  padding: 12px 14px; font-family: var(--mono); font-size: 13px;
-}
-.table-wrap { border: 1px solid var(--border-color); border-radius: 8px; overflow: auto; background: var(--bg-primary); }
-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-th { background: var(--bg-tertiary); color: var(--text-secondary); font-weight: 500; font-size: 12px; text-align: left; padding: 10px 14px; }
-td { padding: 12px 14px; border-top: 1px solid var(--border-color); }
-tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); }
-.badge { display: inline-block; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 600; }
-.ok { background: var(--success-badge-bg); color: var(--success-badge-text); }
-.bad { background: var(--failure-badge-bg); color: var(--failure-badge-text); }
-@media (max-width: 768px) {
-  .brand { display: none; }
-  .panel { padding: 20px; }
-  .card { box-shadow: none; border: 0; background: transparent; padding: 8px 0; }
-  .stats { grid-template-columns: 1fr 1fr; }
-}
-</style>
-</head>
-<body>
-<div class="shell">
-  <aside class="brand" aria-hidden="true"><div class="brand-words"><span>CLI</span><span>Proxy</span><span>API</span></div></aside>
-  <main class="panel">
-    <div class="top"><button id="lang" class="lang" type="button">English</button></div>
-    <div class="content">
-      <section class="card" id="gate">
-        <div>
-          <h1 data-vi="Xem API key của bạn" data-en="View your API key">Xem API key của bạn</h1>
-          <p class="sub" data-vi="Chỉ xem usage của key này. Không đưa key vào URL." data-en="Only this key's usage is shown. Do not put the key in the URL.">Chỉ xem usage của key này. Không đưa key vào URL.</p>
-        </div>
-        <label for="key" data-vi="API key" data-en="API key">API key</label>
-        <input id="key" type="password" autocomplete="off" spellcheck="false">
-        <label class="check"><input id="remember" type="checkbox"> <span data-vi="Ghi nhớ trên trình duyệt này" data-en="Remember in this browser">Ghi nhớ trên trình duyệt này</span></label>
-        <button id="open" class="btn" type="button" data-vi="Mở dashboard" data-en="Open dashboard">Mở dashboard</button>
-        <p id="error" class="error"></p>
-      </section>
-      <section id="out" hidden>
-        <div class="stats" id="stats"></div>
-        <div class="meter" aria-hidden="true"><i id="bar"></i></div>
-        <div class="base" id="base"></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th data-vi="Thời gian" data-en="Time">Thời gian</th><th>Model</th><th data-vi="Trạng thái" data-en="Status">Trạng thái</th><th>Token</th></tr></thead>
-            <tbody id="rows"></tbody>
-          </table>
-        </div>
-      </section>
-    </div>
-  </main>
-</div>
-<script>
-(function syncTheme() {
-  const apply = (theme) => { if (theme) document.documentElement.dataset.theme = theme; };
-  try { apply(parent.document.documentElement.dataset.theme); } catch (e) {}
-  if (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches) apply("dark");
-})();
-let lang = "vi";
-document.getElementById("lang").onclick = () => {
-  lang = lang === "vi" ? "en" : "vi";
-  document.documentElement.lang = lang === "vi" ? "vi" : "en";
-  document.querySelectorAll("[data-vi]").forEach((el) => { el.textContent = el.dataset[lang]; });
-  document.getElementById("lang").textContent = lang === "vi" ? "English" : "Tiếng Việt";
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Monitor your API key and usage" />
+    <title>Key workspace</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%23080b0d'/%3E%3Cpath d='M38 14a14 14 0 1 0 8.2 25.3L56 49.1V56h-7v-6h-6v-6.1l-2.2-2.2A14 14 0 0 0 38 14Zm0 8a6 6 0 1 1 0 12 6 6 0 0 1 0-12Z' fill='%2355d8ed'/%3E%3C/svg%3E"
+    />
+    <script data-cfasync="false" src="https://cdn.tailwindcss.com"></script>
+    <script data-cfasync="false">
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui"],
+              mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+            },
+            colors: {
+              ink: "#eef4f5",
+              muted: "#8c9da6",
+              canvas: "#080b0d",
+              panel: "#0e1317",
+              panel2: "#12191e",
+              line: "#253039",
+              cyan: "#55d8ed",
+              green: "#50d49a",
+              red: "#f27d7d",
+              yellow: "#e9b86a",
+            },
+          },
+        },
+      };
+    </script>
+    <script data-cfasync="false"
+      crossorigin
+      src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+    ></script>
+    <script data-cfasync="false"
+      crossorigin
+      src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+    ></script>
+    <style>
+      html {
+        color-scheme: dark;
+      }
+      body {
+        background: #080b0d;
+        color: #eef4f5;
+        overflow-x: hidden;
+        -webkit-tap-highlight-color: transparent;
+      }
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #0e1317;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #253039;
+        border-radius: 999px;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button:focus-visible,
+      input:focus-visible {
+        outline: 2px solid #55d8ed;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body class="min-h-screen bg-canvas font-sans text-ink antialiased">
+    <div id="root"></div>
+    <script data-cfasync="false">
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
+const {
+  useState,
+  useEffect
+} = React;
+const get = (o, ...names) => {
+  for (const name of names) if (o?.[name] !== undefined) return o[name];
+  return "";
 };
-const keyEl = document.getElementById("key");
-const remember = document.getElementById("remember");
-if (sessionStorage.getItem("keyshop.remember") === "1") {
-  remember.checked = true;
-  keyEl.value = sessionStorage.getItem("keyshop.key") || "";
-}
-function badge(status) {
-  const ok = status === "active" || status === "succeeded";
-  return `<span class="badge ${ok ? "ok" : "bad"}">${status || ""}</span>`;
-}
-document.getElementById("open").onclick = async () => {
-  const key = keyEl.value.trim();
-  const error = document.getElementById("error");
-  error.style.display = "none";
-  if (remember.checked) {
-    sessionStorage.setItem("keyshop.remember", "1");
-    sessionStorage.setItem("keyshop.key", key);
-  } else {
-    sessionStorage.removeItem("keyshop.remember");
-    sessionStorage.removeItem("keyshop.key");
-  }
-  const res = await fetch("/key-dashboard/api/session", {headers:{Authorization:"Bearer "+key}});
-  const body = await res.json();
-  if (!res.ok) {
-    error.textContent = body.error || "request failed";
-    error.style.display = "block";
-    return;
-  }
-  const keyInfo = body.Key || body.key || {};
-  const requests = body.Requests || body.requests || [];
-  const used = Number(keyInfo.TokensUsed || keyInfo.tokens_used || 0);
-  const limit = Number(keyInfo.TokenLimit || keyInfo.token_limit || 0);
-  const remain = limit > 0 ? Math.max(limit - used, 0) : "∞";
-  document.getElementById("out").hidden = false;
-  document.getElementById("stats").innerHTML = [
-    [lang === "vi" ? "Trạng thái" : "Status", badge(keyInfo.Status || keyInfo.status)],
-    [lang === "vi" ? "Đã dùng" : "Used", used],
-    [lang === "vi" ? "Còn lại" : "Remaining", remain],
-    [lang === "vi" ? "Hết hạn" : "Expires", keyInfo.ExpiresAt || keyInfo.expires_at || (lang === "vi" ? "không" : "never")]
-  ].map(([k,v]) => `<div class="stat"><span>${k}</span><strong>${v}</strong></div>`).join("");
-  document.getElementById("bar").style.width = limit > 0 ? Math.min(100, (used / limit) * 100) + "%" : "8%";
-  document.getElementById("base").textContent = "Base URL  " + (body.base_url || (location.origin + "/v1"));
-  document.getElementById("rows").innerHTML = requests.map((row) => `<tr><td>${row.RequestedAt || row.requested_at || ""}</td><td>${row.Model || row.model || ""}</td><td>${badge(row.Status || row.status || "")}</td><td>${row.Billed || row.billed || 0}</td></tr>`).join("") || `<tr><td colspan="4">${lang === "vi" ? "Chưa có lượt gọi." : "No calls yet."}</td></tr>`;
+const formatDate = value => {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString("en-US", {
+    dateStyle: "medium",
+    timeStyle: "medium"
+  });
 };
+const number = value => Number(value || 0).toLocaleString("en-US");
+async function copyText(value) {
+  const text = String(value ?? "");
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {}
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  const copied = document.execCommand("copy");
+  area.remove();
+  return copied;
+}
+const Button = ({
+  children,
+  kind = "quiet",
+  className = "",
+  ...props
+}) => /*#__PURE__*/React.createElement("button", _extends({
+  className: `inline-flex min-h-10 items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-semibold transition duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:cursor-not-allowed disabled:opacity-50 ${kind === "primary" ? "border-cyan bg-cyan text-[#061014] hover:bg-[#70e2f1]" : "border-line bg-panel text-ink hover:border-cyan hover:bg-panel2"} ${className}`
+}, props), children);
+const Status = ({
+  value
+}) => {
+  const status = String(value || "unknown"),
+    good = ["active", "succeeded", "completed", "ok"].includes(status.toLowerCase());
+  return /*#__PURE__*/React.createElement("span", {
+    className: `inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${good ? "bg-[#123529] text-green" : "bg-[#3b2222] text-red"}`
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "h-1.5 w-1.5 rounded-full bg-current"
+  }), status);
+};
+const Stat = ({
+  label,
+  value,
+  note
+}) => /*#__PURE__*/React.createElement("div", {
+  className: "rounded-2xl border border-line bg-panel p-5"
+}, /*#__PURE__*/React.createElement("span", {
+  className: "text-xs text-muted"
+}, label), /*#__PURE__*/React.createElement("strong", {
+  className: "mt-2 block font-mono text-2xl font-bold tabular-nums"
+}, value), /*#__PURE__*/React.createElement("span", {
+  className: "text-xs text-muted"
+}, note));
+const Panel = ({
+  children,
+  className = ""
+}) => /*#__PURE__*/React.createElement("section", {
+  className: `rounded-2xl border border-line bg-panel p-5 md:p-6 ${className}`
+}, children);
+const Field = ({
+  label,
+  children
+}) => /*#__PURE__*/React.createElement("label", {
+  className: "grid gap-1.5 text-xs text-muted"
+}, /*#__PURE__*/React.createElement("span", null, label), children);
+const inputClass = "w-full rounded-lg border border-line bg-panel2 px-3 py-2.5 text-sm text-ink placeholder:text-muted/60";
+function Login({
+  onOpen,
+  loading,
+  error
+}) {
+  const [value, setValue] = useState("");
+  const [remember, setRemember] = useState(false);
+  return /*#__PURE__*/React.createElement("main", {
+    className: "mx-auto max-w-xl px-4 pt-[12vh]"
+  }, /*#__PURE__*/React.createElement(Panel, {
+    className: "p-7 md:p-9"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "mb-2 text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "CLIProxy API / key workspace"), /*#__PURE__*/React.createElement("h1", {
+    className: "text-3xl font-bold tracking-[-.05em]"
+  }, "Your API key, clearly."), /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 max-w-lg text-muted"
+  }, "Enter your customer key to view access, token usage, and recent requests."), /*#__PURE__*/React.createElement("form", {
+    className: "mt-7 grid gap-4",
+    onSubmit: async e => {
+      e.preventDefault();
+      await onOpen(value, remember);
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "API key"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    type: "password",
+    value: value,
+    onChange: e => setValue(e.target.value),
+    placeholder: "ck_\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+    autoFocus: true
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-xs text-muted"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: remember,
+    onChange: e => setRemember(e.target.checked)
+  }), " ", "Remember for this session"), error && /*#__PURE__*/React.createElement("div", {
+    className: "rounded-xl border border-red/40 bg-red/10 px-3 py-2 text-sm text-red",
+    role: "alert"
+  }, /*#__PURE__*/React.createElement("strong", {
+    className: "block"
+  }, "Authentication failed"), /*#__PURE__*/React.createElement("span", null, error)), /*#__PURE__*/React.createElement(Button, {
+    kind: "primary",
+    type: "submit",
+    disabled: loading
+  }, loading ? "Opening workspace…" : "Open workspace"))));
+}
+function Dashboard({
+  body,
+  models,
+  onLogout,
+  onRefresh,
+  onLoadMore,
+  loadingMore
+}) {
+  const key = get(body, "Key", "key"),
+    requests = get(body, "Requests", "requests") || [],
+    used = Number(get(key, "TokensUsed", "tokens_used")),
+    limit = Number(get(key, "TokenLimit", "token_limit")),
+    endpoint = get(body, "base_url") || location.origin + "/v1";
+  const [detail, setDetail] = useState(null);
+  const [copyMessage, setCopyMessage] = useState("");
+  const copy = async text => {
+    try {
+      if (!(await copyText(text))) throw new Error("Copy unavailable");
+      setCopyMessage("Endpoint copied");
+    } catch {
+      setCopyMessage("Unable to copy. Select the endpoint and copy manually.");
+    }
+  };
+  return /*#__PURE__*/React.createElement("main", {
+    className: "mx-auto min-w-0 max-w-[1380px] overflow-x-hidden px-3 py-5 sm:px-4 sm:py-7 md:px-7 md:py-9"
+  }, /*#__PURE__*/React.createElement("header", {
+    className: "mb-7 flex flex-col justify-between gap-5 md:flex-row md:items-start"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    className: "mb-2 text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "Your workspace"), /*#__PURE__*/React.createElement("h1", {
+    className: "text-[2.25rem] font-bold leading-[.98] tracking-[-.06em] sm:text-4xl md:text-5xl"
+  }, "API key dashboard"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 text-muted"
+  }, "Monitor access and usage through your relay workspace.")), /*#__PURE__*/React.createElement("div", {
+    className: "flex w-full flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-[10px] uppercase tracking-[.12em] text-muted sm:text-[11px]"
+  }, "Updated ", new Date().toLocaleTimeString("en-US")), /*#__PURE__*/React.createElement(Button, {
+    className: "w-full sm:w-auto",
+    onClick: onLogout
+  }, "Switch key"))), /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-3.5 sm:gap-5 md:grid-cols-[minmax(0,1.6fr)_minmax(280px,.8fr)]"
+  }, /*#__PURE__*/React.createElement(Panel, {
+    className: "md:p-6"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col justify-between gap-4 border-b border-line pb-5 sm:flex-row"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "grid h-12 w-12 place-items-center rounded-xl bg-[#12323a] text-2xl text-cyan"
+  }, "\u2301"), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    className: "text-xl font-bold"
+  }, get(key, "Label", "label") || "API key"), /*#__PURE__*/React.createElement("div", {
+    className: "font-mono text-xs text-muted"
+  }, get(key, "Display", "display") || "—"))), /*#__PURE__*/React.createElement(Status, {
+    value: get(key, "Status", "status") || "active"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-2.5 py-4 sm:grid-cols-3 sm:gap-3 sm:py-5"
+  }, [["Created", formatDate(get(key, "CreatedAt", "created_at"))], ["Expires", formatDate(get(key, "ExpiresAt", "expires_at"))], ["Last used", formatDate(get(key, "LastUsedAt", "last_used_at"))]].map(([label, value]) => /*#__PURE__*/React.createElement("div", {
+    className: "rounded-xl bg-panel2 p-4",
+    key: label
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-[11px] uppercase tracking-[.12em] text-muted"
+  }, label), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-2 block text-sm"
+  }, value)))), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs uppercase tracking-[.12em] text-muted"
+  }, "Endpoint URL"), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 flex flex-wrap items-center gap-2 font-mono text-sm"
+  }, /*#__PURE__*/React.createElement("span", null, endpoint), /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    onClick: () => copy(endpoint)
+  }, "Copy"), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-muted",
+    role: "status"
+  }, copyMessage)), /*#__PURE__*/React.createElement("div", {
+    className: "mt-7 border-t border-line pt-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col justify-between gap-2 sm:flex-row sm:items-baseline"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "font-semibold"
+  }, "Lifetime token limit"), /*#__PURE__*/React.createElement("strong", {
+    className: "font-mono text-lg"
+  }, number(used), " / ", limit ? number(limit) : "∞")), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-xs text-muted"
+  }, "Billed tokens = input + output. Reasoning and cached tokens are not double-counted."), /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 h-2 overflow-hidden rounded-full bg-[#26323a]"
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "block h-full rounded-full bg-cyan transition-all",
+    style: {
+      width: limit ? `${Math.min(100, used / limit * 100)}%` : "4%"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 flex justify-between text-xs text-muted"
+  }, /*#__PURE__*/React.createElement("span", null, limit ? `${number(Math.max(0, limit - used))} tokens remaining` : "Unlimited tokens"), /*#__PURE__*/React.createElement("span", null, limit ? "No automatic refill" : "Unlimited")))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2.5 sm:gap-3"
+  }, /*#__PURE__*/React.createElement(Stat, {
+    label: "Requests",
+    value: number(get(key, "RequestCount", "request_count")),
+    note: "Accepted by gateway"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Total tokens",
+    value: number(used),
+    note: "Lifetime total"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Cached tokens",
+    value: number(requests.reduce((sum, row) => sum + Number(get(row, "Cached", "cached") || 0), 0)),
+    note: "From the last 30 requests"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Key status",
+    value: get(key, "Status", "status") || "—",
+    note: limit && used >= limit ? "Limit reached" : "Operational"
+  })), /*#__PURE__*/React.createElement(Panel, {
+    className: "md:col-span-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "mb-5 flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-end"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, "Available models"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, "Models exposed by this endpoint.")), /*#__PURE__*/React.createElement("span", {
+    className: "font-mono text-xs text-muted"
+  }, models.length, " available")), models.length ? /*#__PURE__*/React.createElement("div", {
+    className: "mb-5 flex flex-wrap gap-2"
+  }, models.map(model => /*#__PURE__*/React.createElement("span", {
+    key: model,
+    className: "rounded-lg border border-line bg-panel2 px-3 py-2 font-mono text-xs text-cyan"
+  }, model))) : /*#__PURE__*/React.createElement("p", {
+    className: "mb-5 rounded-xl bg-panel2 p-4 text-sm text-muted"
+  }, "Model list unavailable. Check the endpoint configuration."), /*#__PURE__*/React.createElement("div", {
+    className: "mb-5 flex items-end justify-between gap-3"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, "Recent requests"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, "The latest requests. Prompts and response content are never stored.")), /*#__PURE__*/React.createElement(Button, {
+    className: "w-full sm:w-auto",
+    onClick: onRefresh
+  }, "Refresh")), /*#__PURE__*/React.createElement("div", {
+    className: "hidden overflow-x-auto rounded-xl border border-line/70 sm:block"
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "w-full min-w-[660px] text-left text-sm sm:min-w-[700px]"
+  }, /*#__PURE__*/React.createElement("thead", {
+    className: "text-[10px] uppercase tracking-[.12em] text-muted"
+  }, /*#__PURE__*/React.createElement("tr", null, ["Time", "Model", "Transport", "Status", "TTFT", "Token", "Details"].map(h => /*#__PURE__*/React.createElement("th", {
+    className: "pb-3 pr-4",
+    key: h
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, requests.length ? requests.map((row, index) => /*#__PURE__*/React.createElement("tr", {
+    className: "border-t border-line",
+    key: get(row, "RequestID", "request_id") || index
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "py-3 pr-4"
+  }, formatDate(get(row, "RequestedAt", "requested_at"))), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 pr-4 font-mono"
+  }, get(row, "Model", "model") || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 pr-4"
+  }, get(row, "Transport", "transport") || "—"), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 pr-4"
+  }, /*#__PURE__*/React.createElement(Status, {
+    value: get(row, "Status", "status")
+  })), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 pr-4 font-mono"
+  }, get(row, "TTFTMs", "ttft_ms") ? `${number(get(row, "TTFTMs", "ttft_ms"))} ms` : "—"), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 font-mono"
+  }, number(get(row, "Billed", "billed"))), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 text-right"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    onClick: () => setDetail(row)
+  }, "Details")))) : /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    className: "py-10 text-center text-muted",
+    colSpan: "7"
+  }, "No requests yet."))))), /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-2.5 sm:hidden"
+  }, requests.length ? requests.map((row, index) => /*#__PURE__*/React.createElement("article", {
+    className: "rounded-xl border border-line bg-panel2 p-3.5",
+    key: get(row, "RequestID", "request_id") || index
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-start justify-between gap-3"
+  }, /*#__PURE__*/React.createElement("strong", {
+    className: "truncate font-mono text-xs"
+  }, get(row, "Model", "model") || "Unknown model"), /*#__PURE__*/React.createElement(Status, {
+    value: get(row, "Status", "status")
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-3 grid grid-cols-2 gap-2 text-xs"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Time"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block"
+  }, formatDate(get(row, "RequestedAt", "requested_at")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Transport"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block"
+  }, get(row, "Transport", "transport") || "—")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Billed"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block font-mono"
+  }, number(get(row, "Billed", "billed")))), /*#__PURE__*/React.createElement("div", {
+    className: "text-right"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-9 px-2.5 py-1.5 text-xs",
+    onClick: () => setDetail(row)
+  }, "Details"))))) : /*#__PURE__*/React.createElement("p", {
+    className: "rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted"
+  }, "No requests yet.")))), detail && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 z-20 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4",
+    onClick: () => setDetail(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "max-h-[92dvh] w-full overflow-y-auto rounded-t-2xl border border-line bg-panel p-4 shadow-2xl sm:max-w-2xl sm:rounded-2xl sm:p-6",
+    onClick: event => event.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-start justify-between gap-4"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "Request details"), /*#__PURE__*/React.createElement("h2", {
+    className: "mt-1 text-xl font-bold"
+  }, get(detail, "Model", "model") || "Unknown model")), /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    onClick: () => setDetail(null),
+    "aria-label": "Close details"
+  }, "Close")), /*#__PURE__*/React.createElement("div", {
+    className: "mt-5 grid gap-3 sm:grid-cols-2"
+  }, [["Request ID", get(detail, "RequestID", "request_id")], ["HTTP status", get(detail, "HTTPStatus", "http_status") || "—"], ["Transport", get(detail, "Transport", "transport") || "—"], ["Protocol", get(detail, "Protocol", "protocol") || "—"], ["Latency", get(detail, "LatencyMs", "latency_ms") ? `${number(get(detail, "LatencyMs", "latency_ms"))} ms` : "—"], ["TTFT", get(detail, "TTFTMs", "ttft_ms") ? `${number(get(detail, "TTFTMs", "ttft_ms"))} ms` : "—"], ["Input tokens", number(get(detail, "Input", "input"))], ["Output tokens", number(get(detail, "Output", "output"))], ["Reasoning tokens", number(get(detail, "Reasoning", "reasoning"))], ["Cached tokens", number(get(detail, "Cached", "cached"))]].map(([label, value]) => /*#__PURE__*/React.createElement("div", {
+    key: label,
+    className: "rounded-xl bg-panel2 p-3"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "block text-[11px] uppercase tracking-[.1em] text-muted"
+  }, label), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block break-all font-mono text-sm"
+  }, value || "—")))), get(body, "has_more") && /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 flex justify-end"
+  }, /*#__PURE__*/React.createElement(Button, {
+    onClick: onLoadMore,
+    disabled: loadingMore
+  }, loadingMore ? "Loading…" : "Load more")))));
+}
+function App() {
+  const [body, setBody] = useState(null);
+  const [models, setModels] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [activeKey, setActiveKey] = useState("");
+  const [loadingMore, setLoadingMore] = useState(false);
+  const open = async (value, remember) => {
+    setLoading(true);
+    setError("");
+    try {
+      const key = String(value || "").trim();
+      if (!key) throw Error("Enter an API key to continue.");
+      const response = await fetch("/client/api/session", {
+        headers: {
+          Authorization: "Bearer " + key
+        }
+      });
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw Error("The server returned an unreadable response.");
+      }
+      if (!response.ok) throw Error(data.error || "Unable to open workspace.");
+      if (remember) sessionStorage.setItem("keyshop.client", key);else sessionStorage.removeItem("keyshop.client");
+      setActiveKey(key);
+      setBody(data);
+      try {
+        const modelResponse = await fetch("/v1/models", {
+          headers: {
+            Authorization: "Bearer " + key
+          }
+        });
+        const modelData = await modelResponse.json();
+        setModels((modelData.data || modelData.models || []).map(item => typeof item === "string" ? item : item.id).filter(Boolean));
+      } catch {
+        setModels([]);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const loadMore = async () => {
+    if (!body?.has_more || !body?.next_cursor) return;
+    setLoadingMore(true);
+    try {
+      const response = await fetch("/client/api/session?limit=25&cursor=" + encodeURIComponent(body.next_cursor), {
+        headers: {
+          Authorization: "Bearer " + activeKey
+        }
+      });
+      const data = await response.json();
+      if (!response.ok) throw Error(data.error || "Unable to load more requests.");
+      setBody({
+        ...body,
+        Requests: [...(body.Requests || []), ...(data.Requests || data.requests || [])],
+        next_cursor: data.next_cursor || "",
+        has_more: Boolean(data.has_more)
+      });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
+  useEffect(() => {
+    const saved = sessionStorage.getItem("keyshop.client");
+    if (saved) open(saved, true);
+  }, []);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, loading && /*#__PURE__*/React.createElement("div", {
+    role: "status",
+    className: "sr-only"
+  }, "Loading workspace\u2026"), body && error && /*#__PURE__*/React.createElement("p", {
+    role: "alert",
+    className: "mx-auto max-w-xl p-4 text-red"
+  }, error), body ? /*#__PURE__*/React.createElement(Dashboard, {
+    body: body,
+    models: models,
+    onLogout: () => {
+      sessionStorage.removeItem("keyshop.client");
+      setActiveKey("");
+      setBody(null);
+      setModels([]);
+      setError("");
+    },
+    onRefresh: () => open(activeKey, Boolean(sessionStorage.getItem("keyshop.client"))),
+    onLoadMore: loadMore,
+    loadingMore: loadingMore
+  }) : /*#__PURE__*/React.createElement(Login, {
+    onOpen: open,
+    loading: loading,
+    error: error
+  }));
+}
+ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
 </script>
-</body>
+  </body>
 </html>

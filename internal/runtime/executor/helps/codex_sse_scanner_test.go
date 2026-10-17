@@ -55,6 +55,23 @@ func scanCodexSSE(t *testing.T, stream string) []string {
 	return lines
 }
 
+func TestCodexSSEScannerRepairsObjectKeySeparators(t *testing.T) {
+	hook := captureCodexSSEWarnings(t)
+	stream := "event: response.completed\ndata: {\"type\",\"response.completed\",\"response\",{\"status\",\"completed\",\"created_at\":1792206240}}\n\n"
+	got := scanCodexSSE(t, stream)
+	want := []string{
+		"event: response.completed",
+		`data: {"type":"response.completed","response":{"status":"completed","created_at":1792206240}}`,
+		"",
+	}
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Fatalf("lines = %q\nwant    %q", got, want)
+	}
+	if len(hook.AllEntries()) != 0 {
+		t.Fatalf("warnings = %d, want 0", len(hook.AllEntries()))
+	}
+}
+
 func TestCodexSSEScannerAssemblesEventData(t *testing.T) {
 	const marker = "body-bytes-must-not-be-logged"
 	cases := []struct {

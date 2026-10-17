@@ -23,6 +23,23 @@ func TestPendingStreamErrorReturnsBufferedError(t *testing.T) {
 	}
 }
 
+func TestValidateSSEDataJSONRepairsObjectKeySeparators(t *testing.T) {
+	state := &sseJSONValidationState{}
+	chunk := []byte("event: response.completed\n" +
+		"data: {\"type\",\"response.completed\",\"response\",{\"status\",\"completed\",\"created_at\":1792206240}}\n\n")
+	out, errAdd := state.AddChunk(chunk)
+	if errAdd != nil {
+		t.Fatal(errAdd)
+	}
+	if _, errFinish := state.Finish(); errFinish != nil {
+		t.Fatal(errFinish)
+	}
+	want := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"created_at\":1792206240}}\n\n"
+	if string(out) != want {
+		t.Fatalf("output = %q", out)
+	}
+}
+
 func TestValidateSSEDataJSONAllowsMultilinePayload(t *testing.T) {
 	chunk := []byte("event: response.completed\n" +
 		"data: {\"type\":\"response.completed\",\n" +
@@ -97,7 +114,7 @@ func TestSplitCRLFRepro(t *testing.T) {
 		}
 		output = append(output, out...)
 	}
-	if errFinish := state.Finish(); errFinish != nil {
+	if _, errFinish := state.Finish(); errFinish != nil {
 		t.Fatal(errFinish)
 	}
 
@@ -107,7 +124,7 @@ func TestSplitCRLFRepro(t *testing.T) {
 	if errSingle != nil {
 		t.Fatal(errSingle)
 	}
-	if errFinish := singleState.Finish(); errFinish != nil {
+	if _, errFinish := singleState.Finish(); errFinish != nil {
 		t.Fatal(errFinish)
 	}
 	if string(output) != string(singleOutput) {
@@ -158,7 +175,7 @@ func TestSSEJSONValidationStateSplitCRLFVariants(t *testing.T) {
 				}
 				output = append(output, out...)
 			}
-			if errFinish := state.Finish(); errFinish != nil {
+			if _, errFinish := state.Finish(); errFinish != nil {
 				t.Fatalf("Finish failed: %v", errFinish)
 			}
 			if string(output) != wantOutput {

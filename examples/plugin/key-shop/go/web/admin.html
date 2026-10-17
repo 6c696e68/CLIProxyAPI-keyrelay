@@ -1,238 +1,907 @@
 <!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>API Keys</title>
-<style>
-:root {
-  --bg-secondary: #faf9f5; --bg-primary: #f0eee8; --bg-tertiary: #e9e6df;
-  --text-primary: #2d2a26; --text-secondary: #6d6760; --text-tertiary: #a29c95;
-  --border-color: #e3e1db; --border-hover: #cecac4;
-  --primary-color: #8b8680; --primary-hover: #7f7a74; --primary-contrast: #fff;
-  --error-color: #c65746;
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.08);
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Key shop · Operations</title>
+    <script data-cfasync="false" src="https://cdn.tailwindcss.com"></script>
+    <script data-cfasync="false">
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui"],
+              mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
+            },
+            colors: {
+              ink: "#eef4f5",
+              muted: "#8c9da6",
+              canvas: "#080b0d",
+              panel: "#0e1317",
+              panel2: "#12191e",
+              line: "#253039",
+              cyan: "#55d8ed",
+              green: "#50d49a",
+              red: "#f27d7d",
+              yellow: "#e9b86a",
+            },
+          },
+        },
+      };
+    </script>
+    <script data-cfasync="false"
+      crossorigin
+      src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+    ></script>
+    <script data-cfasync="false"
+      crossorigin
+      src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+    ></script>
+    <style>
+      html {
+        color-scheme: dark;
+      }
+      body {
+        background: #080b0d;
+        color: #eef4f5;
+        overflow-x: hidden;
+        -webkit-tap-highlight-color: transparent;
+      }
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #0e1317;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #253039;
+        border-radius: 999px;
+      }
+      button,
+      input,
+      select {
+        font: inherit;
+      }
+      button:focus-visible,
+      input:focus-visible,
+      select:focus-visible {
+        outline: 2px solid #55d8ed;
+        outline-offset: 2px;
+      }
+    </style>
+  </head>
+  <body class="min-h-screen bg-canvas font-sans text-ink antialiased">
+    <div id="root"></div>
+    <script data-cfasync="false">
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
+const {
+  useState,
+  useEffect,
+  useRef
+} = React;
+const get = (o, ...n) => {
+  for (const k of n) if (o?.[k] !== undefined) return o[k];
+  return "";
+};
+const num = v => Number(v || 0).toLocaleString("en-US");
+const date = v => {
+  if (!v) return "Never";
+  const d = new Date(v);
+  return Number.isNaN(d.valueOf()) ? v : d.toLocaleString("en-US", {
+    dateStyle: "medium",
+    timeStyle: "medium"
+  });
+};
+const esc = v => String(v ?? "");
+const toLocalDateTime = seconds => {
+  if (!seconds) return "";
+  const date = new Date(Date.now() + Number(seconds) * 1000);
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+};
+const fromLocalDateTime = value => {
+  if (!value) return 0;
+  return Math.max(0, Math.floor((new Date(value).getTime() - Date.now()) / 1000));
+};
+async function copyText(value) {
+  const text = String(value ?? "");
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (error) {}
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  const copied = document.execCommand("copy");
+  area.remove();
+  return copied;
 }
-[data-theme="dark"] {
-  --bg-secondary: #151412; --bg-primary: #1d1b18; --bg-tertiary: #262320;
-  --text-primary: #f6f4f1; --text-secondary: #c9c3bb; --text-tertiary: #9c958d;
-  --border-color: #3a3530; --border-hover: #5a544d; --primary-hover: #9a948e;
-  --shadow: 0 1px 3px rgb(0 0 0 / 0.3);
+const inputClass = "w-full rounded-lg border border-line bg-panel2 px-3 py-2.5 text-sm text-ink placeholder:text-muted/60";
+const Button = ({
+  children,
+  kind = "quiet",
+  className = "",
+  ...p
+}) => /*#__PURE__*/React.createElement("button", _extends({
+  className: `inline-flex min-h-10 items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-semibold transition duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:cursor-not-allowed disabled:opacity-50 ${kind === "primary" ? "border-cyan bg-cyan text-[#061014] hover:bg-[#70e2f1]" : "border-line bg-panel text-ink hover:border-cyan hover:bg-panel2"} ${className}`
+}, p), children);
+const Panel = ({
+  children,
+  className = ""
+}) => /*#__PURE__*/React.createElement("section", {
+  className: `rounded-2xl border border-line bg-panel p-5 md:p-6 ${className}`
+}, children);
+const Field = ({
+  label,
+  children
+}) => /*#__PURE__*/React.createElement("label", {
+  className: "grid gap-1.5 text-xs text-muted"
+}, /*#__PURE__*/React.createElement("span", null, label), children);
+const Status = ({
+  value
+}) => /*#__PURE__*/React.createElement("span", {
+  className: `inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${["active"].includes(String(value)) ? "bg-[#123529] text-green" : "bg-[#3b2222] text-red"}`
+}, /*#__PURE__*/React.createElement("i", {
+  className: "h-1.5 w-1.5 rounded-full bg-current"
+}), value || "unknown");
+function StatusSelect({
+  value,
+  onChange
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  const options = [["", "All statuses"], ["active", "Active"], ["disabled", "Disabled"], ["expired", "Expired"], ["exhausted", "Exhausted"]];
+  const label = options.find(([key]) => key === value)?.[1] || "All statuses";
+  useEffect(() => {
+    if (!open) return undefined;
+    const close = event => {
+      if (!rootRef.current?.contains(event.target)) setOpen(false);
+    };
+    const escape = event => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  return /*#__PURE__*/React.createElement("div", {
+    ref: rootRef,
+    className: "relative w-full sm:w-48"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: `${inputClass} flex items-center justify-between text-left`,
+    onClick: () => setOpen(!open),
+    "aria-expanded": open,
+    "aria-haspopup": "listbox",
+    "aria-controls": "key-shop-status-options"
+  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", {
+    className: `text-muted transition ${open ? "rotate-180" : ""}`
+  }, "\u2304")), open && /*#__PURE__*/React.createElement("div", {
+    id: "key-shop-status-options",
+    role: "listbox",
+    className: "absolute left-0 right-0 top-[calc(100%+8px)] z-20 max-h-64 overflow-y-auto rounded-xl border border-line bg-[#172126] p-1.5 shadow-2xl shadow-black/30"
+  }, options.map(([key, text]) => /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    role: "option",
+    "aria-selected": value === key,
+    key: key || "all",
+    className: `flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition hover:bg-panel2 ${value === key ? "bg-cyan/15 text-cyan" : "text-ink"}`,
+    onClick: () => {
+      onChange(key);
+      setOpen(false);
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "w-4 text-center"
+  }, value === key ? "✓" : ""), text))));
 }
-* { box-sizing: border-box; }
-body { margin: 0; background: var(--bg-secondary); color: var(--text-primary); font-family: var(--font); }
-main { max-width: 1120px; margin: 0 auto; padding: 28px 20px 56px; display: flex; flex-direction: column; gap: 18px; }
-.page-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; }
-h1 { margin: 0; font-size: 28px; font-weight: 800; letter-spacing: -0.4px; }
-.desc { margin: 6px 0 0; color: var(--text-secondary); font-size: 14px; }
-.card {
-  display: flex; flex-direction: column; gap: 16px; padding: 22px 24px;
-  border: 1px solid var(--border-color); border-radius: 14px;
-  background: color-mix(in srgb, var(--bg-primary) 82%, transparent);
-}
-.card-head { display: flex; gap: 10px; align-items: center; padding-bottom: 14px; border-bottom: 1px solid var(--border-color); }
-.index {
-  display: inline-flex; align-items: center; justify-content: center; min-width: 32px; height: 28px;
-  border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-secondary);
-  font-family: var(--mono); font-size: 11px; font-weight: 650; letter-spacing: 0.08em;
-}
-h2 { margin: 0; font-size: 16px; font-weight: 700; }
-.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-input {
-  min-width: 140px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px;
-  background: var(--bg-secondary); color: var(--text-primary); font: inherit;
-}
-input:focus { outline: none; border-color: var(--border-hover); }
-button {
-  display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent;
-  border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; cursor: pointer;
-}
-.primary { background: var(--primary-color); border-color: var(--primary-color); color: var(--primary-contrast); }
-.primary:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
-.secondary { background: var(--bg-tertiary); border-color: var(--border-color); color: var(--text-primary); }
-.ghost { background: transparent; border-color: transparent; color: var(--text-secondary); }
-.ghost:hover { background: var(--bg-tertiary); color: var(--text-primary); }
-.danger { background: var(--error-color); border-color: var(--error-color); color: #fff; }
-.table-wrap { border: 1px solid var(--border-color); border-radius: 8px; overflow: auto; background: var(--bg-primary); }
-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
-th { background: var(--bg-tertiary); color: var(--text-secondary); font-size: 12px; font-weight: 500; text-align: left; padding: 10px 14px; }
-td { padding: 12px 14px; border-top: 1px solid var(--border-color); vertical-align: middle; }
-tr:hover td { background: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); }
-.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.secret { font-family: var(--mono); color: var(--error-color); min-height: 1.4em; }
-.check { color: var(--text-secondary); font-size: 14px; font-weight: 500; display: inline-flex; gap: 6px; align-items: center; }
-</style>
-</head>
-<body>
-<main>
-  <header class="page-head">
-    <div>
-      <h1>API Keys</h1>
-      <p class="desc">Tạo key để bán. Mặc định 7 ngày và 100.000.000 token. Secret chỉ hiện một lần.</p>
-    </div>
-    <div class="row" id="mgmt-row">
-      <input id="mgmt" type="password" placeholder="Mật khẩu đăng nhập management" autocomplete="current-password">
-      <button id="save" class="secondary" type="button">Dùng key này</button>
-    </div>
-  </header>
-  <section class="card">
-    <div class="card-head"><span class="index">01</span><h2>Tạo key</h2></div>
-    <div class="row">
-      <input id="label" placeholder="label">
-      <input id="customer" placeholder="customer">
-      <input id="ttl" type="number" value="604800" title="giây">
-      <input id="limit" type="number" value="100000000">
-      <label class="check"><input id="never" type="checkbox"> Không hết hạn</label>
-      <label class="check"><input id="unlimited" type="checkbox"> Không giới hạn token</label>
-      <button id="create" class="primary" type="button">Tạo</button>
-    </div>
-    <p id="once" class="secret"></p>
-  </section>
-  <section class="card">
-    <div class="card-head"><span class="index">02</span><h2>Danh sách</h2></div>
-    <div class="table-wrap">
-      <table><thead><tr><th>Tên</th><th>Key</th><th>Status</th><th>Used</th><th>Limit</th><th>Expires</th><th></th></tr></thead><tbody id="rows"></tbody></table>
-    </div>
-  </section>
-  <section class="card">
-    <div class="card-head"><span class="index">03</span><h2>Sửa hạn</h2></div>
-    <div class="row">
-      <input id="edit-id" placeholder="id">
-      <input id="edit-ttl" type="number" placeholder="ttl seconds">
-      <input id="edit-limit" type="number" placeholder="token limit">
-      <button id="save-edit" class="primary" type="button">Lưu</button>
-      <button id="enable" class="secondary" type="button">Bật</button>
-    </div>
-  </section>
-  <section class="card">
-    <div class="card-head"><span class="index">04</span><h2>Request</h2></div>
-    <div class="row"><input id="req-id" placeholder="key id"><button id="load-req" class="secondary" type="button">Xem</button></div>
-    <div class="table-wrap">
-      <table><thead><tr><th>Thời gian</th><th>Model</th><th>Status</th><th>Token</th></tr></thead><tbody id="reqs"></tbody></table>
-    </div>
-  </section>
-</main>
-<script>
-(function syncTheme() {
-  const apply = (theme) => { if (theme) document.documentElement.dataset.theme = theme; };
-  try { apply(parent.document.documentElement.dataset.theme); } catch (e) {}
-  if (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches) apply("dark");
-})();
-const ENC_PREFIX = "enc::v1::";
-function deobfuscate(payload) {
-  if (!payload || !payload.startsWith(ENC_PREFIX)) return payload;
-  const binary = atob(payload.slice(ENC_PREFIX.length));
-  const encrypted = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) encrypted[i] = binary.charCodeAt(i);
-  const keyBytes = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent);
-  const out = new Uint8Array(encrypted.length);
-  for (let i = 0; i < encrypted.length; i++) out[i] = encrypted[i] ^ keyBytes[i % keyBytes.length];
+function decode(payload) {
+  if (!payload || !payload.startsWith("enc::v1::")) return payload;
+  const binary = atob(payload.slice(8)),
+    bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const secret = new TextEncoder().encode("cli-proxy-api-webui::secure-storage|" + location.host + "|" + navigator.userAgent),
+    out = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) out[i] = bytes[i] ^ secret[i % secret.length];
   return new TextDecoder().decode(out);
 }
 function panelKey() {
   const stores = [localStorage];
-  try { if (parent && parent.localStorage) stores.push(parent.localStorage); } catch (e) {}
-  for (const store of stores) {
-    for (const name of ["cli-proxy-auth", "managementKey"]) {
-      try {
-        const raw = store.getItem(name);
-        if (!raw) continue;
-        const parsed = JSON.parse(deobfuscate(raw));
-        const state = parsed && parsed.state ? parsed.state : parsed;
-        const key = state && (state.managementKey || state);
-        if (typeof key === "string" && key.trim()) return key.trim();
-      } catch (e) {}
-    }
-  }
-  return "";
+  try {
+    if (parent !== window) stores.push(parent.localStorage);
+  } catch {}
+  for (const store of stores) for (const name of ["cli-proxy-auth", "managementKey"]) try {
+    const raw = store.getItem(name);
+    if (!raw) continue;
+    const parsed = JSON.parse(decode(raw)),
+      state = parsed?.state || parsed,
+      key = state?.managementKey || state;
+    if (typeof key === "string" && key.trim()) return key.trim();
+  } catch (e) {}
+  return sessionStorage.getItem("keyshop.mgmt") || "";
 }
-function typedKey() {
-  return document.getElementById("mgmt").value.trim().replace(/^Bearer\s+/i, "");
-}
-let activeKey = panelKey() || sessionStorage.getItem("keyshop.mgmt") || "";
-const mgmt = document.getElementById("mgmt");
-if (panelKey()) document.getElementById("mgmt-row").hidden = true;
-else mgmt.value = activeKey;
-document.getElementById("save").onclick = () => {
-  activeKey = typedKey();
-  sessionStorage.setItem("keyshop.mgmt", activeKey);
-  load();
-};
-async function api(method, path, body) {
-  const key = panelKey() || activeKey || typedKey();
-  const res = await fetch(path, {method, headers:{"Authorization":"Bearer " + key, "Content-Type":"application/json"}, body: body ? JSON.stringify(body) : undefined});
-  const text = await res.text();
-  let data;
-  try { data = JSON.parse(text); } catch (e) { data = {error: text || res.statusText}; }
-  if (res.status === 401) {
-    sessionStorage.removeItem("keyshop.mgmt");
-    activeKey = "";
-    document.getElementById("mgmt-row").hidden = false;
-    data.error = data.error || "Sai mật khẩu management. Dùng mật khẩu đăng nhập panel, không dùng API key khách.";
-  }
+async function request(key, method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: {
+      Authorization: "Bearer " + key,
+      "Content-Type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(8000)
+  });
+  let data = {};
+  try {
+    data = await res.json();
+  } catch {}
+  if (!res.ok) throw Error(data.error || data.message || "Request failed");
   return data;
 }
-function idOf(key) { return key.ID || key.id; }
-async function load() {
-  const data = await api("GET", "/v0/management/plugins/key-shop/keys");
-  const keys = data.keys || [];
-  document.getElementById("rows").innerHTML = keys.map((key) => `<tr><td>${key.Label || key.label || "—"}</td><td class="mono">${key.Display || key.display}</td><td>${key.Status || key.status}</td><td class="mono">${key.TokensUsed || 0}</td><td class="mono">${key.TokenLimit || 0}</td><td>${key.ExpiresAt || key.expires_at || "never"}</td><td>
-    <button class="ghost" data-id="${idOf(key)}" data-act="disable">Tắt</button>
-    <button class="ghost" data-id="${idOf(key)}" data-act="reset">Reset</button>
-    <button class="ghost" data-id="${idOf(key)}" data-act="rotate">Rotate</button>
-    <button class="danger" data-id="${idOf(key)}" data-act="delete">Xóa</button>
-    <button class="ghost" data-id="${idOf(key)}" data-act="logs">Log</button>
-  </td></tr>`).join("") || "<tr><td colspan='7'>Chưa có key.</td></tr>";
+function Login({
+  onOpen
+}) {
+  const [value, setValue] = useState(panelKey()),
+    [error, setError] = useState("");
+  return /*#__PURE__*/React.createElement("main", {
+    className: "mx-auto max-w-xl px-4 pt-[12vh]"
+  }, /*#__PURE__*/React.createElement(Panel, {
+    className: "p-7 md:p-9"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "mb-2 text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "CLIProxy API / key shop"), /*#__PURE__*/React.createElement("h1", {
+    className: "text-3xl font-bold tracking-[-.05em]"
+  }, "Operations workspace"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 text-muted"
+  }, "Use your panel management key to issue and manage customer API keys."), /*#__PURE__*/React.createElement("form", {
+    className: "mt-7 grid gap-4",
+    onSubmit: async e => {
+      e.preventDefault();
+      try {
+        setError("");
+        await onOpen(value);
+      } catch (err) {
+        setError(err && (err.name === "TimeoutError" || err.name === "AbortError") ? "The operations API did not respond in time." : "The management key could not be authenticated.");
+      }
+    }
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Management key"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    type: "password",
+    value: value,
+    onChange: e => setValue(e.target.value),
+    placeholder: "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022",
+    autoFocus: true
+  })), error && /*#__PURE__*/React.createElement("p", {
+    className: "text-sm text-red"
+  }, error), /*#__PURE__*/React.createElement(Button, {
+    kind: "primary",
+    type: "submit"
+  }, "Open operations"))));
 }
-document.getElementById("create").onclick = async () => {
-  const data = await api("POST", "/v0/management/plugins/key-shop/keys", {
-    label: document.getElementById("label").value,
-    customer: document.getElementById("customer").value,
-    ttl_seconds: Number(document.getElementById("ttl").value),
-    token_limit: Number(document.getElementById("limit").value),
-    never_expires: document.getElementById("never").checked,
-    unlimited_tokens: document.getElementById("unlimited").checked
+function Admin({
+  keyValue,
+  onLogout
+}) {
+  const [keys, setKeys] = useState([]),
+    [stats, setStats] = useState({}),
+    [query, setQuery] = useState(""),
+    [filter, setFilter] = useState(""),
+    [page, setPage] = useState(1),
+    [total, setTotal] = useState(0),
+    [selected, setSelected] = useState(null),
+    [logs, setLogs] = useState([]),
+    [logCursor, setLogCursor] = useState(""),
+    [logsMore, setLogsMore] = useState(false),
+    [logsLoading, setLogsLoading] = useState(true),
+    [bulk, setBulk] = useState({
+      label: "",
+      customer: "",
+      note: "",
+      count: 1,
+      ttl_seconds: 604800,
+      token_limit: 100000000,
+      never_expires: false,
+      unlimited_tokens: false
+    }),
+    [secrets, setSecrets] = useState([]),
+    [toast, setToast] = useState(""),
+    [loading, setLoading] = useState(true),
+    [confirming, setConfirming] = useState(null),
+    [createOpen, setCreateOpen] = useState(false);
+  const notify = message => {
+    setToast(message);
+    setTimeout(() => setToast(""), 2200);
+  };
+  const load = async () => {
+    setLoading(true);
+    try {
+      const [list, summary] = await Promise.all([request(keyValue, "GET", "/v0/management/plugins/key-shop/keys?q=" + encodeURIComponent(query) + "&status=" + encodeURIComponent(filter) + "&page=" + page + "&page_size=25"), request(keyValue, "GET", "/v0/management/plugins/key-shop/stats")]);
+      setKeys(list.keys || []);
+      setTotal(Number(list.total || 0));
+      setStats(summary);
+    } catch (e) {
+      notify(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    load();
+  }, [page, filter]);
+  useEffect(() => {
+    const id = setTimeout(load, 250);
+    return () => clearTimeout(id);
+  }, [query]);
+  useEffect(() => {
+    setPage(1);
+  }, [query, filter]);
+  const loadLogs = async (keyID = "") => {
+    setLogsLoading(true);
+    try {
+      const path = "/v0/management/plugins/key-shop/requests?limit=25" + (keyID ? "&id=" + encodeURIComponent(keyID) : "");
+      const data = await request(keyValue, "GET", path);
+      setLogs(data.requests || []);
+      setLogCursor(data.next_cursor || "");
+      setLogsMore(Boolean(data.has_more));
+    } catch (e) {
+      notify(e.message);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+  useEffect(() => {
+    loadLogs();
+  }, []);
+  const edit = key => {
+    setSelected({
+      ...key,
+      ttl_seconds: get(key, "ExpiresAt", "expires_at") ? Math.max(0, Math.floor((new Date(get(key, "ExpiresAt", "expires_at")).getTime() - Date.now()) / 1000)) : ""
+    });
+    loadLogs(get(key, "ID", "id"));
+  };
+  const closeEditor = () => {
+    setSelected(null);
+    loadLogs();
+  };
+  const action = async (method, path, body, message) => {
+    try {
+      const result = await request(keyValue, method, path, body);
+      if (result.secret) setSecrets([result.secret]);
+      notify(message);
+      await load();
+    } catch (e) {
+      notify(e.message);
+    }
+  };
+  const create = async e => {
+    e.preventDefault();
+    try {
+      const data = await request(keyValue, "POST", Number(bulk.count) === 1 ? "/v0/management/plugins/key-shop/keys" : "/v0/management/plugins/key-shop/keys/bulk", {
+        ...bulk,
+        count: Number(bulk.count),
+        ttl_seconds: Number(bulk.ttl_seconds),
+        token_limit: Number(bulk.token_limit)
+      });
+      const output = data.secret ? [data.secret] : (data.keys || []).map(item => get(item, "Secret", "secret"));
+      setSecrets(output);
+      notify(`Created ${output.length} key${output.length === 1 ? "" : "s"}`);
+      await load();
+    } catch (err) {
+      notify(err.message);
+    }
+  };
+  const visible = keys;
+  return /*#__PURE__*/React.createElement("main", {
+    className: "mx-auto min-w-0 max-w-[1480px] overflow-x-hidden px-3 py-5 sm:px-4 sm:py-7 md:px-7 md:py-9"
+  }, /*#__PURE__*/React.createElement("header", {
+    className: "mb-7 flex flex-col justify-between gap-5 md:flex-row md:items-end"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("p", {
+    className: "mb-2 text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "Key shop / operations"), /*#__PURE__*/React.createElement("h1", {
+    className: "text-[2.25rem] font-bold leading-[.98] tracking-[-.06em] sm:text-4xl md:text-5xl"
+  }, "Access, measured."), /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 text-muted"
+  }, "Issue, manage, and monitor customer access from one workspace.")), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2"
+  }, /*#__PURE__*/React.createElement(Button, {
+    onClick: load
+  }, "Refresh"), /*#__PURE__*/React.createElement(Button, {
+    onClick: onLogout
+  }, "Sign out"))), /*#__PURE__*/React.createElement("div", {
+    className: "mb-4 grid grid-cols-2 gap-2.5 sm:gap-3 md:mb-5 md:grid-cols-5"
+  }, [["Total keys", stats.keys_total, "Stored"], ["Active", stats.keys_active, "Allowed to call"], ["Tokens used", num(stats.tokens_used_total), "Lifetime total"], ["Requests", num(stats.requests_total), "Recorded"], ["Expiring soon", stats.expiring_within_7d, "Within 7 days"]].map(([l, v, n]) => /*#__PURE__*/React.createElement(Panel, {
+    className: "p-4",
+    key: l
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-muted"
+  }, l), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-2 block font-mono text-2xl font-bold"
+  }, v || 0), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-muted"
+  }, n)))), /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-5"
+  }, /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("div", {
+    className: "mb-5 flex min-w-0 flex-col justify-between gap-3 sm:flex-row sm:items-end"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold tracking-[-.02em]"
+  }, "Key inventory"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, "Secrets are shown only after creation or rotation."), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-xs text-muted"
+  }, total.toLocaleString("en-US"), " total keys")), /*#__PURE__*/React.createElement(Button, {
+    kind: "primary",
+    className: "w-full sm:w-auto",
+    onClick: () => setCreateOpen(true)
+  }, "+ Create keys")), /*#__PURE__*/React.createElement("div", {
+    className: "mb-4 flex min-w-0 flex-col gap-2 sm:flex-row"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: `${inputClass} min-w-0 sm:flex-1`,
+    value: query,
+    onChange: e => setQuery(e.target.value),
+    placeholder: "Search label, customer, or ID\u2026"
+  }), /*#__PURE__*/React.createElement(StatusSelect, {
+    value: filter,
+    onChange: setFilter
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "hidden overflow-x-auto sm:block"
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "w-full min-w-[760px] text-left text-sm sm:min-w-[850px]"
+  }, /*#__PURE__*/React.createElement("thead", {
+    className: "text-[10px] uppercase tracking-[.12em] text-muted"
+  }, /*#__PURE__*/React.createElement("tr", null, ["Key", "Customer", "Status", "Usage", "Expires", ""].map(h => /*#__PURE__*/React.createElement("th", {
+    className: "pb-3 pr-3",
+    key: h
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, visible.length ? visible.map(key => {
+    const id = get(key, "ID", "id"),
+      used = Number(get(key, "TokensUsed", "tokens_used")),
+      limit = Number(get(key, "TokenLimit", "token_limit"));
+    return /*#__PURE__*/React.createElement("tr", {
+      className: "border-t border-line",
+      key: id
+    }, /*#__PURE__*/React.createElement("td", {
+      className: "py-3 pr-3"
+    }, /*#__PURE__*/React.createElement("strong", null, get(key, "Label", "label") || "Unnamed"), /*#__PURE__*/React.createElement("div", {
+      className: "font-mono text-[11px] text-muted"
+    }, get(key, "Display", "display"))), /*#__PURE__*/React.createElement("td", {
+      className: "py-3 pr-3"
+    }, get(key, "Customer", "customer") || "—"), /*#__PURE__*/React.createElement("td", {
+      className: "py-3 pr-3"
+    }, /*#__PURE__*/React.createElement(Status, {
+      value: get(key, "Status", "status")
+    })), /*#__PURE__*/React.createElement("td", {
+      className: "max-w-[13rem] py-3 pr-3 font-mono text-xs tabular-nums"
+    }, num(used), " / ", limit ? num(limit) : "∞"), /*#__PURE__*/React.createElement("td", {
+      className: "py-3 pr-3"
+    }, date(get(key, "ExpiresAt", "expires_at"))), /*#__PURE__*/React.createElement("td", {
+      className: "py-3 text-right"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex justify-end gap-1"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "rounded border border-line px-2 py-1 text-xs text-muted hover:border-cyan",
+      onClick: () => edit(key)
+    }, "Edit"), /*#__PURE__*/React.createElement("button", {
+      className: "rounded border border-line px-2 py-1 text-xs text-muted hover:border-cyan",
+      onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/rotate", {
+        id
+      }, "Key rotated")
+    }, "Rotate"), /*#__PURE__*/React.createElement("button", {
+      className: "rounded border border-line px-2 py-1 text-xs text-red hover:border-red",
+      onClick: () => setConfirming({
+        id,
+        label: get(key, "Label", "label") || "this key"
+      })
+    }, "Delete"))));
+  }) : /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    className: "py-10 text-center text-muted",
+    colSpan: "6"
+  }, loading ? "Loading…" : "No matching keys."))))), /*#__PURE__*/React.createElement("div", {
+    className: "grid gap-2.5 sm:hidden"
+  }, visible.length ? visible.map(key => {
+    const id = get(key, "ID", "id");
+    const used = Number(get(key, "TokensUsed", "tokens_used"));
+    const limit = Number(get(key, "TokenLimit", "token_limit"));
+    return /*#__PURE__*/React.createElement("article", {
+      className: "rounded-xl border border-line bg-panel2 p-3.5",
+      key: id
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "flex items-start justify-between gap-3"
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "min-w-0"
+    }, /*#__PURE__*/React.createElement("strong", {
+      className: "block truncate"
+    }, get(key, "Label", "label") || "Unnamed"), /*#__PURE__*/React.createElement("span", {
+      className: "mt-1 block truncate font-mono text-[11px] text-muted"
+    }, get(key, "Display", "display"))), /*#__PURE__*/React.createElement(Status, {
+      value: get(key, "Status", "status")
+    })), /*#__PURE__*/React.createElement("div", {
+      className: "mt-3 grid grid-cols-2 gap-2 text-xs"
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      className: "block text-muted"
+    }, "Customer"), /*#__PURE__*/React.createElement("strong", {
+      className: "mt-1 block truncate"
+    }, get(key, "Customer", "customer") || "—")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+      className: "block text-muted"
+    }, "Usage"), /*#__PURE__*/React.createElement("strong", {
+      className: "mt-1 block font-mono tabular-nums"
+    }, num(used), " / ", limit ? num(limit) : "∞")), /*#__PURE__*/React.createElement("div", {
+      className: "col-span-2"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "block text-muted"
+    }, "Expires"), /*#__PURE__*/React.createElement("strong", {
+      className: "mt-1 block"
+    }, date(get(key, "ExpiresAt", "expires_at"))))), /*#__PURE__*/React.createElement("div", {
+      className: "mt-3 grid grid-cols-3 gap-2"
+    }, /*#__PURE__*/React.createElement(Button, {
+      className: "min-h-9 px-2 text-xs",
+      onClick: () => edit(key)
+    }, "Edit"), /*#__PURE__*/React.createElement(Button, {
+      className: "min-h-9 px-2 text-xs",
+      onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/rotate", {
+        id
+      }, "Key rotated")
+    }, "Rotate"), /*#__PURE__*/React.createElement(Button, {
+      className: "min-h-9 border-red/60 px-2 text-xs text-red",
+      onClick: () => setConfirming({
+        id,
+        label: get(key, "Label", "label") || "this key"
+      })
+    }, "Delete")));
+  }) : /*#__PURE__*/React.createElement("p", {
+    className: "rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted"
+  }, loading ? "Loading…" : "No matching keys.")), /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 flex flex-col items-stretch justify-between gap-3 text-xs text-muted sm:flex-row sm:items-center"
+  }, /*#__PURE__*/React.createElement("span", null, "Page ", page, " of ", Math.max(1, Math.ceil(total / 25))), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2 sm:flex"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    disabled: page <= 1 || loading,
+    onClick: () => setPage(page - 1)
+  }, "Previous"), /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    disabled: page >= Math.ceil(total / 25) || loading,
+    onClick: () => setPage(page + 1)
+  }, "Next")))), /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, "Request explorer"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, selected ? `Recent requests for ${get(selected, "Display", "display")}` : "Recent requests across all customer keys."), /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 hidden overflow-x-auto rounded-xl border border-line/70 sm:block"
+  }, /*#__PURE__*/React.createElement("table", {
+    className: "w-full min-w-[620px] text-left text-sm sm:min-w-[650px]"
+  }, /*#__PURE__*/React.createElement("thead", {
+    className: "text-[10px] uppercase tracking-[.12em] text-muted"
+  }, /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("th", {
+    className: "pb-3"
+  }, "Time"), /*#__PURE__*/React.createElement("th", {
+    className: "pb-3"
+  }, "Model"), /*#__PURE__*/React.createElement("th", {
+    className: "pb-3"
+  }, "Transport"), /*#__PURE__*/React.createElement("th", {
+    className: "pb-3"
+  }, "Status"), /*#__PURE__*/React.createElement("th", {
+    className: "pb-3"
+  }, "Token"))), /*#__PURE__*/React.createElement("tbody", null, logs.length ? logs.map((row, i) => /*#__PURE__*/React.createElement("tr", {
+    className: "border-t border-line",
+    key: get(row, "RequestID", "request_id") || i
+  }, /*#__PURE__*/React.createElement("td", {
+    className: "py-3"
+  }, date(get(row, "RequestedAt", "requested_at"))), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 font-mono"
+  }, get(row, "Model", "model")), /*#__PURE__*/React.createElement("td", {
+    className: "py-3"
+  }, get(row, "Transport", "transport")), /*#__PURE__*/React.createElement("td", {
+    className: "py-3"
+  }, get(row, "Status", "status")), /*#__PURE__*/React.createElement("td", {
+    className: "py-3 font-mono"
+  }, num(get(row, "Billed", "billed"))))) : /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    className: "py-8 text-center text-muted",
+    colSpan: "5"
+  }, logsLoading ? "Loading requests…" : "No requests recorded yet."))))), /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 grid gap-2.5 sm:hidden"
+  }, logs.length ? logs.map((row, i) => /*#__PURE__*/React.createElement("article", {
+    className: "rounded-xl border border-line bg-panel2 p-3.5",
+    key: get(row, "RequestID", "request_id") || i
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-start justify-between gap-3"
+  }, /*#__PURE__*/React.createElement("strong", {
+    className: "truncate font-mono text-xs"
+  }, get(row, "Model", "model") || "Unknown model"), /*#__PURE__*/React.createElement(Status, {
+    value: get(row, "Status", "status")
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 grid grid-cols-2 gap-2 text-xs"
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Time"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block"
+  }, date(get(row, "RequestedAt", "requested_at")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Transport"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block"
+  }, get(row, "Transport", "transport") || "—")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "block text-muted"
+  }, "Billed"), /*#__PURE__*/React.createElement("strong", {
+    className: "mt-1 block font-mono"
+  }, num(get(row, "Billed", "billed"))))))) : /*#__PURE__*/React.createElement("p", {
+    className: "rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted"
+  }, "No requests.")), selected && logsMore && /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 flex justify-end"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    onClick: () => request(keyValue, "GET", "/v0/management/plugins/key-shop/requests?id=" + encodeURIComponent(get(selected, "ID", "id")) + "&limit=25&cursor=" + encodeURIComponent(logCursor)).then(data => {
+      setLogs([...logs, ...(data.requests || [])]);
+      setLogCursor(data.next_cursor || "");
+      setLogsMore(Boolean(data.has_more));
+    }).catch(e => notify(e.message))
+  }, "Load more")))), /*#__PURE__*/React.createElement("aside", {
+    className: `${createOpen || selected ? "fixed inset-0 z-30 flex items-end justify-center overflow-y-auto bg-black/75 p-0 sm:items-center sm:p-4" : "hidden"}`,
+    onClick: () => {
+      if (createOpen) setCreateOpen(false);
+      if (selected) closeEditor();
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "max-h-[100dvh] w-full overflow-y-auto sm:max-h-[92dvh] sm:max-w-2xl",
+    onClick: event => event.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "mb-3 flex justify-end"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    onClick: () => {
+      setCreateOpen(false);
+      closeEditor();
+    }
+  }, "Close")), createOpen && /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, "Create keys"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, "Create one key or a batch of up to 500 keys."), /*#__PURE__*/React.createElement("form", {
+    className: "mt-5 grid gap-3",
+    onSubmit: create
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Label"
+  }, /*#__PURE__*/React.createElement("input", {
+    id: "create-label",
+    className: inputClass,
+    value: bulk.label,
+    onChange: e => setBulk({
+      ...bulk,
+      label: e.target.value
+    }),
+    placeholder: "Example: Pro plan \xB7 November"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Customer"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    value: bulk.customer,
+    onChange: e => setBulk({
+      ...bulk,
+      customer: e.target.value
+    }),
+    placeholder: "Customer name"
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-3"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Quantity"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    type: "number",
+    min: "1",
+    max: "500",
+    value: bulk.count,
+    onChange: e => setBulk({
+      ...bulk,
+      count: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Expires at"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    type: "datetime-local",
+    disabled: bulk.never_expires,
+    value: toLocalDateTime(bulk.ttl_seconds),
+    onChange: e => setBulk({
+      ...bulk,
+      ttl_seconds: fromLocalDateTime(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Token limit"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    type: "number",
+    min: "0",
+    value: bulk.token_limit,
+    onChange: e => setBulk({
+      ...bulk,
+      token_limit: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Internal note"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    value: bulk.note,
+    onChange: e => setBulk({
+      ...bulk,
+      note: e.target.value
+    }),
+    placeholder: "Optional note"
+  }))), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-xs text-muted"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: bulk.never_expires,
+    onChange: e => setBulk({
+      ...bulk,
+      never_expires: e.target.checked
+    })
+  }), " ", "Never expires"), /*#__PURE__*/React.createElement("label", {
+    className: "flex items-center gap-2 text-xs text-muted"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: bulk.unlimited_tokens,
+    onChange: e => setBulk({
+      ...bulk,
+      unlimited_tokens: e.target.checked
+    })
+  }), " ", "Unlimited tokens"), /*#__PURE__*/React.createElement(Button, {
+    kind: "primary",
+    type: "submit"
+  }, "Create ", Number(bulk.count) || 1, " key", Number(bulk.count) === 1 ? "" : "s")), secrets.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 grid gap-3"
+  }, /*#__PURE__*/React.createElement("pre", {
+    className: "max-h-44 overflow-auto whitespace-pre-wrap break-all rounded-xl border border-[#145461] bg-[#09242b] p-3 font-mono text-xs text-cyan"
+  }, secrets.join("\n")), /*#__PURE__*/React.createElement(Button, {
+    onClick: () => copyText(secrets.join("\n"))
+  }, "Copy all secrets"))), selected && /*#__PURE__*/React.createElement(Panel, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold"
+  }, "Selected key"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-sm text-muted"
+  }, "Edit key details and lifecycle controls."), /*#__PURE__*/React.createElement("div", {
+    className: "mt-5 grid gap-3"
+  }, /*#__PURE__*/React.createElement(Field, {
+    label: "Key ID"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    value: selected ? get(selected, "ID", "id") : "",
+    readOnly: true,
+    placeholder: "Select Edit in the inventory"
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Label"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    disabled: !selected,
+    value: selected ? get(selected, "Label", "label") : "",
+    onChange: e => setSelected({
+      ...selected,
+      Label: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Customer"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    disabled: !selected,
+    value: selected ? get(selected, "Customer", "customer") : "",
+    onChange: e => setSelected({
+      ...selected,
+      Customer: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Token limit"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    disabled: !selected,
+    type: "number",
+    value: selected ? get(selected, "TokenLimit", "token_limit") : "",
+    onChange: e => setSelected({
+      ...selected,
+      TokenLimit: Number(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement(Field, {
+    label: "Expires at"
+  }, /*#__PURE__*/React.createElement("input", {
+    className: inputClass,
+    disabled: !selected,
+    type: "datetime-local",
+    value: toLocalDateTime(selected?.ttl_seconds),
+    onChange: e => setSelected({
+      ...selected,
+      ttl_seconds: fromLocalDateTime(e.target.value)
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-wrap gap-2"
+  }, /*#__PURE__*/React.createElement(Button, {
+    kind: "primary",
+    disabled: !selected,
+    onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/update", {
+      id: get(selected, "ID", "id"),
+      label: get(selected, "Label", "label"),
+      customer: get(selected, "Customer", "customer"),
+      token_limit: Number(get(selected, "TokenLimit", "token_limit")),
+      ...(selected.ttl_seconds !== "" ? {
+        ttl_seconds: Number(selected.ttl_seconds)
+      } : {})
+    }, "Changes saved")
+  }, "Save"), /*#__PURE__*/React.createElement(Button, {
+    disabled: !selected,
+    onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/update", {
+      id: get(selected, "ID", "id"),
+      status: "active"
+    }, "Key enabled")
+  }, "Enable"), /*#__PURE__*/React.createElement(Button, {
+    disabled: !selected,
+    onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/update", {
+      id: get(selected, "ID", "id"),
+      status: "disabled"
+    }, "Key disabled")
+  }, "Disable"), /*#__PURE__*/React.createElement(Button, {
+    disabled: !selected,
+    onClick: () => action("POST", "/v0/management/plugins/key-shop/keys/reset-usage", {
+      id: get(selected, "ID", "id")
+    }, "Usage reset")
+  }, "Reset"))))))), toast && /*#__PURE__*/React.createElement("div", {
+    className: "fixed bottom-5 right-5 rounded-lg bg-[#dffaf2] px-4 py-3 text-sm font-semibold text-[#062319]"
+  }, toast), confirming && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 z-30 grid place-items-center bg-black/70 p-4",
+    onClick: () => setConfirming(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-full max-w-md rounded-2xl border border-line bg-panel p-6 shadow-2xl",
+    onClick: event => event.stopPropagation()
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-[11px] uppercase tracking-[.16em] text-muted"
+  }, "Delete key"), /*#__PURE__*/React.createElement("h2", {
+    className: "mt-2 text-xl font-bold"
+  }, "Delete this key?"), /*#__PURE__*/React.createElement("p", {
+    className: "mt-2 text-sm text-muted"
+  }, "\u201C", confirming.label, "\u201D will stop working immediately. This action cannot be undone."), /*#__PURE__*/React.createElement("div", {
+    className: "mt-6 flex justify-end gap-2"
+  }, /*#__PURE__*/React.createElement(Button, {
+    onClick: () => setConfirming(null)
+  }, "Cancel"), /*#__PURE__*/React.createElement(Button, {
+    className: "border-red/60 text-red hover:border-red hover:bg-red/10",
+    onClick: async () => {
+      const target = confirming;
+      setConfirming(null);
+      await action("POST", "/v0/management/plugins/key-shop/keys/delete", {
+        id: target.id
+      }, "Key deleted");
+    }
+  }, "Delete key")))));
+}
+function App() {
+  const [key, setKey] = useState(panelKey()),
+    [ready, setReady] = useState(false);
+  const open = async value => {
+    await request(value, "GET", "/v0/management/plugins/key-shop/stats");
+    sessionStorage.setItem("keyshop.mgmt", value);
+    setKey(value);
+    setReady(true);
+  };
+  useEffect(() => {
+    if (key) open(key).catch(() => {});
+  }, []);
+  if (!ready) return /*#__PURE__*/React.createElement(Login, {
+    onOpen: open
   });
-  document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : (data.error || "create failed");
-  await load();
-};
-async function logs(id) {
-  document.getElementById("req-id").value = id;
-  const data = await api("GET", "/v0/management/plugins/key-shop/requests?id=" + encodeURIComponent(id) + "&limit=30");
-  const rows = data.requests || [];
-  document.getElementById("reqs").innerHTML = rows.map((row) => `<tr><td>${row.RequestedAt || ""}</td><td>${row.Model || ""}</td><td>${row.Status || ""}</td><td class="mono">${row.Billed || 0}</td></tr>`).join("") || "<tr><td colspan='4'>Chưa có request.</td></tr>";
+  return /*#__PURE__*/React.createElement(Admin, {
+    keyValue: key,
+    onLogout: () => {
+      sessionStorage.removeItem("keyshop.mgmt");
+      setReady(false);
+      setKey("");
+    }
+  });
 }
-document.getElementById("rows").onclick = async (ev) => {
-  const btn = ev.target.closest("button");
-  if (!btn) return;
-  const id = btn.dataset.id;
-  if (btn.dataset.act === "disable") await api("POST", "/v0/management/plugins/key-shop/keys/update", {id, status: "disabled"});
-  if (btn.dataset.act === "reset") await api("POST", "/v0/management/plugins/key-shop/keys/reset-usage", {id});
-  if (btn.dataset.act === "delete") await api("POST", "/v0/management/plugins/key-shop/keys/delete", {id});
-  if (btn.dataset.act === "rotate") {
-    const data = await api("POST", "/v0/management/plugins/key-shop/keys/rotate", {id});
-    document.getElementById("once").textContent = data.secret ? "Copy once: " + data.secret : "rotate failed";
-  }
-  if (btn.dataset.act === "logs") { await logs(id); return; }
-  await load();
-};
-document.getElementById("save-edit").onclick = async () => {
-  const body = {id: document.getElementById("edit-id").value};
-  const ttl = document.getElementById("edit-ttl").value;
-  const limit = document.getElementById("edit-limit").value;
-  if (ttl !== "") body.ttl_seconds = Number(ttl);
-  if (limit !== "") body.token_limit = Number(limit);
-  await api("POST", "/v0/management/plugins/key-shop/keys/update", body);
-  await load();
-};
-document.getElementById("enable").onclick = async () => {
-  await api("POST", "/v0/management/plugins/key-shop/keys/update", {id: document.getElementById("edit-id").value, status: "active"});
-  await load();
-};
-document.getElementById("load-req").onclick = () => logs(document.getElementById("req-id").value);
-if (mgmt.value) load();
+ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
 </script>
-</body>
+  </body>
 </html>

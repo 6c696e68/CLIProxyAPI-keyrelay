@@ -20,7 +20,6 @@ import "C"
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"sync"
 	"time"
@@ -29,9 +28,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/examples/plugin/key-shop/go/keyshop"
 	"gopkg.in/yaml.v3"
 )
-
-//go:embed web/admin.html web/dashboard.html
-var webFS embed.FS
 
 var (
 	runtimeMu sync.Mutex
@@ -124,18 +120,20 @@ func configure(request []byte) error {
 	_ = json.Unmarshal(request, &parsed)
 	if len(parsed.ConfigYAML) > 0 {
 		var doc struct {
-			DataFile       string `yaml:"data_file"`
-			DefaultTTL     string `yaml:"default_ttl"`
-			DefaultLimit   int64  `yaml:"default_token_limit"`
-			ReserveTokens  int64  `yaml:"reserve_tokens"`
-			ReservationTTL string `yaml:"reservation_ttl"`
-			RetentionDays  int    `yaml:"retention_days"`
+			DataFile             string `yaml:"data_file"`
+			DefaultTTL           string `yaml:"default_ttl"`
+			DefaultLimit         int64  `yaml:"default_token_limit"`
+			ReserveTokens        int64  `yaml:"reserve_tokens"`
+			ReservationTTL       string `yaml:"reservation_ttl"`
+			RetentionDays        int    `yaml:"retention_days"`
+			DeletedRetentionDays int    `yaml:"deleted_retention_days"`
 		}
 		if err := yaml.Unmarshal(parsed.ConfigYAML, &doc); err == nil {
 			cfg.DataFile = doc.DataFile
 			cfg.DefaultLimit = doc.DefaultLimit
 			cfg.ReserveTokens = doc.ReserveTokens
 			cfg.RetentionDays = doc.RetentionDays
+			cfg.DeletedRetentionDays = doc.DeletedRetentionDays
 			if doc.DefaultTTL != "" {
 				if parsedTTL, err := time.ParseDuration(doc.DefaultTTL); err == nil {
 					cfg.DefaultTTL = parsedTTL

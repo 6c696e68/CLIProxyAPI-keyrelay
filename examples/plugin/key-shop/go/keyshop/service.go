@@ -27,7 +27,7 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 		return ok(map[string]any{
 			"schema_version": 6,
 			"metadata": map[string]any{
-				"Name": "key-shop", "Version": "0.1.0", "Author": "cliproxyapi",
+				"Name": "key-shop", "Version": "0.1.2", "Author": "cliproxyapi",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
 					{"Name": "data_file", "Type": "string", "Description": "SQLite path. Empty uses ~/.cliproxyapi/key-shop/key-shop.db"},
@@ -36,6 +36,7 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 					{"Name": "reserve_tokens", "Type": "integer", "Default": 32768, "Description": "Tokens held before usage is known"},
 					{"Name": "reservation_ttl", "Type": "string", "Default": "15m", "Description": "How long an unfinished reservation is kept"},
 					{"Name": "retention_days", "Type": "integer", "Default": 30, "Description": "How long request rows are kept"},
+					{"Name": "deleted_retention_days", "Type": "integer", "Default": 90, "Description": "How long deleted key metadata is kept"},
 				},
 			},
 			"capabilities": map[string]any{
@@ -176,6 +177,7 @@ func (s *Service) routes() map[string]any {
 	return map[string]any{
 		"routes": []map[string]string{
 			{"Method": "POST", "Path": "/plugins/key-shop/keys"},
+			{"Method": "POST", "Path": "/plugins/key-shop/keys/bulk"},
 			{"Method": "GET", "Path": "/plugins/key-shop/keys"},
 			{"Method": "POST", "Path": "/plugins/key-shop/keys/update"},
 			{"Method": "POST", "Path": "/plugins/key-shop/keys/rotate"},
@@ -209,11 +211,13 @@ func (s *Service) manage(payload []byte) map[string]any {
 	case strings.HasSuffix(path, "/admin"):
 		return htmlResponse(s.admin)
 	case strings.HasSuffix(path, "/api/session"):
-		return s.session(req.Headers)
+		return s.session(req.Headers, req.Query)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodPost:
 		return s.create(body)
+	case strings.HasSuffix(path, "/keys/bulk") && req.Method == http.MethodPost:
+		return s.createBulk(body)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodGet:
-		return s.list(queryOne(req.Query, "q"))
+		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
 	case strings.HasSuffix(path, "/keys/update"):
 		return s.update(body)
 	case strings.HasSuffix(path, "/keys/rotate"):
@@ -254,15 +258,42 @@ func (s *Service) create(body []byte) map[string]any {
 	return jsonResponse(http.StatusOK, map[string]any{"key": key, "secret": secret})
 }
 
-func (s *Service) list(q string) map[string]any {
-	keys, err := s.store.List(q)
+func (s *Service) createBulk(body []byte) map[string]any {
+	var in struct {
+		Label, Customer, Note, LabelTemplate string
+		Count                                int   `json:"count"`
+		TTLSeconds                           int64 `json:"ttl_seconds"`
+		NeverExpires                         bool  `json:"never_expires"`
+		TokenLimit                           int64 `json:"token_limit"`
+		UnlimitedTokens                      bool  `json:"unlimited_tokens"`
+	}
+	if json.Unmarshal(body, &in) != nil || in.Count < 1 || in.Count > 500 {
+		return textResponse(http.StatusBadRequest, "count must be between 1 and 500")
+	}
+	label := in.Label
+	if label == "" {
+		label = in.LabelTemplate
+	}
+	created, err := s.store.CreateBatch(CreateInput{
+		Label: label, Customer: in.Customer, Note: in.Note, TTLSeconds: in.TTLSeconds,
+		NeverExpires: in.NeverExpires, TokenLimit: in.TokenLimit,
+		TokenLimitSet: bytes.Contains(body, []byte(`"token_limit"`)), UnlimitedTokens: in.UnlimitedTokens,
+	}, in.Count)
+	if err != nil {
+		return textResponse(http.StatusBadRequest, err.Error())
+	}
+	return jsonResponse(http.StatusOK, map[string]any{"keys": created})
+}
+
+func (s *Service) list(q, status string, page, pageSize int) map[string]any {
+	keys, total, err := s.store.ListPageFiltered(q, status, page, pageSize)
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "list failed")
 	}
 	if keys == nil {
 		keys = []Key{}
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"keys": keys})
+	return jsonResponse(http.StatusOK, map[string]any{"keys": keys, "total": total, "page": page, "page_size": pageSize})
 }
 
 func (s *Service) update(body []byte) map[string]any {
@@ -318,26 +349,26 @@ func (s *Service) delete(body []byte) map[string]any {
 }
 
 func (s *Service) requests(q map[string][]string) map[string]any {
-	limit, _ := strconv.Atoi(queryOne(q, "limit"))
-	rows, err := s.store.Requests(RequestQuery{KeyID: queryOne(q, "id"), Status: queryOne(q, "status"), Model: queryOne(q, "model"), From: parseTimeQuery(queryOne(q, "from")), To: parseTimeQuery(queryOne(q, "to")), Limit: limit})
+	limit := queryInt(q, "limit", 25)
+	rows, page, err := s.store.RequestsPage(RequestQuery{KeyID: queryOne(q, "id"), Status: queryOne(q, "status"), Model: queryOne(q, "model"), From: parseTimeQuery(queryOne(q, "from")), To: parseTimeQuery(queryOne(q, "to")), Limit: limit, Cursor: queryOne(q, "cursor")})
 	if err != nil {
-		return textResponse(http.StatusInternalServerError, "requests failed")
+		return textResponse(http.StatusBadRequest, "requests failed")
 	}
 	if rows == nil {
 		rows = []Request{}
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"requests": rows})
+	return jsonResponse(http.StatusOK, map[string]any{"requests": rows, "next_cursor": page.NextCursor, "has_more": page.HasMore})
 }
 
 func (s *Service) stats() map[string]any {
-	keys, err := s.store.List("")
+	summary, err := s.store.StatsSummary()
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "stats failed")
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"keys": len(keys)})
+	return jsonResponse(http.StatusOK, summary)
 }
 
-func (s *Service) session(headers map[string][]string) map[string]any {
+func (s *Service) session(headers map[string][]string, query map[string][]string) map[string]any {
 	secret, okSecret := ExtractSecret(func(name string) string {
 		for key, values := range headers {
 			if strings.EqualFold(key, name) && len(values) > 0 {
@@ -349,7 +380,7 @@ func (s *Service) session(headers map[string][]string) map[string]any {
 	if !okSecret {
 		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "api key required"})
 	}
-	session, err := s.store.Session(secret, 30)
+	session, page, err := s.store.SessionPage(secret, queryInt(query, "limit", 25), queryOne(query, "cursor"))
 	if err == sql.ErrNoRows {
 		return jsonResponse(http.StatusUnauthorized, map[string]string{"error": "invalid api key"})
 	}
@@ -358,6 +389,7 @@ func (s *Service) session(headers map[string][]string) map[string]any {
 	}
 	return jsonResponse(http.StatusOK, map[string]any{
 		"Key": session.Key, "Requests": session.Requests, "base_url": requestBaseURL(headers),
+		"next_cursor": page.NextCursor, "has_more": page.HasMore,
 	})
 }
 
@@ -478,6 +510,14 @@ func queryOne(q map[string][]string, key string) string {
 		return ""
 	}
 	return values[0]
+}
+
+func queryInt(q map[string][]string, key string, fallback int) int {
+	value, err := strconv.Atoi(queryOne(q, key))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 func bodyBytes(raw json.RawMessage) []byte {

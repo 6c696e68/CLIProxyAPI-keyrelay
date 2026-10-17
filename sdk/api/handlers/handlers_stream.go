@@ -181,13 +181,27 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			}
 			if !ok {
 				if responseSSEValidator != nil {
-					if errValidate := responseSSEValidator.Finish(); errValidate != nil {
+					leftover, errValidate := responseSSEValidator.Finish()
+					if errValidate != nil {
 						completionOutcome = pluginapi.RequestCompletionFailed
 						completionStatus = http.StatusBadGateway
 						completionErr = errValidate
 						select {
 						case errChan <- &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}:
 						case <-done:
+						}
+						return
+					}
+					if len(leftover) > 0 {
+						leftover = rewriteMappedStreamPayload(leftover, h.mappingResultForOriginal(originalRequestedModel))
+						select {
+						case dataChan <- leftover:
+						case <-done:
+							completionOutcome = pluginapi.RequestCompletionCanceled
+							completionStatus = 0
+							if ctx != nil {
+								completionErr = ctx.Err()
+							}
 						}
 					}
 				}
@@ -681,12 +695,24 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 			}
 			if !ok {
 				if responseSSEValidator != nil {
-					if errValidate := responseSSEValidator.Finish(); errValidate != nil {
+					leftover, errValidate := responseSSEValidator.Finish()
+					if errValidate != nil {
 						errMsg := &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: errValidate}
 						completionOutcome = pluginapi.RequestCompletionFailed
 						completionStatus = errMsg.StatusCode
 						completionErr = errMsg.Error
 						_ = sendErr(errMsg)
+						return
+					}
+					if len(leftover) > 0 {
+						leftover = rewriteMappedStreamPayload(leftover, mappingResult)
+						if okSendData := sendData(leftover); !okSendData {
+							completionOutcome = pluginapi.RequestCompletionCanceled
+							completionStatus = 0
+							if ctx != nil {
+								completionErr = ctx.Err()
+							}
+						}
 					}
 				}
 				return
@@ -773,7 +799,8 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 		}
 		frameEnd += 2
 		frame := s.pending[:frameEnd]
-		if errValidate := validateSSEFrameDataJSON(frame); errValidate != nil {
+		normalized, errValidate := normalizeSSEFrameDataJSON(frame)
+		if errValidate != nil {
 			if len(output) > 0 {
 				s.pending = s.pending[:0]
 				s.pendingErr = errValidate
@@ -781,6 +808,7 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 			}
 			return nil, errValidate
 		}
+		frame = normalized
 		output = append(output, frame...)
 		copy(s.pending, s.pending[frameEnd:])
 		s.pending = s.pending[:len(s.pending)-frameEnd]
@@ -799,21 +827,28 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	return output, nil
 }
 
-func (s *sseJSONValidationState) Finish() error {
+func (s *sseJSONValidationState) Finish() ([]byte, error) {
 	s.prevEndsWithCR = false
 	if s.pendingErr != nil {
 		errPending := s.pendingErr
 		s.pendingErr = nil
 		s.pending = nil
-		return errPending
+		return nil, errPending
 	}
 	if len(bytes.TrimSpace(s.pending)) == 0 {
 		s.pending = nil
-		return nil
+		return nil, nil
 	}
-	errValidate := validateSSEFrameDataJSON(s.pending)
+	pending := s.pending
 	s.pending = nil
-	return errValidate
+	frame, errValidate := normalizeSSEFrameDataJSON(pending)
+	if errValidate != nil {
+		return nil, errValidate
+	}
+	if bytes.Equal(frame, pending) {
+		return nil, nil
+	}
+	return frame, nil
 }
 
 func sseJSONValidationDataPayload(frame []byte) ([]byte, bool) {
@@ -833,18 +868,37 @@ func sseJSONValidationDataPayload(frame []byte) ([]byte, bool) {
 	return payload, found
 }
 
-func validateSSEFrameDataJSON(frame []byte) error {
+func normalizeSSEFrameDataJSON(frame []byte) ([]byte, error) {
 	payload, found := sseJSONValidationDataPayload(frame)
 	payload = bytes.TrimSpace(payload)
 	if !found || len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || json.Valid(payload) {
-		return nil
+		return frame, nil
+	}
+	if repaired, ok := helps.RepairObjectKeySeparators(payload); ok {
+		return rewriteSSEFrameData(frame, repaired), nil
 	}
 	const max = 512
 	preview := payload
 	if len(preview) > max {
 		preview = preview[:max]
 	}
-	return fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(payload), preview)
+	return frame, fmt.Errorf("invalid SSE data JSON (len=%d): %q", len(payload), preview)
+}
+
+func rewriteSSEFrameData(frame, payload []byte) []byte {
+	var out bytes.Buffer
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		trimmed := bytes.TrimSpace(bytes.TrimRight(line, "\r"))
+		if len(trimmed) == 0 || bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		out.Write(bytes.TrimRight(line, "\r"))
+		out.WriteByte('\n')
+	}
+	out.WriteString("data: ")
+	out.Write(payload)
+	out.WriteString("\n\n")
+	return out.Bytes()
 }
 
 func validateSSEDataJSON(chunk []byte) error {
@@ -852,7 +906,8 @@ func validateSSEDataJSON(chunk []byte) error {
 	if _, errAdd := state.AddChunk(chunk); errAdd != nil {
 		return errAdd
 	}
-	return state.Finish()
+	_, errFinish := state.Finish()
+	return errFinish
 }
 
 // streamDeliveryCompletion reconciles execution cleanup with the HTTP outcome.
