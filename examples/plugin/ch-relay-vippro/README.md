@@ -87,7 +87,7 @@ A thinking suffix such as `(high)` is accepted on the client model and copied on
 
 Several rows with the same alias are one catalog model. The plugin rotates those upstream names. An exact repeat of the same `name` and `alias` keeps the first row and does not fail registration. A row with an alias and an empty name is rejected. A blank name row is skipped.
 
-Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`.
+Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`. If `thinking` is omitted, the row inherits the canonical model's levels, including `xhigh` and `max` when that model supports them. An explicit `thinking.levels` list still wins.
 
 `fallback` is an ordered list of upstream names. The row's own name and repeats are dropped. With `fallback-retry` above `0`, the plugin first tries the row `name` on the selected accounts. When every one of those attempts fails with a model refusal (the ChatGPT model-not-supported error, `model_not_found`, or "model ... does not exist"), or every account is in model cooldown, it sends the fallback names instead. A thinking suffix such as `(high)` stays attached. Fallback calls may use accounts in model cooldown, because that cooldown only means the primary model was refused.
 

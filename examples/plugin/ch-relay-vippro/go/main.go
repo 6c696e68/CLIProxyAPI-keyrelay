@@ -76,6 +76,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	oaichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/chat-completions"
@@ -837,23 +838,49 @@ func (p modelPool) thinking() *pluginapi.ThinkingSupport {
 		if model.publicName() != p.alias {
 			continue
 		}
-		levels := make([]string, 0)
-		if raw, ok := model.Thinking["levels"].([]any); ok {
-			for _, item := range raw {
-				if level, ok := item.(string); ok && strings.TrimSpace(level) != "" {
-					levels = append(levels, strings.TrimSpace(level))
-				}
-			}
+		if support := thinkingFromSpec(model); support != nil {
+			return support
 		}
-		if len(levels) == 0 && (strings.EqualFold(model.Name, "gpt-6-astra") || strings.EqualFold(model.Alias, "gpt-6-astra")) {
-			levels = []string{"low", "medium", "high"}
-		}
-		if len(levels) == 0 {
-			return nil
-		}
-		return &pluginapi.ThinkingSupport{Levels: levels, DynamicAllowed: true, ZeroAllowed: true}
+		return thinkingFromCanonical(model.Name)
 	}
 	return nil
+}
+
+func thinkingFromSpec(model modelSpec) *pluginapi.ThinkingSupport {
+	raw, ok := model.Thinking["levels"].([]any)
+	if !ok {
+		return nil
+	}
+	levels := make([]string, 0, len(raw))
+	for _, item := range raw {
+		level, ok := item.(string)
+		if !ok {
+			continue
+		}
+		level = strings.TrimSpace(level)
+		if level == "" {
+			continue
+		}
+		levels = append(levels, level)
+	}
+	if len(levels) == 0 {
+		return nil
+	}
+	return &pluginapi.ThinkingSupport{Levels: levels, DynamicAllowed: true, ZeroAllowed: true}
+}
+
+func thinkingFromCanonical(name string) *pluginapi.ThinkingSupport {
+	info := registry.LookupStaticModelInfo(strings.TrimSpace(name))
+	if info == nil || info.Thinking == nil || len(info.Thinking.Levels) == 0 {
+		return nil
+	}
+	return &pluginapi.ThinkingSupport{
+		Min:            info.Thinking.Min,
+		Max:            info.Thinking.Max,
+		ZeroAllowed:    info.Thinking.ZeroAllowed,
+		DynamicAllowed: info.Thinking.DynamicAllowed,
+		Levels:         append([]string(nil), info.Thinking.Levels...),
+	}
 }
 
 func routeModel(raw []byte) ([]byte, error) {

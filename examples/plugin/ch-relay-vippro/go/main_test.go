@@ -720,6 +720,28 @@ models:
 	}
 }
 
+func TestUnconfiguredModelInheritsCanonicalThinkingLevels(t *testing.T) {
+	setup(t)
+	mustConfigure(t, `
+enabled: true
+prefix: vippro
+models:
+  - name: gpt-6-sol
+`)
+	var listed pluginapi.ModelResponse
+	if err := json.Unmarshal(callOK(t, pluginabi.MethodModelStatic, map[string]any{}), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Models) != 1 || listed.Models[0].Thinking == nil {
+		t.Fatalf("gpt-6-sol thinking capability = %+v", listed.Models)
+	}
+	got := listed.Models[0].Thinking.Levels
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("thinking levels = %#v, want %#v", got, want)
+	}
+}
+
 func TestPayloadRewriteAndReject(t *testing.T) {
 	f := setup(t)
 	f.codex("1", tokenA, "plus", nil)

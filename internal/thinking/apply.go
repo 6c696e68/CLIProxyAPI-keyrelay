@@ -120,6 +120,46 @@ func normalizedProviderName(provider string) string {
 //
 // User-defined models should have their thinking configuration applied directly,
 // letting the upstream service validate the configuration.
+// inheritCanonicalThinking copies thinking capability from the unprefixed model
+// when a prefixed alias such as vippro/gpt-6-sol was registered without it.
+// Explicit thinking on the alias still wins.
+func inheritCanonicalThinking(info *registry.ModelInfo, modelID, _ string) *registry.ModelInfo {
+	if info != nil && info.Thinking != nil {
+		return info
+	}
+	canonicalID := canonicalModelID(modelID)
+	if canonicalID == "" || strings.EqualFold(canonicalID, modelID) {
+		return info
+	}
+	// Dynamic registrations often omit thinking. The static definition is the
+	// capability source for prefixed aliases.
+	canonical := registry.LookupStaticModelInfo(canonicalID)
+	if canonical == nil || canonical.Thinking == nil {
+		return info
+	}
+	thinkingSupport := *canonical.Thinking
+	if canonical.Thinking.Levels != nil {
+		thinkingSupport.Levels = append([]string(nil), canonical.Thinking.Levels...)
+	}
+	if info == nil {
+		canonical.ID = modelID
+		canonical.Thinking = &thinkingSupport
+		return canonical
+	}
+	merged := *info
+	merged.Thinking = &thinkingSupport
+	return &merged
+}
+
+func canonicalModelID(modelID string) string {
+	modelID = strings.TrimSpace(modelID)
+	slash := strings.LastIndex(modelID, "/")
+	if slash < 0 || slash+1 >= len(modelID) {
+		return modelID
+	}
+	return strings.TrimSpace(modelID[slash+1:])
+}
+
 func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 	if modelInfo == nil {
 		return true
@@ -227,6 +267,7 @@ func applyThinking(body, sourceBody []byte, model string, fromFormat string, toF
 	if !modelInfoResolved {
 		modelInfo = registry.LookupModelInfo(baseModel, providerKey)
 	}
+	modelInfo = inheritCanonicalThinking(modelInfo, baseModel, providerKey)
 
 	// Resolve source intent before stripping unsupported target input items.
 	updatesChanged := len(normalizedUpdatesChanged) > 0 && normalizedUpdatesChanged[0]
