@@ -16,11 +16,11 @@ The reference install that produced this file is already running on the authorin
 
 ## Sample this file now uses
 
-The reference sample is the operator-edited install at `~/.keyrelay`, snapshotted on 2026-10-18 after AI Providers and key-shop policy were set.
+The reference sample is the operator-edited install at `~/.keyrelay`, snapshotted on 2026-10-18 after the key-shop policy was set. Do not add an AI Provider Codex block.
 
 | Sample | Path |
 | --- | --- |
-| Config | template in this file, taken from `~/.keyrelay/config.yaml` |
+| Config | `examples/keyrelay/config.example.yaml` |
 | key-shop database | `examples/keyrelay/key-shop.sample.db` |
 | Codex auth | not in git. Each machine must log in through Auth Files |
 
@@ -41,9 +41,9 @@ Cài một CPA mới, không đụng CPA đang chạy ở `~/.cliproxyapi` cổn
 
 Điều kiện bắt buộc trước khi cài: tool `ch-relay` đã chạy và `http://127.0.0.1:11500/v1` trả lời. `GET /healthz` phải là `200 {"ok":true}`. `GET /v1/models` không có key trả `401` là đúng, vì tool yêu cầu auth.
 
-Mẫu config và database là bản local `~/.keyrelay` sau khi đã thêm AI Providers và policy key-shop. Không lấy lại config router hay VPS để ghi đè mẫu này.
+Mẫu config và database là bản local `~/.keyrelay` với policy key-shop. Không thêm AI Provider Codex. Không lấy lại config router hay VPS để ghi đè mẫu này.
 
-`ch-relay-vippro.base-url` mặc định là `http://127.0.0.1:11500/v1`. AI Provider Codex trỏ vòng về chính CPA này: `http://127.0.0.1:8319/v1`.
+`ch-relay-vippro.base-url` mặc định là `http://127.0.0.1:11500/v1`.
 
 Bắt buộc login Codex trong **Auth Files** trước khi dùng. `plus-preference` là `only`, nên account phải là Plus. Không copy file auth từ máy mẫu.
 
@@ -164,7 +164,7 @@ path.chmod(0o600)
 PY
 ```
 
-Write `config.yaml` from the template below. Substitute:
+Copy `examples/keyrelay/config.example.yaml` to `$INSTALL_ROOT/config.yaml`. That file is the reference, taken from `~/.keyrelay/config.yaml`. Substitute:
 
 | Placeholder | Meaning |
 | --- | --- |
@@ -174,251 +174,32 @@ Write `config.yaml` from the template below. Substitute:
 | `__OPERATOR_API_KEY__` | the generated `kr_...` key |
 | `__MANAGEMENT_PASSWORD__` | the generated `KR-...` password, plaintext |
 
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import os
+root = Path(os.environ["INSTALL_ROOT"])
+text = Path("examples/keyrelay/config.example.yaml").read_text()
+repl = {
+    "__INSTALL_ROOT__": str(root),
+    "__HOST__": os.environ.get("HOST", "127.0.0.1"),
+    "__PORT__": os.environ.get("PORT", "8319"),
+    "__OPERATOR_API_KEY__": os.environ["OPERATOR_API_KEY"],
+    "__MANAGEMENT_PASSWORD__": os.environ["MANAGEMENT_PASSWORD"],
+}
+for key, value in repl.items():
+    text = text.replace(key, value)
+dest = root / "config.yaml"
+dest.write_text(text)
+dest.chmod(0o600)
+PY
+```
+
+Do not add `api-keys.codex`. `ch-relay-vippro.base-url` stays `http://127.0.0.1:11500/v1`.
+
 The first start hashes `management.secret-key` in memory. This host also rewrote `config.yaml` and stored the bcrypt hash. Keep the plaintext in `.secrets` and `ACCESS.txt`. The panel login is the plaintext password, not the hash.
 
 `prompt-rules` exists on the router and is disabled. It is not part of this stack. Do not copy that plugin unless asked.
-
-```yaml
-quota-exceeded:
-  switch-project: true
-  switch-preview-model: true
-routing:
-  strategy: "round-robin"
-  session-affinity: true
-  session-affinity-ttl: "1h"
-  model-mapping:
-    - match: gpt-999
-      target: vippro/gpt-6-astra
-      mode: exact
-      enabled: true
-      force-mapping: true
-    - match: gpt-5.5
-      target: gpt-6.1-sol
-      mode: exact
-      enabled: true
-      force-mapping: true
-    - match: gpt-5.4
-      target: gpt-6.1-sol
-      mode: exact
-      enabled: true
-      force-mapping: true
-  cooldown:
-    disable-cooling: false
-  retry:
-    request-retry: 3
-    max-retry-credentials: 7
-    max-retry-interval: 10
-plugins:
-  enabled: true
-  dir: "__INSTALL_ROOT__/plugins"
-  configs:
-    ch-relay-vippro:
-      base-url: "http://127.0.0.1:11500/v1"
-      enabled: true
-      fallback-retry: 2
-      model-cooldown-minutes: 1440
-      models:
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-5.6-luna"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-6-astra"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-6-sol"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-6.1-sol"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-6-luna"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-5.6-sol"
-        - fallback: ["gpt-6-luna"]
-          name: "gpt-5.6-terra"
-      plus-preference: "only"
-      prefix: "vippro"
-      priority: 1
-      request-retry: 2
-      rotation-mode: "sticky"
-      stats-file: "__INSTALL_ROOT__/ch-relay-vippro-stats.json"
-      sticky-seconds: 100
-      upstream-cache: false
-    key-shop:
-      enabled: true
-      priority: 100
-      data_file: "__INSTALL_ROOT__/key-shop/key-shop.db"
-      default_ttl: 168h
-      default_token_limit: 100000000
-      reserve_tokens: 32768
-      reservation_ttl: 15m
-      retention_days: 30
-      model_access_mode: custom
-      models:
-        - name: "vippro/gpt-6.1-sol"
-          alias: "gpt-6.1-sol"
-        - name: "vippro/gpt-6-luna"
-          alias: "gpt-6-luna"
-        - name: "vippro/gpt-5.6-luna"
-          alias: "gpt-5.6-luna"
-        - name: "vippro/gpt-5.6-sol"
-          alias: "gpt-5.6-sol"
-        - name: "vippro/gpt-6-sol"
-          alias: "gpt-6-sol"
-        - name: "vippro/gpt-6-astra"
-          alias: "gpt-6-astra"
-        - name: "vippro/gpt-5.6-terra"
-          alias: "gpt-5.6-terra"
-        - name: "gpt-image-2.5-sunburst"
-        - name: "gpt-image-2.5-flare"
-        - name: "gpt-image-2.5"
-        - name: "gpt-image-2"
-        - name: "gpt-image-1.5"
-config-version: 8
-client:
-  codex:
-    optimize-multi-agent-v2: false
-    disable-subagents: true
-access:
-  api-keys:
-    - "__OPERATOR_API_KEY__"
-requests:
-  passthrough-headers: true
-  streaming:
-    keepalive-seconds: 5
-    bootstrap-retries: 10
-    send-keepalive-before-ft: true
-  nonstream-keepalive-interval: 15
-  payload:
-    override-raw: []
-    filter:
-      - models:
-          - name: '*'
-            protocol: ""
-            headers: {}
-            from-protocol: ""
-            match: []
-            not-match: []
-            exist: []
-            not-exist: []
-        params:
-          - tools.#(name=="spawn_agent")#
-          - tools.#(name=="send_message")#
-          - tools.#(name=="followup_task")#
-          - tools.#(name=="wait_agent")#
-          - tools.#(name=="collaboration")#
-          - tools.#(name=="collaboration-optimize")#
-          - tools.#(name=="multi_agent_v1")#
-          - tools.#(type=="namespace")#.tools.#(name=="spawn_agent")#
-          - tools.#(type=="namespace")#.tools.#(name=="send_message")#
-          - tools.#(type=="namespace")#.tools.#(name=="followup_task")#
-          - tools.#(type=="namespace")#.tools.#(name=="wait_agent")#
-          - tools.#(function.name=="spawn_agent")#
-          - tools.#(function.name=="send_message")#
-          - tools.#(function.name=="followup_task")#
-          - tools.#(function.name=="wait_agent")#
-          - input.#(type=="function_call"&&name=="spawn_agent")#
-          - input.#(type=="function_call"&&name=="send_message")#
-          - input.#(type=="function_call"&&name=="followup_task")#
-          - input.#(type=="function_call"&&name=="wait_agent")#
-          - input.#(type=="function_call"&&name=="collaboration.spawn_agent")#
-          - input.#(type=="function_call"&&name=="collaboration__spawn_agent")#
-          - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="spawn_agent")#
-          - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="send_message")#
-          - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="followup_task")#
-          - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="wait_agent")#
-          - input.#(type=="additional_tools")#.tools.#(name=="collaboration")#
-          - input.#(type=="additional_tools")#.tools.#(name=="collaboration-optimize")#
-          - input.#(type=="additional_tools")#.tools.#(name=="multi_agent_v1")#
-server:
-  host: "__HOST__"
-  port: __PORT__
-  tls:
-    enable: false
-  discovery:
-    service-type: _ai-gateway._tcp
-    subtypes:
-      - _chat-completions
-      - _responses
-      - _messages
-      - _generate-content
-      - _interactions
-  commercial-mode: true
-credentials:
-  concurrency:
-    cpa-heartbeat-timeout: 3s
-    cpa-cancel-bound: 5s
-    reclaim-grace: 5s
-    cleanup-interval: 5s
-    release-flush-interval: 250ms
-    release-max-backoff: 2s
-    busy-retry-min: 250ms
-    busy-retry-max: 1s
-    max-limit: 1000000
-  in-flight:
-    snapshot-interval: 2s
-    stale-after: 10s
-    max-part-bytes: 262144
-    max-part-count: 64
-    max-revision-bytes: 16777216
-    max-aggregate-groups: 100000
-    max-details: 10000
-    max-string-bytes: 256
-    staging-retention: 1m
-management:
-  allow-remote: true
-  secret-key: "__MANAGEMENT_PASSWORD__"
-  disable-control-panel: false
-  disable-auto-update-panel: true
-  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
-oauth:
-  auth-dir: "__INSTALL_ROOT__/auth"
-  providers:
-    antigravity:
-      antigravity-credits: true
-      signature-bypass-strict: true
-    aistudio:
-      ws-auth: true
-  model-alias:
-    codex:
-      - name: gpt-5.6-luna
-        alias: luna
-        fork: true
-observability:
-  logs:
-    debug: false
-    logging-to-file: false
-    logs-max-total-size-mb: 10
-  usage:
-    usage-statistics-enabled: true
-    redis-usage-queue-retention-seconds: 60
-upstream:
-  claude:
-    header-defaults:
-      stabilize-device-profile: true
-api-keys:
-  codex:
-    - name: "codex-1"
-      base-url: "http://__HOST__:__PORT__/v1"
-      keys:
-        - api-key: "__OPERATOR_API_KEY__"
-          alpha-search: true
-          disable-cooling: true
-          websockets: true
-          models:
-            - name: "vippro/gpt-6-sol"
-            - name: "vippro/gpt-6-astra"
-            - name: "vippro/gpt-6.1-sol"
-            - name: "vippro/gpt-6-luna"
-            - name: "vippro/gpt-5.6-terra"
-            - name: "vippro/gpt-5.6-luna"
-            - name: "vippro/gpt-5.6-sol"
-            - name: "gpt-image-2.5"
-            - name: "gpt-image-2"
-            - name: "luna"
-            - name: "gpt-image-1.5"
-            - name: "gpt-image-2.5-flare"
-            - name: "gpt-image-2.5-sunburst"
-  openai-compatibility: []
-```
-
-This Codex provider is a loopback to this CPA, not an upstream OpenAI host. `base-url` must stay `http://__HOST__:__PORT__/v1`. Customer model access is `custom`. A `ck_` key may call the alias, or the `name` when no alias is set. Find models in the API Keys page reads `GET /v1/models` with the operator key, the same list as Available Models.
 
 `chmod 600` the config after writing it.
 
@@ -558,7 +339,7 @@ curl -fsS "http://127.0.0.1:8319/v8/management/credentials?page_size=50" \
 Pass conditions:
 
 - Log contains `pluginhost: plugin loaded` for `ch-relay-vippro` and `key-shop`, then `plugin registered`.
-- `/v1/models` includes the Available Models catalog: `vippro/gpt-6-sol`, `vippro/gpt-6-astra`, `vippro/gpt-6.1-sol`, `vippro/gpt-6-luna`, `vippro/gpt-5.6-terra`, `vippro/gpt-5.6-luna`, `vippro/gpt-5.6-sol`, the unprefixed aliases `gpt-6-sol`, `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-luna`, `gpt-5.6-terra`, `luna`, and the image models `gpt-image-1.5`, `gpt-image-2`, `gpt-image-2.5`, `gpt-image-2.5-flare`, `gpt-image-2.5-sunburst`. The reference catalog has 21 ids.
+- `/v1/models` includes the `ch-relay-vippro` models: `vippro/gpt-6-sol`, `vippro/gpt-6-astra`, `vippro/gpt-6.1-sol`, `vippro/gpt-6-luna`, `vippro/gpt-5.6-terra`, `vippro/gpt-5.6-luna`, `vippro/gpt-5.6-sol`. Do not require aliases that only existed because of an AI Provider Codex loopback.
 - Panel, `/client`, VipPro dashboard, and key-shop admin return `200`.
 - Plugin list has both ids `effective_enabled: true`.
 - key-shop stats return `keys_total` of at least 1 after the sample database is loaded. The sample key label is `key-vippro`.
@@ -601,19 +382,6 @@ models:
   vippro/gpt-5.6-terra
   vippro/gpt-5.6-luna
   vippro/gpt-5.6-sol
-  gpt-6-sol
-  gpt-6-astra
-  gpt-6.1-sol
-  gpt-6-luna
-  gpt-5.6-sol
-  gpt-5.6-luna
-  gpt-5.6-terra
-  luna
-  gpt-image-1.5
-  gpt-image-2
-  gpt-image-2.5
-  gpt-image-2.5-flare
-  gpt-image-2.5-sunburst
 ```
 
 `status` is `READY` only when `codex_plus_ready` is true. Otherwise print `NOT READY` and the Auth Files login URL. Do not omit that line.
@@ -626,9 +394,9 @@ Read on 2026-10-18. No remote file was modified.
 
 | Block | Source | Sample rule |
 | --- | --- | --- |
-| CPA routing, retry, disable-subagents, payload filter, credentials | `~/.keyrelay/config.yaml` after the operator edit | Keep as the template. Redact secrets |
+| Config | `examples/keyrelay/config.example.yaml`, copied from `~/.keyrelay/config.yaml` | Use that file. Redact secrets. Force `base-url` to `http://127.0.0.1:11500/v1` |
 | `ch-relay-vippro` | same file, except `base-url` | Always `http://127.0.0.1:11500/v1` |
-| AI Provider Codex | same file, `api-keys.codex` | Loopback to this CPA `/v1`, with the saved model list |
+| AI Provider Codex | not used | Leave `api-keys.codex` empty. Do not recreate it |
 | `key-shop` policy | same file, `model_access_mode: custom` | Keep the alias list |
 | key-shop database | `examples/keyrelay/key-shop.sample.db`, snapshotted from `~/.keyrelay/key-shop/key-shop.db` | Copy before first start. Do not copy router or VPS databases |
 | Codex auth | logged in on the reference machine | Do not copy. Each install must login through Auth Files |
@@ -651,8 +419,8 @@ That does not stop `com.linhtran.cliproxyapi`. Deleting `~/.keyrelay` removes th
 When the operator says the local config is the sample:
 
 1. Read `<install-root>/config.yaml`.
-2. Replace the yaml template in this file with that config.
+2. Refresh `examples/keyrelay/config.example.yaml` from it.
 3. Put placeholders back over the operator key, management secret, install root, host, and port.
-4. Keep `base-url: "http://127.0.0.1:11500/v1"`. Do not copy another relay address into the sample.
+4. Keep `base-url: "http://127.0.0.1:11500/v1"`. Do not copy another relay address into the sample. Leave `api-keys.codex` empty.
 5. If the operator also refreshed the key-shop database, snapshot it again with `sqlite3 "$INSTALL_ROOT/key-shop/key-shop.db" ".backup examples/keyrelay/key-shop.sample.db"`.
 6. Do not paste `ACCESS.txt`, auth JSON, or token fields into this document. Codex login stays a required step, not a copied file.

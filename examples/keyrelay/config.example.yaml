@@ -1,0 +1,228 @@
+# KEYRELAY reference config.
+# Copied from the local install config. Secrets and machine paths are placeholders.
+# ch-relay-vippro.base-url is always http://127.0.0.1:11500/v1.
+# Do not add api-keys.codex.
+# Substitute __INSTALL_ROOT__, __HOST__, __PORT__, __OPERATOR_API_KEY__, __MANAGEMENT_PASSWORD__.
+quota-exceeded:
+    switch-project: true
+    switch-preview-model: true
+routing:
+    strategy: "round-robin"
+    session-affinity: true
+    session-affinity-ttl: "1h"
+    model-mapping:
+        - match: gpt-999
+          target: vippro/gpt-6-astra
+          mode: exact
+          enabled: true
+          force-mapping: true
+        - match: gpt-5.5
+          target: gpt-6.1-sol
+          mode: exact
+          enabled: true
+          force-mapping: true
+        - match: gpt-5.4
+          target: gpt-6.1-sol
+          mode: exact
+          enabled: true
+          force-mapping: true
+    cooldown:
+        disable-cooling: false
+    retry:
+        request-retry: 3
+        max-retry-credentials: 7
+        max-retry-interval: 10
+plugins:
+    enabled: true
+    dir: "__INSTALL_ROOT__/plugins"
+    configs:
+        ch-relay-vippro:
+            base-url: "http://127.0.0.1:11500/v1"
+            enabled: true
+            fallback-retry: 2
+            model-cooldown-minutes: 1440
+            models:
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-5.6-luna"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-6-astra"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-6-sol"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-6.1-sol"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-6-luna"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-5.6-sol"
+                - fallback:
+                    - "gpt-6-luna"
+                  name: "gpt-5.6-terra"
+            plus-preference: "only"
+            prefix: "vippro"
+            priority: 1
+            request-retry: 2
+            rotation-mode: "sticky"
+            stats-file: "__INSTALL_ROOT__/ch-relay-vippro-stats.json"
+            sticky-seconds: 100
+            upstream-cache: false
+        key-shop:
+            data_file: "__INSTALL_ROOT__/key-shop/key-shop.db"
+            default_token_limit: 100000000
+            default_ttl: "168h"
+            enabled: true
+            model_access_mode: "custom"
+            models:
+                - name: "vippro/gpt-6.1-sol"
+                  alias: "gpt-6.1-sol"
+                - name: "vippro/gpt-6-luna"
+                  alias: "gpt-6-luna"
+                - name: "vippro/gpt-5.6-luna"
+                  alias: "gpt-5.6-luna"
+                - name: "vippro/gpt-5.6-sol"
+                  alias: "gpt-5.6-sol"
+                - name: "vippro/gpt-6-sol"
+                  alias: "gpt-6-sol"
+                - name: "vippro/gpt-6-astra"
+                  alias: "gpt-6-astra"
+                - name: "vippro/gpt-5.6-terra"
+                  alias: "gpt-5.6-terra"
+                - name: "gpt-image-2.5-sunburst"
+                - name: "gpt-image-2.5-flare"
+                - name: "gpt-image-2.5"
+                - name: "gpt-image-2"
+                - name: "gpt-image-1.5"
+            priority: 100
+            reservation_ttl: "15m"
+            reserve_tokens: 32768
+            retention_days: 30
+config-version: 8
+client:
+    codex:
+        optimize-multi-agent-v2: false
+        disable-subagents: true
+access:
+    api-keys:
+        - "__OPERATOR_API_KEY__"
+requests:
+    passthrough-headers: true
+    streaming:
+        keepalive-seconds: 5
+        bootstrap-retries: 10
+        send-keepalive-before-ft: true
+    nonstream-keepalive-interval: 15
+    payload:
+        override-raw: []
+        filter:
+            - models:
+                - name: '*'
+                  protocol: ""
+                  headers: {}
+                  from-protocol: ""
+                  match: []
+                  not-match: []
+                  exist: []
+                  not-exist: []
+              params:
+                - tools.#(name=="spawn_agent")#
+                - tools.#(name=="send_message")#
+                - tools.#(name=="followup_task")#
+                - tools.#(name=="wait_agent")#
+                - tools.#(name=="collaboration")#
+                - tools.#(name=="collaboration-optimize")#
+                - tools.#(name=="multi_agent_v1")#
+                - tools.#(type=="namespace")#.tools.#(name=="spawn_agent")#
+                - tools.#(type=="namespace")#.tools.#(name=="send_message")#
+                - tools.#(type=="namespace")#.tools.#(name=="followup_task")#
+                - tools.#(type=="namespace")#.tools.#(name=="wait_agent")#
+                - tools.#(function.name=="spawn_agent")#
+                - tools.#(function.name=="send_message")#
+                - tools.#(function.name=="followup_task")#
+                - tools.#(function.name=="wait_agent")#
+                - input.#(type=="function_call"&&name=="spawn_agent")#
+                - input.#(type=="function_call"&&name=="send_message")#
+                - input.#(type=="function_call"&&name=="followup_task")#
+                - input.#(type=="function_call"&&name=="wait_agent")#
+                - input.#(type=="function_call"&&name=="collaboration.spawn_agent")#
+                - input.#(type=="function_call"&&name=="collaboration__spawn_agent")#
+                - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="spawn_agent")#
+                - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="send_message")#
+                - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="followup_task")#
+                - input.#(type=="additional_tools")#.tools.#(name=="functions")#.tools.#(name=="wait_agent")#
+                - input.#(type=="additional_tools")#.tools.#(name=="collaboration")#
+                - input.#(type=="additional_tools")#.tools.#(name=="collaboration-optimize")#
+                - input.#(type=="additional_tools")#.tools.#(name=="multi_agent_v1")#
+server:
+    host: "__HOST__"
+    port: __PORT__
+    tls:
+        enable: false
+    discovery:
+        service-type: _ai-gateway._tcp
+        subtypes:
+            - _chat-completions
+            - _responses
+            - _messages
+            - _generate-content
+            - _interactions
+    commercial-mode: true
+credentials:
+    concurrency:
+        cpa-heartbeat-timeout: 3s
+        cpa-cancel-bound: 5s
+        reclaim-grace: 5s
+        cleanup-interval: 5s
+        release-flush-interval: 250ms
+        release-max-backoff: 2s
+        busy-retry-min: 250ms
+        busy-retry-max: 1s
+        max-limit: 1000000
+    in-flight:
+        snapshot-interval: 2s
+        stale-after: 10s
+        max-part-bytes: 262144
+        max-part-count: 64
+        max-revision-bytes: 16777216
+        max-aggregate-groups: 100000
+        max-details: 10000
+        max-string-bytes: 256
+        staging-retention: 1m
+management:
+    allow-remote: true
+    secret-key: "__MANAGEMENT_PASSWORD__"
+    disable-control-panel: false
+    disable-auto-update-panel: true
+    panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+oauth:
+    auth-dir: "__INSTALL_ROOT__/auth"
+    providers:
+        antigravity:
+            antigravity-credits: true
+            signature-bypass-strict: true
+        aistudio:
+            ws-auth: true
+    model-alias:
+        codex:
+            - name: gpt-5.6-luna
+              alias: luna
+              fork: true
+observability:
+    logs:
+        debug: false
+        logging-to-file: false
+        logs-max-total-size-mb: 10
+    usage:
+        usage-statistics-enabled: true
+        redis-usage-queue-retention-seconds: 60
+upstream:
+    claude:
+        header-defaults:
+            stabilize-device-profile: true
+api-keys:
+    codex: []
+    openai-compatibility: []
