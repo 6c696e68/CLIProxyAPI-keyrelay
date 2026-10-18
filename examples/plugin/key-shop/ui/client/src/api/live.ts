@@ -32,6 +32,11 @@ export function createLiveClientService() {
     if (next) cursors[page] = next
     const key = mapKey(data.Key || data.key)
     const requests = Array.isArray(data.Requests) ? data.Requests.map(mapRequest) : Array.isArray(data.requests) ? data.requests.map(mapRequest) : []
+    if (pickString(data, 'model_access_mode') === 'custom') {
+      models = mapModels({ models: data.models })
+    } else if (page <= 1) {
+      await loadModels()
+    }
     return {
       key,
       requests,
@@ -61,17 +66,12 @@ export function createLiveClientService() {
       cursors.length = 0
       cursors.push('')
       await session(1)
-      await loadModels()
     },
     async load(input: ClientQuery): Promise<ClientSnapshot> {
       if (!secret) throw new Error('Enter an API key to continue.')
       if (input.page <= 1) {
         cursors.length = 0
         cursors.push('')
-        const snapshot = await session(1)
-        await loadModels()
-        snapshot.models = models
-        return snapshot
       }
       return session(input.page)
     },

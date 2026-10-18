@@ -181,7 +181,7 @@ const facts = [
           <div v-if="snapshot.models.length" class="model-well" tabindex="0" aria-label="Available models">
             <span v-for="model in snapshot.models" :key="model" class="model-chip">{{ model }}</span>
           </div>
-          <p v-else class="mt-3 text-sm text-[var(--ink-soft)]">Model list unavailable. Check the endpoint configuration.</p>
+          <p v-else class="mt-3 text-sm text-[var(--ink-soft)]">No models are allowed for this key.</p>
         </section>
 
         <section class="mt-4">

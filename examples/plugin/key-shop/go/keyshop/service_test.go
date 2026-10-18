@@ -622,6 +622,27 @@ func TestQuotaDenialUsesInsufficientQuotaAndLogsRejection(t *testing.T) {
 	}
 }
 
+func TestSessionListsOnlyCustomModels(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{
+		{Name: "vippro/gpt-6-sol", Alias: "gpt-6-sol"},
+		{Name: "gpt-image-2"},
+		{Name: "vippro/gpt-6-sol", Alias: "GPT-6-sol"},
+	}
+	secret := createSecret(t, svc, 3600, 10)
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Headers":{"Authorization":["Bearer `+secret+`"]}}`)
+	var env struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(env.Result.Body, []byte(`"model_access_mode":"custom"`)) || !bytes.Contains(env.Result.Body, []byte(`"models":["gpt-6-sol","gpt-image-2"]`)) {
+		t.Fatalf("session models = %s", env.Result.Body)
+	}
+}
+
 func TestSessionReturnsBaseURL(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 10)

@@ -497,10 +497,38 @@ func (s *Service) session(headers map[string][]string, query map[string][]string
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "session failed")
 	}
+	mode := "full"
+	var visible []string
+	if strings.EqualFold(strings.TrimSpace(s.store.cfg.ModelAccessMode), "custom") {
+		mode = "custom"
+		visible = clientVisibleModels(s.store.cfg.Models)
+	}
 	return jsonResponse(http.StatusOK, map[string]any{
 		"Key": session.Key, "Requests": session.Requests, "base_url": requestBaseURL(headers),
 		"next_cursor": page.NextCursor, "has_more": page.HasMore, "total": page.Total,
+		"model_access_mode": mode, "models": visible,
 	})
+}
+
+func clientVisibleModels(models []ModelAccessModel) []string {
+	visible := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		name := strings.TrimSpace(model.Alias)
+		if name == "" {
+			name = strings.TrimSpace(model.Name)
+		}
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		visible = append(visible, name)
+	}
+	return visible
 }
 
 func unsupportedPath(path string) bool {
