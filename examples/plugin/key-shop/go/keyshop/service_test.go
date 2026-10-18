@@ -3,6 +3,7 @@ package keyshop
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,9 +87,12 @@ func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
 			t.Fatalf("bulk create returned missing or duplicate secret")
 		}
 		seen[item.Secret] = true
-		if item.Key.Label != "November" || item.Key.Customer != "Acme" || item.Key.TokenLimit != 5000 {
+		if !strings.HasPrefix(item.Key.Label, "November-") || item.Key.Customer != "Acme" || item.Key.TokenLimit != 5000 {
 			t.Fatalf("bulk create returned incorrect key metadata: %+v", item.Key)
 		}
+	}
+	if created.Keys[0].Key.Label == created.Keys[1].Key.Label {
+		t.Fatalf("bulk labels were not made unique: %+v", created.Keys)
 	}
 	listed := call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/keys"}`)
 	var listedEnv struct {
@@ -99,8 +103,40 @@ func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
 	if err := json.Unmarshal(listed, &listedEnv); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(listedEnv.Result.Body), `"Label":"November"`) {
+	if !strings.Contains(string(listedEnv.Result.Body), `"Label":"November-`) {
 		t.Fatal("bulk-created keys were not persisted")
+	}
+}
+
+func TestCreateWithEmptyLabelGeneratesUniqueLabels(t *testing.T) {
+	svc := testService(t)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"count":2}}`)
+	var env struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		Keys []struct {
+			Key Key
+		}
+	}
+	if err := json.Unmarshal(env.Result.Body, &created); err != nil {
+		t.Fatal(err)
+	}
+	if len(created.Keys) != 2 {
+		t.Fatalf("got %d keys, want 2", len(created.Keys))
+	}
+	if created.Keys[0].Key.Label == "" || created.Keys[0].Key.Label == created.Keys[1].Key.Label {
+		t.Fatalf("generated labels are not unique: %+v", created.Keys)
+	}
+	for _, item := range created.Keys {
+		if !strings.HasPrefix(item.Key.Label, "key-") || !strings.HasPrefix(item.Key.ID, item.Key.Label[len("key-"):]) {
+			t.Fatalf("generated label does not identify its key: %+v", item.Key)
+		}
 	}
 }
 
@@ -141,6 +177,254 @@ func TestInterceptBeforeDeniesExhaustedAndExpired(t *testing.T) {
 	raw = call(t, svc, "request.intercept_before", interceptBody(expired, "old", "/v1/messages/count_tokens", false))
 	if !strings.Contains(string(raw), `"StatusCode":403`) {
 		t.Fatal("expired count was not denied")
+	}
+}
+
+func TestModelAccessPolicyUsesAliasAndPreservesThinkingSuffix(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{
+		{Name: "gpt-5-codex", Alias: "codex-latest"},
+		{Name: "claude-sonnet-4"},
+	}
+	secret := createSecret(t, svc, 3600, 100000)
+	for _, model := range []string{"codex-latest", "codex-latest(high)", "claude-sonnet-4", "claude-sonnet-4(low)"} {
+		raw := call(t, svc, "request.intercept_before", interceptModelBody(secret, "allow-"+model, model, "/v1/chat/completions", true))
+		if strings.Contains(string(raw), `"Terminate":true`) {
+			t.Fatalf("allowed model %q was denied: %s", model, raw)
+		}
+	}
+	for _, model := range []string{"gpt-5-codex", "other-model", "codex-latest-extra"} {
+		var denied struct {
+			Terminate    bool
+			StatusCode   int
+			ResponseBody []byte
+		}
+		decodeResult(t, call(t, svc, "request.intercept_before", interceptModelBody(secret, "deny-"+model, model, "/v1/chat/completions", true)), &denied)
+		if !denied.Terminate || denied.StatusCode != 403 || !bytes.Contains(denied.ResponseBody, []byte(`"model_not_allowed"`)) {
+			t.Fatalf("model %q was not denied by policy: %+v", model, denied)
+		}
+	}
+}
+
+func TestModelAccessPolicyDoesNotReserveBeforeAdmission(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{{Name: "allowed"}}
+	secret := createSecret(t, svc, 3600, 1)
+	denied := call(t, svc, "request.intercept_before", interceptModelBody(secret, "blocked", "blocked", "/v1/chat/completions", true))
+	if !strings.Contains(string(denied), `"StatusCode":403`) {
+		t.Fatalf("unexpected model policy response: %s", denied)
+	}
+	allowed := call(t, svc, "request.intercept_before", interceptModelBody(secret, "allowed", "allowed", "/v1/chat/completions", true))
+	if strings.Contains(string(allowed), `"Terminate":true`) {
+		t.Fatalf("allowed request was denied after blocked request: %s", allowed)
+	}
+}
+
+func TestModelAccessPolicyIgnoresExternalKeys(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{{Name: "only-model"}}
+	raw := call(t, svc, "request.intercept_before", interceptModelBody("operator-key", "external", "anything", "/v1/chat/completions", true))
+	if strings.Contains(string(raw), `"Terminate":true`) {
+		t.Fatalf("external key was affected by key-shop model policy: %s", raw)
+	}
+}
+
+func TestModelAccessPolicyDefaultsToFull(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 100)
+	raw := call(t, svc, "request.intercept_before", interceptModelBody(secret, "default-full", "any-model", "/v1/chat/completions", true))
+	if strings.Contains(string(raw), `"Terminate":true`) {
+		t.Fatalf("default full policy denied model: %s", raw)
+	}
+}
+
+func TestModelAccessPolicyReadsBodyWhenModelFieldsAreEmpty(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{{Name: "gpt-5-codex", Alias: "codex-latest"}}
+	secret := createSecret(t, svc, 3600, 100000)
+	allowed := call(t, svc, "request.intercept_before", interceptBodyOnly(secret, "body-allow", "codex-latest(high)", "/v1/responses"))
+	if strings.Contains(string(allowed), `"Terminate":true`) {
+		t.Fatalf("body model was denied: %s", allowed)
+	}
+	assertModelDenied(t, call(t, svc, "request.intercept_before", interceptBodyOnly(secret, "body-deny", "gpt-5-codex", "/v1/messages")))
+}
+
+func TestModelAccessPolicyMatchesCaseAndIgnoresEmptyNames(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{
+		{Name: "  ", Alias: "hidden-alias"},
+		{Name: "Claude-Sonnet-4"},
+		{Name: "GPT-5-Codex", Alias: "Codex-Latest"},
+	}
+	secret := createSecret(t, svc, 3600, 100000)
+	for _, model := range []string{"CODEX-LATEST", "codex-latest(HIGH)", "claude-sonnet-4"} {
+		raw := call(t, svc, "request.intercept_before", interceptModelBody(secret, "case-"+model, model, "/v1/chat/completions", true))
+		if strings.Contains(string(raw), `"Terminate":true`) {
+			t.Fatalf("model %q was denied: %s", model, raw)
+		}
+	}
+	for _, model := range []string{"hidden-alias", "gpt-5-codex", "GPT-5-CODEX"} {
+		assertModelDenied(t, call(t, svc, "request.intercept_before", interceptModelBody(secret, "case-deny-"+model, model, "/v1/chat/completions", true)))
+	}
+}
+
+func TestModelAccessPolicyEmptyCustomListDeniesEveryModel(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	secret := createSecret(t, svc, 3600, 100)
+	assertModelDenied(t, call(t, svc, "request.intercept_before", interceptModelBody(secret, "empty-list", "any-model", "/v1/chat/completions", true)))
+}
+
+func TestModelAccessPolicyUnrecognizedModeIsFull(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "weird"
+	svc.store.cfg.Models = []ModelAccessModel{{Name: "only-model"}}
+	secret := createSecret(t, svc, 3600, 100)
+	raw := call(t, svc, "request.intercept_before", interceptModelBody(secret, "unknown-mode", "anything", "/v1/chat/completions", true))
+	if strings.Contains(string(raw), `"Terminate":true`) {
+		t.Fatalf("unrecognized mode denied a model: %s", raw)
+	}
+}
+
+func TestPagesShowRequestLimitAccounting(t *testing.T) {
+	admin, err := os.ReadFile(filepath.Join("..", "web", "admin.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dash, err := os.ReadFile(filepath.Join("..", "web", "dashboard.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, snippet := range []string{"request_limit", "unlimited_requests", "RequestQuotaUsed", "request_limit_exceeded", "keys_request_limited"} {
+		if !bytes.Contains(admin, []byte(snippet)) {
+			t.Fatalf("admin page missing %s", snippet)
+		}
+	}
+	for _, snippet := range []string{"Request limit", "Request limit reached. Ask the administrator to raise the limit.", "RequestQuotaUsed", "RequestSuccessCount", "RequestFailureCount", "RequestCanceledCount", "RequestRejectedCount"} {
+		if !bytes.Contains(dash, []byte(snippet)) {
+			t.Fatalf("client page missing %s", snippet)
+		}
+	}
+}
+
+func TestAdminModelPolicySavePreservesLoadedConfig(t *testing.T) {
+	t.Helper()
+	page, err := os.ReadFile(filepath.Join("..", "web", "admin.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(page)
+	for _, snippet := range []string{
+		"if (!loaded) return;",
+		"disabled: loading || saving || !loaded",
+		"...config",
+		".filter(item => item.name)",
+		`"gemini-interactions"`,
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("admin model policy missing %s", snippet)
+		}
+	}
+}
+
+func TestModelAccessPolicyLogsRejectionWithoutReserving(t *testing.T) {
+	svc := testService(t)
+	svc.store.cfg.ModelAccessMode = "custom"
+	svc.store.cfg.Models = []ModelAccessModel{{Name: "allowed"}}
+	secret := createSecret(t, svc, 3600, 1)
+	var denied struct {
+		StatusCode   int
+		ResponseBody []byte
+	}
+	decodeResult(t, call(t, svc, "request.intercept_before", interceptModelBody(secret, "blocked-row", "blocked", "/v1/chat/completions", true)), &denied)
+	if denied.StatusCode != 403 || !bytes.Contains(denied.ResponseBody, []byte(`"model_not_allowed"`)) {
+		t.Fatalf("unexpected denial: %+v body=%s", denied, denied.ResponseBody)
+	}
+	for _, table := range []string{"reservations", "usage_notes"} {
+		var n int
+		if err := svc.store.db.QueryRow(`SELECT COUNT(1) FROM `+table+` WHERE request_id=?`, "blocked-row").Scan(&n); err != nil || n != 0 {
+			t.Fatalf("%s stored denied request n=%d err=%v", table, n, err)
+		}
+	}
+	var status, code string
+	if err := svc.store.db.QueryRow(`SELECT status, rejection_code FROM requests WHERE request_id=?`, "blocked-row").Scan(&status, &code); err != nil || status != "rejected" || code != "model_not_allowed" {
+		t.Fatalf("status=%s code=%s err=%v", status, code, err)
+	}
+	key, err := svc.store.Lookup(secret)
+	if err != nil || key.RequestQuotaUsed != 1 || key.RequestRejectedCount != 1 {
+		t.Fatalf("model denial must consume request quota: %+v err=%v", key, err)
+	}
+}
+
+func TestHostGateRejectionIsRecordedWithoutQuota(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 10)
+	raw := call(t, svc, "keyshop.note_rejection", `{"Secret":"`+secret+`","RequestID":"gate-1","Code":"model_not_allowed","Status":403}`)
+	if !strings.Contains(string(raw), `"ok":true`) {
+		t.Fatalf("note rejection failed: %s", raw)
+	}
+	key, err := svc.store.Lookup(secret)
+	if err != nil || key.RequestQuotaUsed != 1 || key.RequestRejectedCount != 1 || key.RequestCount != 1 {
+		t.Fatalf("gate rejection accounting=%+v err=%v", key, err)
+	}
+	var code string
+	if err := svc.store.db.QueryRow(`SELECT rejection_code FROM requests WHERE request_id=?`, "gate-1").Scan(&code); err != nil || code != "model_not_allowed" {
+		t.Fatalf("code=%s err=%v", code, err)
+	}
+}
+
+func TestRequestLimitReturns429AndRemainsReachable(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 100)
+	created := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"ttl_seconds":3600,"token_limit":100,"request_limit":1}}`)
+	var env struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(created, &env); err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Secret string
+		Key    Key
+	}
+	if err := json.Unmarshal(env.Result.Body, &payload); err != nil || payload.Key.RequestLimit != 1 {
+		t.Fatalf("create did not persist request limit: %s", env.Result.Body)
+	}
+	secret = payload.Secret
+	raw := call(t, svc, "frontend_auth.authenticate", authBody(secret, "/v1/chat/completions"))
+	if !strings.Contains(string(raw), `"Authenticated":true`) {
+		t.Fatal("fresh limited key was not authenticated")
+	}
+	first := call(t, svc, "request.intercept_before", interceptBody(secret, "rq-1", "/v1/chat/completions", true))
+	if strings.Contains(string(first), `"Terminate":true`) {
+		t.Fatal("first request was denied")
+	}
+	auth := call(t, svc, "frontend_auth.authenticate", authBody(secret, "/v1/chat/completions"))
+	if !strings.Contains(string(auth), `"Authenticated":true`) {
+		t.Fatal("request-limit exhaustion was rejected before the interceptor")
+	}
+	var denied struct {
+		Terminate    bool
+		StatusCode   int
+		ResponseBody []byte
+	}
+	decodeResult(t, call(t, svc, "request.intercept_before", interceptBody(secret, "rq-2", "/v1/chat/completions", true)), &denied)
+	if !denied.Terminate || denied.StatusCode != 429 || !bytes.Contains(denied.ResponseBody, []byte(`"request_limit_exceeded"`)) || !bytes.Contains(denied.ResponseBody, []byte(`"insufficient_quota"`)) {
+		t.Fatalf("request limit denial=%+v body=%s", denied, denied.ResponseBody)
+	}
+	var listedEnv struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/requests","Query":{"code":["request_limit_exceeded"]}}`), &listedEnv); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(listedEnv.Result.Body, []byte(`"request_limit_exceeded"`)) {
+		t.Fatalf("request limit rejection was not listed: %s", listedEnv.Result.Body)
 	}
 }
 
@@ -302,6 +586,28 @@ func TestSessionReturnsBaseURL(t *testing.T) {
 	}
 }
 
+func TestRequestsAndSessionIncludeFilteredTotal(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 10)
+	_ = call(t, svc, "request.intercept_before", interceptBody(secret, "tot", "/v1/chat/completions", true))
+	_ = call(t, svc, "usage.handle", `{"RequestID":"tot","Failed":false,"Detail":{"InputTokens":1}}`)
+	_ = call(t, svc, "request.complete", `{"RequestID":"tot","Outcome":"succeeded"}`)
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/requests","Query":{"limit":["1"]}}`)
+	var listed struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil || !bytes.Contains(listed.Result.Body, []byte(`"total":1`)) {
+		t.Fatalf("requests total missing: %s", raw)
+	}
+	session := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Headers":{"Authorization":["Bearer `+secret+`"]}}`)
+	var env struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(session, &env); err != nil || !bytes.Contains(env.Result.Body, []byte(`"total":1`)) {
+		t.Fatalf("session total missing: %s", session)
+	}
+}
+
 func TestSecondInterceptDoesNotFailTheStore(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 100)
@@ -332,6 +638,19 @@ func TestClosedStoreTerminatesInsteadOfPassing(t *testing.T) {
 	}
 }
 
+func assertModelDenied(t *testing.T, raw []byte) {
+	t.Helper()
+	var denied struct {
+		Terminate    bool
+		StatusCode   int
+		ResponseBody []byte
+	}
+	decodeResult(t, raw, &denied)
+	if !denied.Terminate || denied.StatusCode != 403 || !bytes.Contains(denied.ResponseBody, []byte(`"model_not_allowed"`)) {
+		t.Fatalf("model was not denied by policy: %+v body=%s", denied, denied.ResponseBody)
+	}
+}
+
 func decodeResult(t *testing.T, raw []byte, dest any) {
 	t.Helper()
 	var env struct {
@@ -352,10 +671,27 @@ func authBody(secret, path string) string {
 }
 
 func interceptBody(secret, id, path string, generate bool) string {
+	return interceptModelBody(secret, id, "", path, generate)
+}
+
+func interceptModelBody(secret, id, model, path string, generate bool) string {
+	body, _ := json.Marshal(map[string]any{
+		"RequestID":      id,
+		"RequestedModel": model,
+		"Model":          model,
+		"Headers":        map[string][]string{"Authorization": {"Bearer " + secret}},
+		"Metadata":       map[string]any{"request_path": path, "generate": generate},
+	})
+	return string(body)
+}
+
+func interceptBodyOnly(secret, id, model, path string) string {
+	payload, _ := json.Marshal(map[string]any{"model": model})
 	body, _ := json.Marshal(map[string]any{
 		"RequestID": id,
 		"Headers":   map[string][]string{"Authorization": {"Bearer " + secret}},
-		"Metadata":  map[string]any{"request_path": path, "generate": generate},
+		"Body":      payload,
+		"Metadata":  map[string]any{"request_path": path, "generate": true},
 	})
 	return string(body)
 }

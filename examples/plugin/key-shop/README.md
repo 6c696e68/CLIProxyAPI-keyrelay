@@ -22,10 +22,13 @@ Codex and other OpenAI-compatible clients point at `/v1` and use the customer ke
 | --- | --- | --- |
 | Expiry | 7 days (`168h`) | `never_expires: true` means no expiry |
 | Token cap | `100000000` | `unlimited_tokens: true` stores `0` and never exhausts |
+| Request cap | unlimited (`0`) | `unlimited_requests: true` or `request_limit: 0` never exhausts |
 | Reservation | `32768` tokens | Held until usage arrives or 15 minutes pass |
 | Request log retention | 30 days | Does not reduce `tokens_used` |
 
 Billed tokens are `input_tokens + output_tokens`. Reasoning and cache are shown and are not added again. A failed, rejected, or canceled request is logged and bills `0`.
+
+Every recorded call consumes one request-quota unit, including successful, failed, canceled, and rejected attempts. This stops a key from avoiding the cap by sending failing or disallowed calls. Raising `request_limit` allows more calls without resetting the counters. A request-limit denial is HTTP `429` with code `request_limit_exceeded`. Token limits stay separate.
 
 ## Enable
 
@@ -42,10 +45,15 @@ plugins:
       data_file: ""
       default_ttl: 168h
       default_token_limit: 100000000
+      default_request_limit: 0
       reserve_tokens: 32768
       reservation_ttl: 15m
       retention_days: 30
       deleted_retention_days: 90
+      model_access_mode: full # full or custom
+      models:
+        - name: gpt-5-codex
+          alias: codex-latest
 ```
 
 Empty `data_file` uses `~/.cliproxyapi/key-shop/key-shop.db`. On a router, set an absolute path such as `/root/.cliproxyapi-v8030/key-shop/key-shop.db`. The process home may be `/`, so the default path is wrong there. The database file is mode `0600`. The parent directory is mode `0700`.
@@ -89,21 +97,23 @@ Open the management panel and the plugin menu **API Keys**. The page is also at:
 
 It uses the management password already stored by the panel when that password was saved in the same browser. Otherwise paste the management login password, not a customer `ck_` key and not the bcrypt hash from `config.yaml`.
 
-Create accepts an empty name. A later disable, enable, or expiry edit does not clear a saved name.
+The **Customer model access** section controls the policy for all `ck_` keys. `full` allows every model. `custom` uses the model list below it; clients may call the configured alias, or the upstream `name` when no alias is set. Thinking suffixes such as `(high)` remain valid. The embedded page and the management panel edit the same `plugins.configs.key-shop` values.
+
+Create accepts an empty name and generates a stable label such as `key-7f4a2c10`. A single key keeps the label exactly as entered. Bulk creation adds a short unique suffix to an entered label, such as `CUSTOMER-a3f2` and `CUSTOMER-7c91`. A later disable, enable, expiry, or secret rotation does not change the key ID or saved label.
 
 | Action | Method | Path | Body |
 | --- | --- | --- | --- |
-| Create | POST | `/v0/management/plugins/key-shop/keys` | `label`, `customer`, `note`, `ttl_seconds`, `never_expires`, `token_limit`, `unlimited_tokens` |
+| Create | POST | `/v0/management/plugins/key-shop/keys` | `label`, `customer`, `note`, `ttl_seconds`, `never_expires`, `token_limit`, `unlimited_tokens`, `request_limit`, `unlimited_requests` |
 | Bulk create | POST | `/v0/management/plugins/key-shop/keys/bulk` | Same fields plus `count` (1–500); returns each secret once |
 | List | GET | `/v0/management/plugins/key-shop/keys` | query `q`, `status`, `page`, `page_size` |
 | Update | POST | `/v0/management/plugins/key-shop/keys/update` | `id` plus only the fields to change |
 | Rotate | POST | `/v0/management/plugins/key-shop/keys/rotate` | `id` |
 | Reset usage | POST | `/v0/management/plugins/key-shop/keys/reset-usage` | `id` |
 | Delete | POST | `/v0/management/plugins/key-shop/keys/delete` | `id` |
-| Requests | GET | `/v0/management/plugins/key-shop/requests` | `id`, `status`, `model`, `from`, `to`, `limit`, `cursor` |
+| Requests | GET | `/v0/management/plugins/key-shop/requests` | `id`, `status`, `model`, `from`, `to`, `limit`, `cursor`. Response includes `total` for the current filter, ignoring `cursor`. |
 | Stats | GET | `/v0/management/plugins/key-shop/stats` | none |
 
-Omitted `ttl_seconds` means 7 days. `never_expires: true` ignores `ttl_seconds`. Omitted `token_limit` means 100000000. `unlimited_tokens: true` ignores `token_limit`. Update `status` accepts only `active` or `disabled`.
+Omitted `ttl_seconds` means 7 days. `never_expires: true` ignores `ttl_seconds`. Omitted `token_limit` means 100000000. `unlimited_tokens: true` ignores `token_limit`. Omitted `request_limit` uses `default_request_limit`, which is unlimited. `unlimited_requests: true` or an explicit `0` stores no request cap. Update `status` accepts only `active` or `disabled`. Reset usage clears billed tokens only; it does not restore request quota.
 
 Create and rotate return `secret` once. List responses contain `display` such as `ck_abcd…wxyz`. They never contain `secret` or `secret_hash`.
 
@@ -115,7 +125,7 @@ These routes require the management secret because they sit under `/v0/managemen
 
 A direct `GET /v0/resource/plugins/key-shop/dashboard` redirects to `/client`. Unknown paths such as `/client/missing` return 404.
 
-The session JSON includes `base_url`, which is the request host plus `/v1`.
+The session JSON includes `base_url`, which is the request host plus `/v1`, and `total`, the number of stored requests for that key.
 
 ## Enforcement
 
@@ -131,7 +141,10 @@ These paths do not pass the request interceptor, so every `ck_` key is rejected 
 `request.intercept_before` is the second gate for chat, responses, streaming, count-tokens, and websocket turns that reach `ExecuteStreamWithAuthManager`. It returns:
 
 - `402` `insufficient_quota` / `token_limit_exceeded`
-- `403` `invalid_request_error` / `key_expired` or `key_disabled`
+- `403` `invalid_request_error` / `key_expired`, `key_disabled`, or `model_not_allowed`
+- `429` `insufficient_quota` / `request_limit_exceeded`
+
+`model_not_allowed` is returned before provider routing and before admission. It does not reserve tokens, but it does consume one request-quota unit. A known `ck_` key gets a rejected request row with that reason. Once the request limit is reached, later calls return `429` instead. The check uses the client model, including a thinking suffix, and applies only to `ck_` keys. An allowed alias is rewritten to the configured upstream name before routing; `codex-latest(high)` becomes `gpt-5-codex(high)` when that alias is configured.
 
 Count-token paths and `generate=false` use the same denial. An allowed non-billable request reserves `0`.
 

@@ -19,8 +19,10 @@ extern void cliproxyPluginShutdown(void);
 import "C"
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 	"unsafe"
@@ -120,20 +122,26 @@ func configure(request []byte) error {
 	_ = json.Unmarshal(request, &parsed)
 	if len(parsed.ConfigYAML) > 0 {
 		var doc struct {
-			DataFile             string `yaml:"data_file"`
-			DefaultTTL           string `yaml:"default_ttl"`
-			DefaultLimit         int64  `yaml:"default_token_limit"`
-			ReserveTokens        int64  `yaml:"reserve_tokens"`
-			ReservationTTL       string `yaml:"reservation_ttl"`
-			RetentionDays        int    `yaml:"retention_days"`
-			DeletedRetentionDays int    `yaml:"deleted_retention_days"`
+			DataFile             string                     `yaml:"data_file"`
+			DefaultTTL           string                     `yaml:"default_ttl"`
+			DefaultLimit         int64                      `yaml:"default_token_limit"`
+			DefaultRequestLimit  int64                      `yaml:"default_request_limit"`
+			ReserveTokens        int64                      `yaml:"reserve_tokens"`
+			ReservationTTL       string                     `yaml:"reservation_ttl"`
+			RetentionDays        int                        `yaml:"retention_days"`
+			DeletedRetentionDays int                        `yaml:"deleted_retention_days"`
+			ModelAccessMode      string                     `yaml:"model_access_mode"`
+			Models               []keyshop.ModelAccessModel `yaml:"models"`
 		}
 		if err := yaml.Unmarshal(parsed.ConfigYAML, &doc); err == nil {
 			cfg.DataFile = doc.DataFile
 			cfg.DefaultLimit = doc.DefaultLimit
+			cfg.DefaultRequestLimit = doc.DefaultRequestLimit
 			cfg.ReserveTokens = doc.ReserveTokens
 			cfg.RetentionDays = doc.RetentionDays
 			cfg.DeletedRetentionDays = doc.DeletedRetentionDays
+			cfg.ModelAccessMode = doc.ModelAccessMode
+			cfg.Models = doc.Models
 			if doc.DefaultTTL != "" {
 				if parsedTTL, err := time.ParseDuration(doc.DefaultTTL); err == nil {
 					cfg.DefaultTTL = parsedTTL
@@ -150,8 +158,16 @@ func configure(request []byte) error {
 	if err != nil {
 		return err
 	}
-	admin, _ := webFS.ReadFile("web/admin.html")
-	dash, _ := webFS.ReadFile("web/dashboard.html")
+	admin, errAdmin := adminPage()
+	if errAdmin != nil {
+		_ = opened.Close()
+		return errAdmin
+	}
+	dash, errDash := webFS.ReadFile("web/dashboard.html")
+	if errDash != nil {
+		_ = opened.Close()
+		return errDash
+	}
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
 	stopSweeperLocked()
@@ -169,6 +185,33 @@ func configure(request []byte) error {
 		opened.RunSweeper(sweepCtx)
 	}()
 	return nil
+}
+
+func adminPage() ([]byte, error) {
+	page, err := webFS.ReadFile("web/admin.html")
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Contains(page, []byte("datetime-local")) {
+		return nil, fmt.Errorf("admin page still falls back to datetime-local")
+	}
+	css, err := webFS.ReadFile("web/vendor/flatpickr.min.css")
+	if err != nil {
+		return nil, err
+	}
+	js, err := webFS.ReadFile("web/vendor/flatpickr.min.js")
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Contains(page, []byte("/*FLAT_PICKR_CSS*/")) || !bytes.Contains(page, []byte("/*FLAT_PICKR_JS*/")) {
+		return nil, fmt.Errorf("admin page is missing flatpickr markers")
+	}
+	page = bytes.Replace(page, []byte("/*FLAT_PICKR_CSS*/"), css, 1)
+	page = bytes.Replace(page, []byte("/*FLAT_PICKR_JS*/"), js, 1)
+	if bytes.Contains(page, []byte("/*FLAT_PICKR_")) {
+		return nil, fmt.Errorf("flatpickr was not embedded")
+	}
+	return page, nil
 }
 
 func stopSweeperLocked() {

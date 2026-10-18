@@ -302,6 +302,13 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
+	modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	if gateErr != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- gateErr
+		close(errChan)
+		return nil, nil, errChan
+	}
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
@@ -785,7 +792,10 @@ func (s *sseJSONValidationState) AddChunk(chunk []byte) ([]byte, error) {
 	s.prevEndsWithCR = endsWithCR
 	if len(s.pending) > 0 && !bytes.HasSuffix(s.pending, []byte("\n")) && !bytes.HasPrefix(chunk, []byte("\n")) {
 		first := bytes.TrimSpace(bytes.SplitN(chunk, []byte("\n"), 2)[0])
-		if bytes.HasPrefix(first, []byte("data:")) || bytes.HasPrefix(first, []byte("event:")) {
+		// A raw read can split inside a JSON string on the bytes "data:" or
+		// "event:". Those are content, not a new SSE field. Inserting a newline
+		// there makes response.completed fail json.Valid and aborts the stream.
+		if (bytes.HasPrefix(first, []byte("data:")) || bytes.HasPrefix(first, []byte("event:"))) && !ssePendingDataInsideString(s.pending) {
 			s.pending = append(s.pending, '\n')
 		}
 	}
@@ -849,6 +859,36 @@ func (s *sseJSONValidationState) Finish() ([]byte, error) {
 		return nil, nil
 	}
 	return frame, nil
+}
+
+// ssePendingDataInsideString reports whether the buffered SSE data is inside a
+// JSON string. A chunk boundary there must not be treated as a new field.
+func ssePendingDataInsideString(pending []byte) bool {
+	payload, found := sseJSONValidationDataPayload(pending)
+	if !found || len(payload) == 0 {
+		return false
+	}
+	inString := false
+	escaped := false
+	for _, c := range payload {
+		if !inString {
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch c {
+		case '\\':
+			escaped = true
+		case '"':
+			inString = false
+		}
+	}
+	return inString
 }
 
 func sseJSONValidationDataPayload(frame []byte) ([]byte, bool) {

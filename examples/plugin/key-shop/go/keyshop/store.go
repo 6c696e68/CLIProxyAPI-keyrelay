@@ -21,11 +21,19 @@ type Config struct {
 	DataFile             string
 	DefaultTTL           time.Duration
 	DefaultLimit         int64
+	DefaultRequestLimit  int64
 	ReserveTokens        int64
 	ReservationTTL       time.Duration
 	RetentionDays        int
 	DeletedRetentionDays int
+	ModelAccessMode      string
+	Models               []ModelAccessModel
 	Now                  func() time.Time
+}
+
+type ModelAccessModel struct {
+	Name  string `json:"name" yaml:"name"`
+	Alias string `json:"alias,omitempty" yaml:"alias,omitempty"`
 }
 
 type Store struct {
@@ -35,18 +43,27 @@ type Store struct {
 }
 
 type Key struct {
-	ID           string
-	Display      string
-	Label        string
-	Customer     string
-	Note         string
-	Status       string
-	CreatedAt    time.Time
-	ExpiresAt    *time.Time
-	TokenLimit   int64
-	TokensUsed   int64
-	RequestCount int64
-	LastUsedAt   *time.Time
+	ID                    string
+	Display               string
+	Label                 string
+	Customer              string
+	Note                  string
+	Status                string
+	CreatedAt             time.Time
+	ExpiresAt             *time.Time
+	TokenLimit            int64
+	TokensUsed            int64
+	RequestCount          int64
+	RequestLimit          int64
+	RequestQuotaUsed      int64
+	RequestSuccessCount   int64
+	RequestFailureCount   int64
+	RequestCanceledCount  int64
+	RequestRejectedCount  int64
+	RequestLimitReached   bool
+	TokenLimitReached     bool
+	RequestQuotaRemaining int64
+	LastUsedAt            *time.Time
 }
 
 type CreateInput struct {
@@ -56,6 +73,9 @@ type CreateInput struct {
 	TokenLimit            int64
 	TokenLimitSet         bool
 	UnlimitedTokens       bool
+	RequestLimit          int64
+	RequestLimitSet       bool
+	UnlimitedRequests     bool
 }
 
 type UpdateInput struct {
@@ -66,6 +86,9 @@ type UpdateInput struct {
 	TTLSet, NeverExpires              bool
 	TokenLimit                        int64
 	TokenLimitSet, UnlimitedTokens    bool
+	RequestLimit                      int64
+	RequestLimitSet                   bool
+	UnlimitedRequests                 bool
 }
 
 type AdmitInput struct {
@@ -97,45 +120,53 @@ type UsageNote struct {
 }
 
 type Request struct {
-	RequestID   string
-	KeyID       string
-	Model       string
-	Transport   string
-	Protocol    string
-	Status      string
-	HTTPStatus  int
-	LatencyMs   int64
-	TTFTMs      int64
-	Input       int64
-	Output      int64
-	Reasoning   int64
-	Cached      int64
-	Billed      int64
-	RequestedAt time.Time
-	CompletedAt time.Time
+	RequestID     string
+	KeyID         string
+	Model         string
+	Transport     string
+	Protocol      string
+	Status        string
+	HTTPStatus    int
+	LatencyMs     int64
+	TTFTMs        int64
+	Input         int64
+	Output        int64
+	Reasoning     int64
+	Cached        int64
+	Billed        int64
+	RejectionCode string
+	RequestedAt   time.Time
+	CompletedAt   time.Time
 }
 
 type RequestQuery struct {
-	KeyID, Status, Model string
-	From, To             time.Time
-	Limit, Offset        int
-	Cursor               string
+	KeyID, Status, Model, RejectionCode string
+	From, To                            time.Time
+	Limit, Offset                       int
+	Cursor                              string
 }
 
 type PageInfo struct {
 	NextCursor string `json:"next_cursor,omitempty"`
 	HasMore    bool   `json:"has_more"`
+	Total      int    `json:"total"`
 }
 
 type StatsSummary struct {
-	KeysTotal        int   `json:"keys_total"`
-	KeysActive       int   `json:"keys_active"`
-	KeysDisabled     int   `json:"keys_disabled"`
-	KeysExpired      int   `json:"keys_expired"`
-	KeysExhausted    int   `json:"keys_exhausted"`
-	TokensUsedTotal  int64 `json:"tokens_used_total"`
-	RequestsTotal    int64 `json:"requests_total"`
-	ExpiringWithin7d int   `json:"expiring_within_7d"`
+	KeysTotal          int   `json:"keys_total"`
+	KeysActive         int   `json:"keys_active"`
+	KeysDisabled       int   `json:"keys_disabled"`
+	KeysExpired        int   `json:"keys_expired"`
+	KeysExhausted      int   `json:"keys_exhausted"`
+	TokensUsedTotal    int64 `json:"tokens_used_total"`
+	RequestsTotal      int64 `json:"requests_total"`
+	RequestsAdmitted   int64 `json:"requests_admitted"`
+	RequestsSucceeded  int64 `json:"requests_succeeded"`
+	RequestsFailed     int64 `json:"requests_failed"`
+	RequestsCanceled   int64 `json:"requests_canceled"`
+	RequestsRejected   int64 `json:"requests_rejected"`
+	KeysRequestLimited int   `json:"keys_request_limited"`
+	ExpiringWithin7d   int   `json:"expiring_within_7d"`
 }
 
 type Session struct {
@@ -218,6 +249,12 @@ CREATE TABLE IF NOT EXISTS keys (
   token_limit INTEGER NOT NULL,
   tokens_used INTEGER NOT NULL DEFAULT 0,
   request_count INTEGER NOT NULL DEFAULT 0,
+  request_limit INTEGER NOT NULL DEFAULT 0,
+  request_quota_used INTEGER NOT NULL DEFAULT 0,
+  request_success_count INTEGER NOT NULL DEFAULT 0,
+  request_failure_count INTEGER NOT NULL DEFAULT 0,
+  request_canceled_count INTEGER NOT NULL DEFAULT 0,
+  request_rejected_count INTEGER NOT NULL DEFAULT 0,
   last_used_at TEXT,
   deleted_at TEXT
 );
@@ -243,7 +280,8 @@ CREATE TABLE IF NOT EXISTS requests (
   cached_tokens INTEGER NOT NULL DEFAULT 0,
   billed_tokens INTEGER NOT NULL DEFAULT 0,
   requested_at TEXT NOT NULL,
-  completed_at TEXT NOT NULL
+  completed_at TEXT NOT NULL,
+  rejection_code TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS usage_notes (
   request_id TEXT PRIMARY KEY,
@@ -256,7 +294,10 @@ CREATE TABLE IF NOT EXISTS usage_notes (
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`
+	if err = s.ensureColumns(); err != nil {
+		return err
+	}
+	if _, err = s.db.Exec(`
 CREATE INDEX IF NOT EXISTS idx_keys_created_at ON keys(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_keys_deleted_at ON keys(deleted_at);
 CREATE INDEX IF NOT EXISTS idx_keys_live_created ON keys(created_at DESC, id DESC) WHERE deleted_at IS NULL;
@@ -264,7 +305,97 @@ CREATE INDEX IF NOT EXISTS idx_reservations_key ON reservations(key_id);
 CREATE INDEX IF NOT EXISTS idx_reservations_created ON reservations(created_at);
 CREATE INDEX IF NOT EXISTS idx_requests_key_time ON requests(key_id, requested_at DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_time ON requests(requested_at DESC, request_id DESC);
-CREATE INDEX IF NOT EXISTS idx_requests_status_time ON requests(status, requested_at DESC, request_id DESC);`)
+CREATE INDEX IF NOT EXISTS idx_requests_status_time ON requests(status, requested_at DESC, request_id DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_rejection ON requests(key_id, rejection_code, requested_at DESC);`); err != nil {
+		return err
+	}
+	return s.backfillRequestAccounting()
+}
+
+func (s *Store) ensureColumns() error {
+	if err := addColumns(s.db, "keys", map[string]string{
+		"request_limit":          "INTEGER NOT NULL DEFAULT 0",
+		"request_quota_used":     "INTEGER NOT NULL DEFAULT 0",
+		"request_success_count":  "INTEGER NOT NULL DEFAULT 0",
+		"request_failure_count":  "INTEGER NOT NULL DEFAULT 0",
+		"request_canceled_count": "INTEGER NOT NULL DEFAULT 0",
+		"request_rejected_count": "INTEGER NOT NULL DEFAULT 0",
+	}); err != nil {
+		return err
+	}
+	return addColumns(s.db, "requests", map[string]string{
+		"rejection_code": "TEXT NOT NULL DEFAULT ''",
+	})
+}
+
+func addColumns(db *sql.DB, table string, columns map[string]string) error {
+	existing, err := tableColumns(db, table)
+	if err != nil {
+		return err
+	}
+	for name, definition := range columns {
+		if existing[name] {
+			continue
+		}
+		if _, err = db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + name + ` ` + definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue sql.NullString
+		if err = rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		out[name] = true
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) backfillRequestAccounting() error {
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	var applied int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM schema_migrations WHERE version=1`).Scan(&applied); err != nil {
+		return err
+	}
+	if applied > 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`UPDATE keys SET request_quota_used = request_count`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE keys SET
+		request_success_count = COALESCE((SELECT COUNT(1) FROM requests WHERE requests.key_id = keys.id AND requests.status = 'succeeded'), 0),
+		request_failure_count = COALESCE((SELECT COUNT(1) FROM requests WHERE requests.key_id = keys.id AND requests.status = 'failed'), 0),
+		request_canceled_count = COALESCE((SELECT COUNT(1) FROM requests WHERE requests.key_id = keys.id AND requests.status IN ('canceled', 'cancelled')), 0),
+		request_rejected_count = COALESCE((SELECT COUNT(1) FROM requests WHERE requests.key_id = keys.id AND requests.status = 'rejected'), 0)`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)`, s.cfg.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`PRAGMA user_version = 1`)
 	return err
 }
 
@@ -287,15 +418,40 @@ func (s *Store) insertKey(in CreateInput, hash []byte, prefix, last4 string) (Ke
 	if err != nil {
 		return Key{}, err
 	}
+	label := defaultLabel(in.Label, id)
 	now := s.cfg.Now().UTC()
 	expires := s.expiry(in.NeverExpires, in.TTLSeconds, true, now)
 	limit := s.limit(in.UnlimitedTokens, in.TokenLimitSet, in.TokenLimit)
-	_, err = s.db.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		id, hash, prefix, last4, in.Label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit)
+	requestLimit, err := s.requestLimit(in.UnlimitedRequests, in.RequestLimitSet, in.RequestLimit)
+	if err != nil {
+		return Key{}, err
+	}
+	_, err = s.db.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit, request_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, hash, prefix, last4, label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit, requestLimit)
 	if err != nil {
 		return Key{}, err
 	}
 	return s.keyByID(id)
+}
+
+func defaultLabel(label, id string) string {
+	if strings.TrimSpace(label) != "" {
+		return label
+	}
+	if len(id) >= 8 {
+		return "key-" + id[:8]
+	}
+	return "key-" + id
+}
+
+func batchLabel(label, id string) string {
+	if strings.TrimSpace(label) == "" {
+		return defaultLabel(label, id)
+	}
+	if len(id) >= 4 {
+		return label + "-" + id[:4]
+	}
+	return label + "-" + id
 }
 
 func (s *Store) StatsSummary() (StatsSummary, error) {
@@ -308,16 +464,18 @@ func (s *Store) StatsSummary() (StatsSummary, error) {
 	withinText := within7d.Format(time.RFC3339Nano)
 	err := s.db.QueryRow(`SELECT
 COUNT(1), COALESCE(SUM(tokens_used), 0), COALESCE(SUM(request_count), 0),
+COALESCE(SUM(request_quota_used), 0), COALESCE(SUM(request_success_count), 0), COALESCE(SUM(request_failure_count), 0), COALESCE(SUM(request_canceled_count), 0), COALESCE(SUM(request_rejected_count), 0),
 COALESCE(SUM(CASE WHEN status='disabled' THEN 1 ELSE 0 END), 0),
 COALESCE(SUM(CASE WHEN status <> 'disabled' AND expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END), 0),
 COALESCE(SUM(CASE WHEN status <> 'disabled' AND (expires_at IS NULL OR expires_at > ?) AND token_limit > 0 AND tokens_used >= token_limit THEN 1 ELSE 0 END), 0),
-COALESCE(SUM(CASE WHEN status <> 'disabled' AND expires_at > ? AND expires_at <= ? THEN 1 ELSE 0 END), 0)
-FROM keys WHERE deleted_at IS NULL`, nowText, nowText, nowText, withinText).
-		Scan(&out.KeysTotal, &out.TokensUsedTotal, &out.RequestsTotal, &out.KeysDisabled, &out.KeysExpired, &out.KeysExhausted, &out.ExpiringWithin7d)
+COALESCE(SUM(CASE WHEN status <> 'disabled' AND (expires_at IS NULL OR expires_at > ?) AND request_limit > 0 AND request_quota_used >= request_limit THEN 1 ELSE 0 END), 0),
+COALESCE(SUM(CASE WHEN status <> 'disabled' AND expires_at > ? AND expires_at <= ? THEN 1 ELSE 0 END), 0),
+COALESCE(SUM(CASE WHEN status <> 'disabled' AND (expires_at IS NULL OR expires_at > ?) AND (token_limit=0 OR tokens_used < token_limit) AND (request_limit=0 OR request_quota_used < request_limit) THEN 1 ELSE 0 END), 0)
+FROM keys WHERE deleted_at IS NULL`, nowText, nowText, nowText, nowText, withinText, nowText).
+		Scan(&out.KeysTotal, &out.TokensUsedTotal, &out.RequestsTotal, &out.RequestsAdmitted, &out.RequestsSucceeded, &out.RequestsFailed, &out.RequestsCanceled, &out.RequestsRejected, &out.KeysDisabled, &out.KeysExpired, &out.KeysExhausted, &out.KeysRequestLimited, &out.ExpiringWithin7d, &out.KeysActive)
 	if err != nil {
 		return StatsSummary{}, err
 	}
-	out.KeysActive = out.KeysTotal - out.KeysDisabled - out.KeysExpired - out.KeysExhausted
 	if out.KeysActive < 0 {
 		out.KeysActive = 0
 	}
@@ -373,7 +531,7 @@ func keyListWhere(query, status string, now time.Time) (string, []any) {
 	held := `COALESCE(open_res.reserved, 0)`
 	switch status {
 	case "active":
-		where += ` AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at > ?) AND (keys.token_limit=0 OR keys.tokens_used + ` + held + ` < keys.token_limit)`
+		where += ` AND keys.status='active' AND (keys.expires_at IS NULL OR keys.expires_at > ?) AND (keys.token_limit=0 OR keys.tokens_used + ` + held + ` < keys.token_limit) AND (keys.request_limit=0 OR keys.request_quota_used < keys.request_limit)`
 		args = append(args, nowText)
 	case "disabled":
 		where += ` AND keys.status='disabled'`
@@ -381,13 +539,15 @@ func keyListWhere(query, status string, now time.Time) (string, []any) {
 		where += ` AND keys.status<>'disabled' AND keys.expires_at IS NOT NULL AND keys.expires_at <= ?`
 		args = append(args, nowText)
 	case "exhausted":
-		where += ` AND keys.status<>'disabled' AND (keys.expires_at IS NULL OR keys.expires_at > ?) AND keys.token_limit > 0 AND keys.tokens_used + ` + held + ` >= keys.token_limit`
+		where += ` AND keys.status<>'disabled' AND (keys.expires_at IS NULL OR keys.expires_at > ?) AND ((keys.token_limit > 0 AND keys.tokens_used + ` + held + ` >= keys.token_limit) OR (keys.request_limit > 0 AND keys.request_quota_used >= keys.request_limit))`
 		args = append(args, nowText)
 	}
 	return where, args
 }
 
-const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at`
+const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at, keys.request_limit, keys.request_quota_used, keys.request_success_count, keys.request_failure_count, keys.request_canceled_count, keys.request_rejected_count`
+
+const requestColumns = `request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at, rejection_code`
 
 const reservedExpr = `COALESCE(open_res.reserved, 0)`
 
@@ -441,8 +601,17 @@ func (s *Store) Update(in UpdateInput) (Key, error) {
 	} else if in.TokenLimitSet {
 		limit = in.TokenLimit
 	}
-	_, err = s.db.Exec(`UPDATE keys SET label=?, customer=?, note=?, status=?, expires_at=?, token_limit=? WHERE id=? AND deleted_at IS NULL`,
-		label, customer, note, status, formatTime(expires), limit, in.ID)
+	requestLimit := key.RequestLimit
+	if in.UnlimitedRequests {
+		requestLimit = 0
+	} else if in.RequestLimitSet {
+		if in.RequestLimit < 0 {
+			return Key{}, fmt.Errorf("invalid request limit")
+		}
+		requestLimit = in.RequestLimit
+	}
+	_, err = s.db.Exec(`UPDATE keys SET label=?, customer=?, note=?, status=?, expires_at=?, token_limit=?, request_limit=? WHERE id=? AND deleted_at IS NULL`,
+		label, customer, note, status, formatTime(expires), limit, requestLimit, in.ID)
 	if err != nil {
 		return Key{}, err
 	}
@@ -495,6 +664,9 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 	if !strings.HasPrefix(in.Secret, "ck_") {
 		return Admission{Ignored: true}, nil
 	}
+	if strings.TrimSpace(in.RequestID) == "" {
+		return Admission{Code: "request_id_required"}, nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -505,8 +677,8 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 	var row keyRow
 	var expires sql.NullString
 	var reserved int64
-	err = tx.QueryRow(`SELECT keys.id, keys.status, keys.expires_at, keys.token_limit, keys.tokens_used, `+reservedByKey+` FROM keys WHERE keys.secret_hash=? AND keys.deleted_at IS NULL`, HashSecret(in.Secret)).
-		Scan(&row.id, &row.status, &expires, &row.limit, &row.used, &reserved)
+	err = tx.QueryRow(`SELECT keys.id, keys.status, keys.expires_at, keys.token_limit, keys.tokens_used, `+reservedByKey+`, keys.request_limit, keys.request_quota_used FROM keys WHERE keys.secret_hash=? AND keys.deleted_at IS NULL`, HashSecret(in.Secret)).
+		Scan(&row.id, &row.status, &expires, &row.limit, &row.used, &reserved, &row.requestLimit, &row.quotaUsed)
 	if err == sql.ErrNoRows {
 		return Admission{Code: "key_not_found"}, nil
 	}
@@ -514,12 +686,18 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 		return Admission{}, err
 	}
 	row.expires = parseOptional(expires)
+	if admission, done, err := s.existingAdmission(tx, in.RequestID, row.id); err != nil || done {
+		return admission, err
+	}
 	now := s.cfg.Now().UTC()
 	if row.status == "disabled" {
 		return Admission{Code: "key_disabled", KeyID: row.id}, nil
 	}
 	if row.expires != nil && !row.expires.After(now) {
 		return Admission{Code: "key_expired", KeyID: row.id}, nil
+	}
+	if row.requestLimit > 0 && row.quotaUsed >= row.requestLimit {
+		return Admission{Code: "request_limit_exceeded", KeyID: row.id}, nil
 	}
 	if row.limit > 0 && row.used+reserved >= row.limit {
 		return Admission{Code: "token_limit_exceeded", KeyID: row.id}, nil
@@ -539,9 +717,21 @@ func (s *Store) Admit(in AdmitInput) (Admission, error) {
 		}
 		amount = want
 	}
-	if _, err = tx.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)
-ON CONFLICT(request_id) DO NOTHING`,
-		in.RequestID, row.id, amount, now.Format(time.RFC3339Nano)); err != nil {
+	nowText := now.Format(time.RFC3339Nano)
+	res, err := tx.Exec(`UPDATE keys SET request_count=request_count+1, request_quota_used=request_quota_used+1, last_used_at=? WHERE id=? AND deleted_at IS NULL AND (request_limit=0 OR request_quota_used < request_limit)`, nowText, row.id)
+	if err != nil {
+		return Admission{}, err
+	}
+	changed, _ := res.RowsAffected()
+	if changed != 1 {
+		return Admission{Code: "request_limit_exceeded", KeyID: row.id}, nil
+	}
+	if _, err = tx.Exec(`INSERT INTO requests (`+requestColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.RequestID, row.id, "", "http", "", "pending", 0, 0, 0, 0, 0, 0, 0, 0, nowText, nowText, ""); err != nil {
+		return Admission{}, err
+	}
+	if _, err = tx.Exec(`INSERT INTO reservations (request_id, key_id, reserved_tokens, created_at) VALUES (?,?,?,?)`,
+		in.RequestID, row.id, amount, nowText); err != nil {
 		return Admission{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -550,7 +740,47 @@ ON CONFLICT(request_id) DO NOTHING`,
 	return Admission{Allowed: true, KeyID: row.id, Reserved: amount}, nil
 }
 
-func (s *Store) RecordRejection(requestID, keyID string, httpStatus int) error {
+func (s *Store) existingAdmission(tx *sql.Tx, requestID, keyID string) (Admission, bool, error) {
+	var existingKey, existingStatus, existingCode string
+	err := tx.QueryRow(`SELECT key_id, status, rejection_code FROM requests WHERE request_id=?`, requestID).Scan(&existingKey, &existingStatus, &existingCode)
+	if err != nil && err != sql.ErrNoRows {
+		return Admission{}, false, err
+	}
+	if err == nil {
+		if existingKey != keyID {
+			return Admission{Code: "request_id_conflict", KeyID: keyID}, true, nil
+		}
+		switch existingStatus {
+		case "pending":
+			var held int64
+			_ = tx.QueryRow(`SELECT reserved_tokens FROM reservations WHERE request_id=?`, requestID).Scan(&held)
+			return Admission{Allowed: true, KeyID: keyID, Reserved: held}, true, nil
+		case "rejected":
+			if existingCode == "" {
+				existingCode = "rejected"
+			}
+			return Admission{Code: existingCode, KeyID: keyID}, true, nil
+		default:
+			return Admission{Code: "duplicate_request", KeyID: keyID}, true, nil
+		}
+	}
+	var reservationKey string
+	err = tx.QueryRow(`SELECT key_id FROM reservations WHERE request_id=?`, requestID).Scan(&reservationKey)
+	if err == sql.ErrNoRows {
+		return Admission{}, false, nil
+	}
+	if err != nil {
+		return Admission{}, false, err
+	}
+	if reservationKey != keyID {
+		return Admission{Code: "request_id_conflict", KeyID: keyID}, true, nil
+	}
+	var held int64
+	_ = tx.QueryRow(`SELECT reserved_tokens FROM reservations WHERE request_id=?`, requestID).Scan(&held)
+	return Admission{Allowed: true, KeyID: keyID, Reserved: held}, true, nil
+}
+
+func (s *Store) RecordRejection(requestID, keyID, code string, httpStatus int) error {
 	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(keyID) == "" {
 		return nil
 	}
@@ -561,45 +791,64 @@ func (s *Store) RecordRejection(requestID, keyID string, httpStatus int) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(1) FROM requests WHERE request_id=?`, requestID).Scan(&exists); err != nil {
-		return err
-	}
-	if exists > 0 {
+	var status string
+	err = tx.QueryRow(`SELECT status FROM requests WHERE request_id=?`, requestID).Scan(&status)
+	if err == nil {
 		return nil
 	}
-	now := s.cfg.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE keys SET request_count=request_count+1, last_used_at=? WHERE id=?`, now, keyID); err != nil {
+	if err != sql.ErrNoRows {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO requests (request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		requestID, keyID, "", "http", "", "rejected", httpStatus, 0, 0, 0, 0, 0, 0, 0, now, now); err != nil {
+	now := s.cfg.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = tx.Exec(`UPDATE keys SET request_count=request_count+1, request_quota_used=request_quota_used+1, request_rejected_count=request_rejected_count+1, last_used_at=? WHERE id=? AND deleted_at IS NULL`, now, keyID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO requests (`+requestColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		requestID, keyID, "", "http", "", "rejected", httpStatus, 0, 0, 0, 0, 0, 0, 0, now, now, code); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+func (s *Store) RejectSecret(secret, requestID, code string, httpStatus int) error {
+	if !strings.HasPrefix(secret, "ck_") || strings.TrimSpace(requestID) == "" {
+		return nil
+	}
+	key, err := s.Lookup(secret)
+	if err != nil {
+		return nil
+	}
+	return s.RecordRejection(requestID, key.ID, code, httpStatus)
+}
+
 func (s *Store) NoteUsage(note UsageNote) error {
+	if strings.TrimSpace(note.RequestID) == "" {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var exists int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM requests WHERE request_id=?`, note.RequestID).Scan(&exists); err != nil {
+	var status string
+	err := s.db.QueryRow(`SELECT status FROM requests WHERE request_id=?`, note.RequestID).Scan(&status)
+	if err != nil && err != sql.ErrNoRows {
 		return err
 	}
-	if exists > 0 {
+	if err == nil && status != "pending" {
 		return nil
 	}
 	failed := 0
 	if note.Failed {
 		failed = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed) VALUES (?,?,?,?,?,?)
+	_, err = s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed) VALUES (?,?,?,?,?,?)
 ON CONFLICT(request_id) DO UPDATE SET input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, reasoning_tokens=excluded.reasoning_tokens, cached_tokens=excluded.cached_tokens, failed=excluded.failed`,
 		note.RequestID, note.Input, note.Output, note.Reasoning, note.Cached, failed)
 	return err
 }
 
 func (s *Store) Finalize(in FinalizeInput) error {
+	if strings.TrimSpace(in.RequestID) == "" {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.Begin()
@@ -607,61 +856,131 @@ func (s *Store) Finalize(in FinalizeInput) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var exists int
-	if err := tx.QueryRow(`SELECT COUNT(1) FROM requests WHERE request_id=?`, in.RequestID).Scan(&exists); err != nil {
+	var keyID, status string
+	err = tx.QueryRow(`SELECT key_id, status FROM requests WHERE request_id=?`, in.RequestID).Scan(&keyID, &status)
+	if err == sql.ErrNoRows {
+		return s.finalizeLegacy(tx, in)
+	}
+	if err != nil {
 		return err
 	}
-	if exists > 0 {
+	if status != "pending" {
 		return nil
 	}
+	return s.finalizePending(tx, in, keyID, false)
+}
+
+func (s *Store) finalizeLegacy(tx *sql.Tx, in FinalizeInput) error {
 	var keyID string
-	err = tx.QueryRow(`SELECT key_id FROM reservations WHERE request_id=?`, in.RequestID).Scan(&keyID)
+	err := tx.QueryRow(`SELECT key_id FROM reservations WHERE request_id=?`, in.RequestID).Scan(&keyID)
 	if err == sql.ErrNoRows {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	input, output, reasoning, cached := in.Input, in.Output, in.Reasoning, in.Cached
-	failed := false
-	err = tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed FROM usage_notes WHERE request_id=?`, in.RequestID).
-		Scan(&input, &output, &reasoning, &cached, &failed)
-	if err != nil && err != sql.ErrNoRows {
+	return s.finalizePending(tx, in, keyID, true)
+}
+
+func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, legacy bool) error {
+	input, output, reasoning, cached, failed, err := usageSnapshot(tx, in)
+	if err != nil {
 		return err
 	}
+	status, column, bill := requestOutcome(in.Outcome, failed)
 	billed := int64(0)
-	status := in.Outcome
-	if status == "" {
-		status = "succeeded"
-	}
-	if status == "succeeded" && !failed {
+	if bill {
 		billed = BilledTokens(input, output)
-	} else if status == "succeeded" && failed {
-		status = "failed"
 	}
 	now := s.cfg.Now().UTC()
 	requested := in.RequestedAt
 	if requested.IsZero() {
 		requested = now
 	}
-	if billed > 0 {
-		if _, err := tx.Exec(`UPDATE keys SET tokens_used=tokens_used+?, request_count=request_count+1, last_used_at=? WHERE id=?`, billed, now.Format(time.RFC3339Nano), keyID); err != nil {
+	requestedText := requested.UTC().Format(time.RFC3339Nano)
+	completedText := now.Format(time.RFC3339Nano)
+	if legacy {
+		if _, err = tx.Exec(`INSERT INTO requests (`+requestColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			in.RequestID, keyID, in.Model, in.Transport, in.Protocol, status, in.HTTPStatus, in.Latency.Milliseconds(), in.TTFT.Milliseconds(), input, output, reasoning, cached, billed, requestedText, completedText, ""); err != nil {
 			return err
 		}
-	} else if _, err := tx.Exec(`UPDATE keys SET request_count=request_count+1, last_used_at=? WHERE id=?`, now.Format(time.RFC3339Nano), keyID); err != nil {
+	} else {
+		res, errUpdate := tx.Exec(`UPDATE requests SET model=?, transport=?, protocol=?, status=?, http_status=?, latency_ms=?, ttft_ms=?, input_tokens=?, output_tokens=?, reasoning_tokens=?, cached_tokens=?, billed_tokens=?, requested_at=?, completed_at=?, rejection_code='' WHERE request_id=? AND status='pending'`,
+			in.Model, in.Transport, in.Protocol, status, in.HTTPStatus, in.Latency.Milliseconds(), in.TTFT.Milliseconds(), input, output, reasoning, cached, billed, requestedText, completedText, in.RequestID)
+		if errUpdate != nil {
+			return errUpdate
+		}
+		changed, _ := res.RowsAffected()
+		if changed != 1 {
+			return nil
+		}
+	}
+	if err = incrementOutcome(tx, column, billed, keyID, legacy, completedText); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT INTO requests (request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		in.RequestID, keyID, in.Model, in.Transport, in.Protocol, status, in.HTTPStatus, in.Latency.Milliseconds(), in.TTFT.Milliseconds(), input, output, reasoning, cached, billed, requested.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.Exec(`DELETE FROM reservations WHERE request_id=?`, in.RequestID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM reservations WHERE request_id=?`, in.RequestID); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM usage_notes WHERE request_id=?`, in.RequestID); err != nil {
+	if _, err = tx.Exec(`DELETE FROM usage_notes WHERE request_id=?`, in.RequestID); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func usageSnapshot(tx *sql.Tx, in FinalizeInput) (int64, int64, int64, int64, bool, error) {
+	input, output, reasoning, cached := in.Input, in.Output, in.Reasoning, in.Cached
+	var failed bool
+	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed FROM usage_notes WHERE request_id=?`, in.RequestID).
+		Scan(&input, &output, &reasoning, &cached, &failed)
+	if err == sql.ErrNoRows {
+		return input, output, reasoning, cached, false, nil
+	}
+	if err != nil {
+		return 0, 0, 0, 0, false, err
+	}
+	return input, output, reasoning, cached, failed, nil
+}
+
+func requestOutcome(outcome string, usageFailed bool) (string, string, bool) {
+	switch strings.ToLower(strings.TrimSpace(outcome)) {
+	case "canceled", "cancelled":
+		return "canceled", "request_canceled_count", false
+	case "failed":
+		return "failed", "request_failure_count", false
+	case "", "succeeded":
+		if usageFailed {
+			return "failed", "request_failure_count", false
+		}
+		return "succeeded", "request_success_count", true
+	default:
+		return "failed", "request_failure_count", false
+	}
+}
+
+func incrementOutcome(tx *sql.Tx, column string, billed int64, keyID string, countAdmission bool, usedAt string) error {
+	quota := ""
+	if countAdmission {
+		quota = `, request_count=request_count+1, request_quota_used=request_quota_used+1, last_used_at=?`
+	}
+	switch column {
+	case "request_success_count", "request_failure_count", "request_canceled_count":
+	default:
+		return fmt.Errorf("unknown request outcome")
+	}
+	if countAdmission {
+		if billed > 0 {
+			_, err := tx.Exec(`UPDATE keys SET tokens_used=tokens_used+?, `+column+`=`+column+`+1`+quota+` WHERE id=?`, billed, usedAt, keyID)
+			return err
+		}
+		_, err := tx.Exec(`UPDATE keys SET `+column+`=`+column+`+1`+quota+` WHERE id=?`, usedAt, keyID)
+		return err
+	}
+	if billed > 0 {
+		_, err := tx.Exec(`UPDATE keys SET tokens_used=tokens_used+?, `+column+`=`+column+`+1 WHERE id=?`, billed, keyID)
+		return err
+	}
+	_, err := tx.Exec(`UPDATE keys SET `+column+`=`+column+`+1 WHERE id=?`, keyID)
+	return err
 }
 
 func (s *Store) Requests(q RequestQuery) ([]Request, error) {
@@ -694,8 +1013,14 @@ func (s *Store) RequestsPage(q RequestQuery) ([]Request, PageInfo, error) {
 	if err != nil {
 		return nil, PageInfo{}, err
 	}
-	query := `SELECT request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at FROM requests WHERE (?='' OR key_id=?) AND (?='' OR status=?) AND (?='' OR model=?) AND (?='' OR requested_at>=?) AND (?='' OR requested_at<=?)`
-	args := []any{q.KeyID, q.KeyID, q.Status, q.Status, q.Model, q.Model, from, from, to, to}
+	filter := `(?='' OR key_id=?) AND (?='' OR status=?) AND (?='' OR model=?) AND (?='' OR rejection_code=?) AND (?='' OR requested_at>=?) AND (?='' OR requested_at<=?)`
+	filterArgs := []any{q.KeyID, q.KeyID, q.Status, q.Status, q.Model, q.Model, q.RejectionCode, q.RejectionCode, from, from, to, to}
+	var total int
+	if err = s.db.QueryRow(`SELECT COUNT(1) FROM requests WHERE `+filter, filterArgs...).Scan(&total); err != nil {
+		return nil, PageInfo{}, err
+	}
+	query := `SELECT ` + requestColumns + ` FROM requests WHERE ` + filter
+	args := append([]any{}, filterArgs...)
 	if cursorTime != "" {
 		query += ` AND (requested_at < ? OR (requested_at = ? AND request_id < ?))`
 		args = append(args, cursorTime, cursorTime, cursorID)
@@ -711,7 +1036,7 @@ func (s *Store) RequestsPage(q RequestQuery) ([]Request, PageInfo, error) {
 	if err != nil {
 		return nil, PageInfo{}, err
 	}
-	page := PageInfo{}
+	page := PageInfo{Total: total}
 	if len(items) > limit {
 		items = items[:limit]
 		last := items[len(items)-1]
@@ -744,7 +1069,11 @@ func (s *Store) SessionPage(secret string, limit int, cursor string) (Session, P
 	if err != nil {
 		return Session{}, PageInfo{}, err
 	}
-	query := `SELECT request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at FROM requests WHERE key_id=?`
+	var total int
+	if err = s.db.QueryRow(`SELECT COUNT(1) FROM requests WHERE key_id=?`, row.id).Scan(&total); err != nil {
+		return Session{}, PageInfo{}, err
+	}
+	query := `SELECT ` + requestColumns + ` FROM requests WHERE key_id=?`
 	args := []any{row.id}
 	if cursorTime != "" {
 		query += ` AND (requested_at < ? OR (requested_at = ? AND request_id < ?))`
@@ -761,7 +1090,7 @@ func (s *Store) SessionPage(secret string, limit int, cursor string) (Session, P
 	if err != nil {
 		return Session{}, PageInfo{}, err
 	}
-	page := PageInfo{}
+	page := PageInfo{Total: total}
 	if len(reqs) > limit {
 		reqs = reqs[:limit]
 		last := reqs[len(reqs)-1]
@@ -797,6 +1126,66 @@ func (s *Store) Sweep() error {
 	return nil
 }
 
+func (s *Store) cancelExpiredLocked(now time.Time, cutoff string) (int, error) {
+	rows, err := s.db.Query(`SELECT request_id, key_id FROM reservations WHERE created_at < ? LIMIT 500`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type expiredReservation struct {
+		requestID string
+		keyID     string
+	}
+	var expired []expiredReservation
+	for rows.Next() {
+		var item expiredReservation
+		if err = rows.Scan(&item.requestID, &item.keyID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		expired = append(expired, item)
+	}
+	if err = rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(expired) == 0 {
+		return 0, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	nowText := now.Format(time.RFC3339Nano)
+	canceled := 0
+	for _, item := range expired {
+		res, errExec := tx.Exec(`UPDATE requests SET status='canceled', completed_at=? WHERE request_id=? AND key_id=? AND status='pending'`, nowText, item.requestID, item.keyID)
+		if errExec != nil {
+			return 0, errExec
+		}
+		changed, _ := res.RowsAffected()
+		if changed == 1 {
+			if _, errExec = tx.Exec(`UPDATE keys SET request_canceled_count=request_canceled_count+1 WHERE id=?`, item.keyID); errExec != nil {
+				return 0, errExec
+			}
+			canceled++
+		}
+		if _, errExec = tx.Exec(`DELETE FROM reservations WHERE request_id=?`, item.requestID); errExec != nil {
+			return 0, errExec
+		}
+		if _, errExec = tx.Exec(`DELETE FROM usage_notes WHERE request_id=?`, item.requestID); errExec != nil {
+			return 0, errExec
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, err
+	}
+	return canceled, nil
+}
+
 func (s *Store) sweepBatch() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -814,6 +1203,11 @@ func (s *Store) sweepBatch() (int, error) {
 		total += int(n)
 		return nil
 	}
+	canceled, err := s.cancelExpiredLocked(now, reservationCutoff)
+	if err != nil {
+		return total, err
+	}
+	total += canceled
 	if err := deleteN(`DELETE FROM reservations WHERE request_id IN (SELECT request_id FROM reservations WHERE created_at < ? LIMIT 500)`, reservationCutoff); err != nil {
 		return total, err
 	}
@@ -881,6 +1275,8 @@ type keyRow struct {
 	created                                          time.Time
 	expires, lastUsed                                *time.Time
 	limit, used, count                               int64
+	requestLimit, quotaUsed, success, failure        int64
+	canceled, rejected                               int64
 	deleted                                          bool
 }
 
@@ -920,16 +1316,28 @@ func (s *Store) scanKey(sc rowScanner) (Key, error) {
 	var row keyRow
 	var created, expires, lastUsed sql.NullString
 	var reserved int64
-	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &reserved); err != nil {
+	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &row.requestLimit, &row.quotaUsed, &row.success, &row.failure, &row.canceled, &row.rejected, &reserved); err != nil {
 		return Key{}, err
 	}
 	row.created = parseTime(created.String)
 	row.expires = parseOptional(expires)
 	row.lastUsed = parseOptional(lastUsed)
+	tokenReached := row.limit > 0 && row.used+reserved >= row.limit
+	requestReached := row.requestLimit > 0 && row.quotaUsed >= row.requestLimit
+	remaining := int64(0)
+	if row.requestLimit > 0 {
+		remaining = row.requestLimit - row.quotaUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+	}
 	return Key{
 		ID: row.id, Display: Display(row.prefix, row.last4), Label: row.label, Customer: row.customer, Note: row.note,
 		Status: s.computed(row, reserved), CreatedAt: row.created, ExpiresAt: row.expires, TokenLimit: row.limit,
-		TokensUsed: row.used, RequestCount: row.count, LastUsedAt: row.lastUsed,
+		TokensUsed: row.used, RequestCount: row.count, RequestLimit: row.requestLimit, RequestQuotaUsed: row.quotaUsed,
+		RequestSuccessCount: row.success, RequestFailureCount: row.failure, RequestCanceledCount: row.canceled,
+		RequestRejectedCount: row.rejected, RequestLimitReached: requestReached, TokenLimitReached: tokenReached,
+		RequestQuotaRemaining: remaining, LastUsedAt: row.lastUsed,
 	}, nil
 }
 
@@ -941,6 +1349,9 @@ func (s *Store) computed(row keyRow, reserved int64) string {
 		return "expired"
 	}
 	if row.limit > 0 && row.used+reserved >= row.limit {
+		return "exhausted"
+	}
+	if row.requestLimit > 0 && row.quotaUsed >= row.requestLimit {
 		return "exhausted"
 	}
 	return "active"
@@ -966,6 +1377,22 @@ func (s *Store) expiry(never bool, seconds int64, set bool, now time.Time) *time
 	}
 	t := now.Add(time.Duration(seconds) * time.Second)
 	return &t
+}
+
+func (s *Store) requestLimit(unlimited, set bool, value int64) (int64, error) {
+	if unlimited {
+		return 0, nil
+	}
+	if !set {
+		if s.cfg.DefaultRequestLimit < 0 {
+			return 0, fmt.Errorf("invalid request limit")
+		}
+		return s.cfg.DefaultRequestLimit, nil
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("invalid request limit")
+	}
+	return value, nil
 }
 
 func (s *Store) limit(unlimited, set bool, value int64) int64 {
@@ -1014,7 +1441,7 @@ func scanRequests(rows *sql.Rows) ([]Request, error) {
 	for rows.Next() {
 		var item Request
 		var requested, completed string
-		if err := rows.Scan(&item.RequestID, &item.KeyID, &item.Model, &item.Transport, &item.Protocol, &item.Status, &item.HTTPStatus, &item.LatencyMs, &item.TTFTMs, &item.Input, &item.Output, &item.Reasoning, &item.Cached, &item.Billed, &requested, &completed); err != nil {
+		if err := rows.Scan(&item.RequestID, &item.KeyID, &item.Model, &item.Transport, &item.Protocol, &item.Status, &item.HTTPStatus, &item.LatencyMs, &item.TTFTMs, &item.Input, &item.Output, &item.Reasoning, &item.Cached, &item.Billed, &requested, &completed, &item.RejectionCode); err != nil {
 			return nil, err
 		}
 		item.RequestedAt = parseTime(requested)

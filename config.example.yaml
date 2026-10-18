@@ -1251,10 +1251,15 @@ plugins:
     #   data_file: ""
     #   default_ttl: 168h
     #   default_token_limit: 100000000
+    #   default_request_limit: 0 # 0 means unlimited admitted requests
     #   reserve_tokens: 32768
     #   reservation_ttl: 15m
     #   retention_days: 30
     #   deleted_retention_days: 90
+    #   model_access_mode: full
+    #   models:
+    #     - name: gpt-5-codex
+    #       alias: codex-latest
 
     # ch-relay-vippro forwards Chat Completions and OpenAI Responses with a Codex
     # access token. It does not use api-key or keys. Copy into a real config and

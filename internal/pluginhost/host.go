@@ -3,6 +3,7 @@ package pluginhost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -64,6 +65,8 @@ type Host struct {
 	applyMu                chan struct{}
 	mu                     sync.Mutex
 	loader                 pluginLoader
+	keyShopAuditOnce       sync.Once
+	keyShopAudit           chan keyShopAuditJob
 	loaded                 map[string]*loadedPlugin
 	retired                map[string][]*loadedPlugin
 	loading                map[string]*pluginLoadRequest
@@ -202,6 +205,82 @@ func (h *Host) PluginBusy(id string) bool {
 	}
 	_, ok := h.loading[id]
 	return ok
+}
+
+// KeyShopConfigYAML returns the enabled key-shop config subtree. It is empty when
+// plugins or the key-shop instance are disabled, so callers can skip the policy.
+func (h *Host) KeyShopConfigYAML() []byte {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cfg := h.runtimeConfig
+	if cfg == nil || !cfg.Plugins.Enabled {
+		return nil
+	}
+	item, ok := cfg.Plugins.Configs["key-shop"]
+	if !ok || item.Enabled == nil || !*item.Enabled {
+		return nil
+	}
+	return runtimeConfigYAML(item, true)
+}
+
+type keyShopAuditJob struct {
+	client    pluginClient
+	secret    string
+	requestID string
+	code      string
+	status    int
+}
+
+// NoteKeyShopRejection asks key-shop to record a pre-admission denial. The host
+// model gate returns before request interceptors run, so this is the audit path
+// for those denials. The handler never waits on the plugin call.
+func (h *Host) NoteKeyShopRejection(_ context.Context, secret, requestID, code string, status int) {
+	client := h.keyShopClient()
+	if client == nil || !strings.HasPrefix(secret, "ck_") || strings.TrimSpace(requestID) == "" || strings.TrimSpace(code) == "" {
+		return
+	}
+	h.keyShopAuditOnce.Do(func() {
+		h.keyShopAudit = make(chan keyShopAuditJob, 64)
+		go h.runKeyShopAudit()
+	})
+	select {
+	case h.keyShopAudit <- keyShopAuditJob{client: client, secret: secret, requestID: requestID, code: code, status: status}:
+	default:
+		log.Debug("key-shop rejection note dropped")
+	}
+}
+
+func (h *Host) runKeyShopAudit() {
+	for job := range h.keyShopAudit {
+		body, err := json.Marshal(map[string]any{
+			"Secret":    job.secret,
+			"RequestID": job.requestID,
+			"Code":      job.code,
+			"Status":    job.status,
+		})
+		if err != nil {
+			continue
+		}
+		if _, err = job.client.Call(context.Background(), "keyshop.note_rejection", body); err != nil {
+			log.WithError(err).Debug("key-shop rejection note failed")
+		}
+	}
+}
+
+func (h *Host) keyShopClient() pluginClient {
+	if h == nil {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	loaded := h.loaded["key-shop"]
+	if loaded == nil {
+		return nil
+	}
+	return loaded.client
 }
 
 func (h *Host) ApplyConfig(ctx context.Context, cfg *config.Config) {

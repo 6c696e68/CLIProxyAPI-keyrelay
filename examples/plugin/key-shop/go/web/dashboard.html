@@ -47,11 +47,57 @@
       html {
         color-scheme: dark;
       }
+      html,
+      body,
+      #root {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+      }
       body {
         background: #080b0d;
         color: #eef4f5;
         overflow-x: hidden;
         -webkit-tap-highlight-color: transparent;
+      }
+      main,
+      main section,
+      main .grid,
+      main article {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        box-sizing: border-box;
+      }
+      .request-card {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        box-sizing: border-box;
+      }
+      main article > .flex {
+        min-width: 0;
+        max-width: 100%;
+      }
+      main article > .flex > strong,
+      .request-card-title {
+        flex: 1 1 auto;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      main article .status-chip {
+        flex: 0 1 auto;
+        max-width: 46%;
+      }
+      main article .grid-cols-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      main article strong {
+        overflow-wrap: anywhere;
       }
       ::-webkit-scrollbar {
         width: 10px;
@@ -73,6 +119,233 @@
         outline: 2px solid #55d8ed;
         outline-offset: 2px;
       }
+      .data-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        text-align: left;
+        font-size: 0.875rem;
+      }
+      table.data-table > thead > tr > th,
+      table.data-table > tbody > tr > td {
+        display: table-cell;
+        padding: 14px 16px;
+        vertical-align: middle;
+      }
+      .data-table thead th,
+      .data-table tbody td {
+        position: static;
+        z-index: auto;
+        transform: none;
+        box-shadow: none;
+      }
+      .data-table thead th {
+        background: #12191e;
+        color: #8c9da6;
+        font-size: 0.68rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        white-space: nowrap;
+        border-bottom: 1px solid #253039;
+      }
+      .data-table tbody td {
+        border-bottom: 1px solid #1c262c;
+      }
+      .data-table tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      .data-table tbody tr:hover td {
+        background: rgba(85, 216, 237, 0.045);
+      }
+      .table-shell {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid #253039;
+        border-radius: 0.85rem;
+        background: #0c1114;
+      }
+      .table-scroll {
+        display: block;
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        padding: 0;
+        overflow-x: auto;
+      }
+      .table-pager {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 14px 16px;
+        border: 1px solid #253039;
+        border-radius: 0.85rem;
+        background: #10171b;
+        font-size: 0.75rem;
+        color: #8c9da6;
+      }
+      .pager-btn {
+        min-height: 2rem;
+        padding: 6px 12px;
+        border: 1px solid #33444d;
+        border-radius: 0.5rem;
+        background: #121a1f;
+        color: #eef4f5;
+      }
+      .request-table-shell {
+        border-radius: 1rem;
+        background: #0b1013;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+      }
+      .request-table {
+        table-layout: fixed;
+        width: 100%;
+        min-width: 720px;
+      }
+      table.request-table > thead > tr > th,
+      table.request-table > tbody > tr > td {
+        padding: 12px 14px;
+        background: #0b1013;
+      }
+      .request-table thead th {
+        background: #10171b;
+        color: #9aabb3;
+        font-size: 0.7rem;
+        letter-spacing: 0.03em;
+        text-transform: none;
+      }
+      .request-table thead th:nth-child(1) { width: 16%; }
+      .request-table thead th:nth-child(2) { width: 24%; }
+      .request-table thead th:nth-child(3) { width: 12%; }
+      .request-table thead th:nth-child(4) { width: 14%; }
+      .request-table thead th:nth-child(5) { width: 10%; }
+      .request-table thead th:nth-child(6) { width: 12%; }
+      .request-table thead th:nth-child(7) { width: 12%; }
+      .request-table tbody tr:hover td {
+        background: #162027;
+      }
+      .request-table tbody tr {
+        transition: background-color 180ms ease;
+      }
+      .request-table tbody td {
+        border-bottom-color: rgba(37, 48, 57, 0.72);
+      }
+      .request-time {
+        color: #a7b7bd;
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .request-time strong {
+        display: block;
+        color: #dce7e9;
+        font-size: 0.8rem;
+        font-weight: 600;
+      }
+      .request-time span {
+        display: block;
+        margin-top: 0.18rem;
+      }
+      .request-model {
+        min-width: 0;
+      }
+      .request-model strong {
+        display: block;
+        overflow: hidden;
+        color: #e8f0f1;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.78rem;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .request-transport {
+        color: #a9bbc1;
+        font-size: 0.78rem;
+        white-space: nowrap;
+      }
+      .request-metric {
+        color: #b5c5ca;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.76rem;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .request-details {
+        border-color: #33444d;
+        background: #121a1f;
+        color: #c5d5d9;
+      }
+      .request-details:hover {
+        border-color: #55d8ed;
+        background: #16242a;
+        color: #eef4f5;
+      }
+      .request-card {
+        border-color: #2a3941;
+        background: #10171b;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+      }
+      .request-card-title {
+        overflow: hidden;
+        color: #e8f0f1;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 0.78rem;
+        font-weight: 500;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .request-meta-grid {
+        border-top: 1px solid rgba(37, 48, 57, 0.72);
+        padding-top: 0.75rem;
+      }
+      .stat-card {
+        container-type: inline-size;
+        min-width: 0;
+        overflow: hidden;
+      }
+      .stat-value {
+        max-width: 100%;
+        overflow-wrap: anywhere;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: -0.03em;
+        line-height: 1.15;
+        font-size: clamp(0.9rem, 9.2cqi, 1.65rem);
+      }
+      .status-chip {
+        display: inline-flex;
+        width: fit-content;
+        max-width: 100%;
+        align-items: center;
+        align-self: flex-start;
+        flex: 0 0 auto;
+        gap: 0.45rem;
+        border-radius: 999px;
+        border: 1px solid transparent;
+        padding: 0.32rem 0.72rem 0.32rem 0.5rem;
+        font-size: 0.78rem;
+        font-weight: 650;
+        line-height: 1.35;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+      }
+      .status-chip i {
+        width: 0.5rem;
+        height: 0.5rem;
+        border-radius: 999px;
+        background: currentColor;
+        box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+      }
+      .status-good { color: #8ed7b0; background: #10241c; border-color: #245743; }
+      .status-warn { color: #e7c48a; background: #241c10; border-color: #5a4524; }
+      .status-bad { color: #f0a8a8; background: #241416; border-color: #5a3030; }
+      .status-muted { color: #a7b6be; background: #151c21; border-color: #31404a; }
     </style>
   </head>
   <body class="min-h-screen bg-canvas font-sans text-ink antialiased">
@@ -81,7 +354,8 @@
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
 const {
   useState,
-  useEffect
+  useEffect,
+  useRef
 } = React;
 const get = (o, ...names) => {
   for (const name of names) if (o?.[name] !== undefined) return o[name];
@@ -94,6 +368,31 @@ const formatDate = value => {
     dateStyle: "medium",
     timeStyle: "medium"
   });
+};
+const formatRequestTime = value => {
+  if (!value) return {
+    date: "—",
+    time: "",
+    full: "—"
+  };
+  const date = new Date(value);
+  if (Number.isNaN(date.valueOf())) return {
+    date: value,
+    time: "",
+    full: value
+  };
+  return {
+    date: date.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric"
+    }),
+    time: date.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit"
+    }),
+    full: formatDate(value)
+  };
 };
 const number = value => Number(value || 0).toLocaleString("en-US");
 async function copyText(value) {
@@ -123,27 +422,70 @@ const Button = ({
 }) => /*#__PURE__*/React.createElement("button", _extends({
   className: `inline-flex min-h-10 items-center justify-center rounded-lg border px-3.5 py-2 text-sm font-semibold transition duration-200 hover:-translate-y-0.5 active:translate-y-0 active:scale-[.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan disabled:cursor-not-allowed disabled:opacity-50 ${kind === "primary" ? "border-cyan bg-cyan text-[#061014] hover:bg-[#70e2f1]" : "border-line bg-panel text-ink hover:border-cyan hover:bg-panel2"} ${className}`
 }, props), children);
+const statusTone = value => {
+  const status = String(value || "unknown").toLowerCase();
+  if (["active", "succeeded", "completed", "ok"].includes(status)) return "status-good";
+  if (["expired", "exhausted", "canceled", "cancelled"].includes(status)) return "status-warn";
+  if (["failed", "rejected"].includes(status)) return "status-bad";
+  return "status-muted";
+};
+const statusLabel = value => {
+  const status = String(value || "unknown").toLowerCase();
+  const labels = {
+    active: "Active",
+    disabled: "Disabled",
+    expired: "Expired",
+    exhausted: "Exhausted",
+    succeeded: "Succeeded",
+    failed: "Failed",
+    pending: "Pending",
+    rejected: "Rejected",
+    canceled: "Canceled",
+    cancelled: "Canceled",
+    completed: "Completed",
+    ok: "OK",
+    unknown: "Unknown"
+  };
+  return labels[status] || status.charAt(0).toUpperCase() + status.slice(1);
+};
+const requestQuota = key => {
+  const used = Number(get(key, "RequestQuotaUsed", "request_quota_used") || 0);
+  const limit = Number(get(key, "RequestLimit", "request_limit") || 0);
+  return `${number(used)} / ${limit ? number(limit) : "∞"}`;
+};
+const requestBreakdown = key => `${number(get(key, "RequestSuccessCount", "request_success_count"))} succeeded · ${number(get(key, "RequestFailureCount", "request_failure_count"))} failed · ${number(get(key, "RequestCanceledCount", "request_canceled_count"))} canceled · ${number(get(key, "RequestRejectedCount", "request_rejected_count"))} rejected`;
+const rejectionLabel = code => ({
+  request_limit_exceeded: "Request limit exceeded",
+  token_limit_exceeded: "Token limit exceeded",
+  model_not_allowed: "Model not allowed",
+  key_expired: "Key expired",
+  key_disabled: "Key disabled"
+})[code] || code || "—";
+const pageRange = (page, count, total, size = 25) => {
+  const n = Number(total || 0);
+  if (!count || !n) return `0 of ${n}`;
+  const start = (Math.max(1, page) - 1) * size + 1;
+  return `${start}–${start + count - 1} of ${n}`;
+};
 const Status = ({
   value
-}) => {
-  const status = String(value || "unknown"),
-    good = ["active", "succeeded", "completed", "ok"].includes(status.toLowerCase());
-  return /*#__PURE__*/React.createElement("span", {
-    className: `inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${good ? "bg-[#123529] text-green" : "bg-[#3b2222] text-red"}`
-  }, /*#__PURE__*/React.createElement("i", {
-    className: "h-1.5 w-1.5 rounded-full bg-current"
-  }), status);
-};
+}) => /*#__PURE__*/React.createElement("span", {
+  className: `status-chip ${statusTone(value)}`,
+  role: "status"
+}, /*#__PURE__*/React.createElement("i", {
+  "aria-hidden": "true"
+}), statusLabel(value));
 const Stat = ({
   label,
   value,
   note
 }) => /*#__PURE__*/React.createElement("div", {
-  className: "rounded-2xl border border-line bg-panel p-5"
+  className: "stat-card rounded-2xl border border-line bg-panel p-5"
 }, /*#__PURE__*/React.createElement("span", {
   className: "text-xs text-muted"
 }, label), /*#__PURE__*/React.createElement("strong", {
-  className: "mt-2 block font-mono text-2xl font-bold tabular-nums"
+  className: "stat-value mt-2 block font-mono font-bold",
+  title: String(value ?? "")
 }, value), /*#__PURE__*/React.createElement("span", {
   className: "text-xs text-muted"
 }, note));
@@ -214,13 +556,18 @@ function Dashboard({
   models,
   onLogout,
   onRefresh,
-  onLoadMore,
+  page,
+  onPrev,
+  onNext,
   loadingMore
 }) {
   const key = get(body, "Key", "key"),
     requests = get(body, "Requests", "requests") || [],
     used = Number(get(key, "TokensUsed", "tokens_used")),
     limit = Number(get(key, "TokenLimit", "token_limit")),
+    requestUsed = Number(get(key, "RequestQuotaUsed", "request_quota_used") || 0),
+    requestLimit = Number(get(key, "RequestLimit", "request_limit") || 0),
+    requestReached = Boolean(get(key, "RequestLimitReached", "request_limit_reached")),
     endpoint = get(body, "base_url") || location.origin + "/v1";
   const [detail, setDetail] = useState(null);
   const [copyMessage, setCopyMessage] = useState("");
@@ -254,7 +601,7 @@ function Dashboard({
   }, /*#__PURE__*/React.createElement(Panel, {
     className: "md:p-6"
   }, /*#__PURE__*/React.createElement("div", {
-    className: "flex flex-col justify-between gap-4 border-b border-line pb-5 sm:flex-row"
+    className: "flex flex-col items-start justify-between gap-4 border-b border-line pb-5 sm:flex-row sm:items-center"
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-center gap-3"
   }, /*#__PURE__*/React.createElement("div", {
@@ -291,7 +638,7 @@ function Dashboard({
   }, /*#__PURE__*/React.createElement("h2", {
     className: "font-semibold"
   }, "Lifetime token limit"), /*#__PURE__*/React.createElement("strong", {
-    className: "font-mono text-lg"
+    className: "min-w-0 break-all font-mono text-base tabular-nums sm:text-lg"
   }, number(used), " / ", limit ? number(limit) : "∞")), /*#__PURE__*/React.createElement("p", {
     className: "mt-1 text-xs text-muted"
   }, "Billed tokens = input + output. Reasoning and cached tokens are not double-counted."), /*#__PURE__*/React.createElement("div", {
@@ -304,11 +651,53 @@ function Dashboard({
   })), /*#__PURE__*/React.createElement("div", {
     className: "mt-2 flex justify-between text-xs text-muted"
   }, /*#__PURE__*/React.createElement("span", null, limit ? `${number(Math.max(0, limit - used))} tokens remaining` : "Unlimited tokens"), /*#__PURE__*/React.createElement("span", null, limit ? "No automatic refill" : "Unlimited")))), /*#__PURE__*/React.createElement("div", {
-    className: "grid grid-cols-2 gap-2.5 sm:gap-3"
+    className: "mt-7 border-t border-line pt-5"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col justify-between gap-2 sm:flex-row sm:items-baseline"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "font-semibold"
+  }, "Request limit"), /*#__PURE__*/React.createElement("strong", {
+    className: "min-w-0 break-all font-mono text-base tabular-nums sm:text-lg"
+  }, requestQuota(key))), /*#__PURE__*/React.createElement("p", {
+    className: "mt-1 text-xs text-muted"
+  }, "Every call counts, including failures and rejected attempts. At the limit, further calls are rejected until an administrator raises it."), requestReached ? /*#__PURE__*/React.createElement("p", {
+    className: "mt-3 rounded-xl border border-red/40 bg-red/10 px-3 py-2 text-sm text-red",
+    role: "alert"
+  }, "Request limit reached. Ask the administrator to raise the limit.") : null, /*#__PURE__*/React.createElement("div", {
+    className: "mt-4 h-2 overflow-hidden rounded-full bg-[#26323a]"
+  }, /*#__PURE__*/React.createElement("i", {
+    className: "block h-full rounded-full transition-all " + (requestReached ? "bg-red" : "bg-cyan"),
+    style: {
+      width: requestLimit ? Math.min(100, requestUsed / requestLimit * 100) + "%" : "4%"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 flex flex-col gap-1 text-xs text-muted sm:flex-row sm:justify-between"
+  }, /*#__PURE__*/React.createElement("span", null, requestLimit ? number(Math.max(0, requestLimit - requestUsed)) + " requests remaining" : "Unlimited requests"), /*#__PURE__*/React.createElement("span", null, requestBreakdown(key)))), /*#__PURE__*/React.createElement("div", {
+    className: "grid min-w-0 grid-cols-2 gap-2.5 sm:gap-3"
   }, /*#__PURE__*/React.createElement(Stat, {
-    label: "Requests",
+    label: "Recorded calls",
     value: number(get(key, "RequestCount", "request_count")),
-    note: "Accepted by gateway"
+    note: "Admitted + rejected"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Admitted",
+    value: number(requestUsed),
+    note: requestLimit ? number(Math.max(0, requestLimit - requestUsed)) + " remaining" : "Unlimited"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Succeeded",
+    value: number(get(key, "RequestSuccessCount", "request_success_count")),
+    note: "Finalized OK"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Failed",
+    value: number(get(key, "RequestFailureCount", "request_failure_count")),
+    note: "Still counts toward the limit"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Canceled",
+    value: number(get(key, "RequestCanceledCount", "request_canceled_count")),
+    note: "Stopped or timed out"
+  }), /*#__PURE__*/React.createElement(Stat, {
+    label: "Rejected",
+    value: number(get(key, "RequestRejectedCount", "request_rejected_count")),
+    note: "Counts toward the request limit"
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "Total tokens",
     value: number(used),
@@ -316,12 +705,18 @@ function Dashboard({
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "Cached tokens",
     value: number(requests.reduce((sum, row) => sum + Number(get(row, "Cached", "cached") || 0), 0)),
-    note: "From the last 30 requests"
-  }), /*#__PURE__*/React.createElement(Stat, {
-    label: "Key status",
-    value: get(key, "Status", "status") || "—",
-    note: limit && used >= limit ? "Limit reached" : "Operational"
-  })), /*#__PURE__*/React.createElement(Panel, {
+    note: "From the requests on this page"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "stat-card rounded-2xl border border-line bg-panel p-5"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-muted"
+  }, "Key status"), /*#__PURE__*/React.createElement("div", {
+    className: "mt-3"
+  }, /*#__PURE__*/React.createElement(Status, {
+    value: get(key, "Status", "status") || "unknown"
+  })), /*#__PURE__*/React.createElement("span", {
+    className: "mt-2 block text-xs text-muted"
+  }, requestReached ? "Request limit reached" : limit && used >= limit ? "Token limit reached" : "Operational"))), /*#__PURE__*/React.createElement(Panel, {
     className: "md:col-span-2"
   }, /*#__PURE__*/React.createElement("div", {
     className: "mb-5 flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-end"
@@ -348,64 +743,65 @@ function Dashboard({
     className: "w-full sm:w-auto",
     onClick: onRefresh
   }, "Refresh")), /*#__PURE__*/React.createElement("div", {
-    className: "hidden overflow-x-auto rounded-xl border border-line/70 sm:block"
+    className: "table-shell request-table-shell hidden sm:block"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "table-scroll overflow-x-auto"
   }, /*#__PURE__*/React.createElement("table", {
-    className: "w-full min-w-[660px] text-left text-sm sm:min-w-[700px]"
-  }, /*#__PURE__*/React.createElement("thead", {
-    className: "text-[10px] uppercase tracking-[.12em] text-muted"
-  }, /*#__PURE__*/React.createElement("tr", null, ["Time", "Model", "Transport", "Status", "TTFT", "Token", "Details"].map(h => /*#__PURE__*/React.createElement("th", {
-    className: "pb-3 pr-4",
-    key: h
+    className: "data-table request-table"
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["Time", "Model", "Transport", "Status", "TTFT", "Tokens", ""].map((h, index) => /*#__PURE__*/React.createElement("th", {
+    key: h || "details-" + index,
+    className: h === "Tokens" || h === "" ? "text-right" : ""
   }, h)))), /*#__PURE__*/React.createElement("tbody", null, requests.length ? requests.map((row, index) => /*#__PURE__*/React.createElement("tr", {
-    className: "border-t border-line",
     key: get(row, "RequestID", "request_id") || index
   }, /*#__PURE__*/React.createElement("td", {
-    className: "py-3 pr-4"
-  }, formatDate(get(row, "RequestedAt", "requested_at"))), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 pr-4 font-mono"
-  }, get(row, "Model", "model") || "—"), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 pr-4"
-  }, get(row, "Transport", "transport") || "—"), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 pr-4"
-  }, /*#__PURE__*/React.createElement(Status, {
+    className: "request-time",
+    title: formatDate(get(row, "RequestedAt", "requested_at"))
+  }, /*#__PURE__*/React.createElement("time", {
+    dateTime: get(row, "RequestedAt", "requested_at") || undefined
+  }, /*#__PURE__*/React.createElement("strong", null, formatRequestTime(get(row, "RequestedAt", "requested_at")).date), /*#__PURE__*/React.createElement("span", null, formatRequestTime(get(row, "RequestedAt", "requested_at")).time))), /*#__PURE__*/React.createElement("td", {
+    className: "request-model",
+    title: get(row, "Model", "model") || "—"
+  }, /*#__PURE__*/React.createElement("strong", null, get(row, "Model", "model") || "—")), /*#__PURE__*/React.createElement("td", {
+    className: "request-transport"
+  }, get(row, "Transport", "transport") || "—"), /*#__PURE__*/React.createElement("td", null, /*#__PURE__*/React.createElement(Status, {
     value: get(row, "Status", "status")
   })), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 pr-4 font-mono"
+    className: "request-metric"
   }, get(row, "TTFTMs", "ttft_ms") ? `${number(get(row, "TTFTMs", "ttft_ms"))} ms` : "—"), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 font-mono"
+    className: "request-metric text-right"
   }, number(get(row, "Billed", "billed"))), /*#__PURE__*/React.createElement("td", {
-    className: "py-3 text-right"
+    className: "text-right"
   }, /*#__PURE__*/React.createElement(Button, {
-    className: "min-h-8 px-2.5 py-1.5 text-xs",
+    className: "request-details min-h-8 px-2.5 py-1.5 text-xs",
     onClick: () => setDetail(row)
   }, "Details")))) : /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
     className: "py-10 text-center text-muted",
     colSpan: "7"
-  }, "No requests yet."))))), /*#__PURE__*/React.createElement("div", {
+  }, "No requests yet.")))))), /*#__PURE__*/React.createElement("div", {
     className: "grid gap-2.5 sm:hidden"
   }, requests.length ? requests.map((row, index) => /*#__PURE__*/React.createElement("article", {
-    className: "rounded-xl border border-line bg-panel2 p-3.5",
+    className: "request-card rounded-xl border p-3.5",
     key: get(row, "RequestID", "request_id") || index
   }, /*#__PURE__*/React.createElement("div", {
     className: "flex items-start justify-between gap-3"
   }, /*#__PURE__*/React.createElement("strong", {
-    className: "truncate font-mono text-xs"
+    className: "request-card-title"
   }, get(row, "Model", "model") || "Unknown model"), /*#__PURE__*/React.createElement(Status, {
     value: get(row, "Status", "status")
   })), /*#__PURE__*/React.createElement("div", {
-    className: "mt-3 grid grid-cols-2 gap-2 text-xs"
+    className: "request-meta-grid mt-3 grid grid-cols-2 gap-3 text-xs"
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     className: "block text-muted"
   }, "Time"), /*#__PURE__*/React.createElement("strong", {
-    className: "mt-1 block"
-  }, formatDate(get(row, "RequestedAt", "requested_at")))), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
+    className: "mt-1 block text-[#dce7e9]"
+  }, formatRequestTime(get(row, "RequestedAt", "requested_at")).date, " · ", formatRequestTime(get(row, "RequestedAt", "requested_at")).time)), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     className: "block text-muted"
   }, "Transport"), /*#__PURE__*/React.createElement("strong", {
-    className: "mt-1 block"
+    className: "mt-1 block text-[#dce7e9]"
   }, get(row, "Transport", "transport") || "—")), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     className: "block text-muted"
   }, "Billed"), /*#__PURE__*/React.createElement("strong", {
-    className: "mt-1 block font-mono"
+    className: "mt-1 block break-all font-mono tabular-nums text-[#dce7e9]"
   }, number(get(row, "Billed", "billed")))), /*#__PURE__*/React.createElement("div", {
     className: "text-right"
   }, /*#__PURE__*/React.createElement(Button, {
@@ -413,7 +809,19 @@ function Dashboard({
     onClick: () => setDetail(row)
   }, "Details"))))) : /*#__PURE__*/React.createElement("p", {
     className: "rounded-xl border border-dashed border-line p-6 text-center text-sm text-muted"
-  }, "No requests yet.")))), detail && /*#__PURE__*/React.createElement("div", {
+  }, "No requests yet.")), /*#__PURE__*/React.createElement("div", {
+    className: "table-pager"
+  }, /*#__PURE__*/React.createElement("span", null, pageRange(page || 1, requests.length, get(body, "total"), 25)), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-2 sm:flex"
+  }, /*#__PURE__*/React.createElement(Button, {
+    className: "pager-btn min-h-8 px-2.5 py-1.5 text-xs",
+    disabled: (page || 1) <= 1 || loadingMore,
+    onClick: onPrev
+  }, "Previous"), /*#__PURE__*/React.createElement(Button, {
+    className: "pager-btn min-h-8 px-2.5 py-1.5 text-xs",
+    disabled: !get(body, "has_more") || loadingMore,
+    onClick: onNext
+  }, loadingMore ? "Loading…" : "Next")))), detail && /*#__PURE__*/React.createElement("div", {
     className: "fixed inset-0 z-20 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4",
     onClick: () => setDetail(null)
   }, /*#__PURE__*/React.createElement("div", {
@@ -431,19 +839,14 @@ function Dashboard({
     "aria-label": "Close details"
   }, "Close")), /*#__PURE__*/React.createElement("div", {
     className: "mt-5 grid gap-3 sm:grid-cols-2"
-  }, [["Request ID", get(detail, "RequestID", "request_id")], ["HTTP status", get(detail, "HTTPStatus", "http_status") || "—"], ["Transport", get(detail, "Transport", "transport") || "—"], ["Protocol", get(detail, "Protocol", "protocol") || "—"], ["Latency", get(detail, "LatencyMs", "latency_ms") ? `${number(get(detail, "LatencyMs", "latency_ms"))} ms` : "—"], ["TTFT", get(detail, "TTFTMs", "ttft_ms") ? `${number(get(detail, "TTFTMs", "ttft_ms"))} ms` : "—"], ["Input tokens", number(get(detail, "Input", "input"))], ["Output tokens", number(get(detail, "Output", "output"))], ["Reasoning tokens", number(get(detail, "Reasoning", "reasoning"))], ["Cached tokens", number(get(detail, "Cached", "cached"))]].map(([label, value]) => /*#__PURE__*/React.createElement("div", {
+  }, [["Request ID", get(detail, "RequestID", "request_id")], ["Status", get(detail, "Status", "status") || "—"], ["Reason", rejectionLabel(get(detail, "RejectionCode", "rejection_code"))], ["HTTP status", get(detail, "HTTPStatus", "http_status") || "—"], ["Transport", get(detail, "Transport", "transport") || "—"], ["Protocol", get(detail, "Protocol", "protocol") || "—"], ["Latency", get(detail, "LatencyMs", "latency_ms") ? `${number(get(detail, "LatencyMs", "latency_ms"))} ms` : "—"], ["TTFT", get(detail, "TTFTMs", "ttft_ms") ? `${number(get(detail, "TTFTMs", "ttft_ms"))} ms` : "—"], ["Input tokens", number(get(detail, "Input", "input"))], ["Output tokens", number(get(detail, "Output", "output"))], ["Reasoning tokens", number(get(detail, "Reasoning", "reasoning"))], ["Cached tokens", number(get(detail, "Cached", "cached"))]].map(([label, value]) => /*#__PURE__*/React.createElement("div", {
     key: label,
     className: "rounded-xl bg-panel2 p-3"
   }, /*#__PURE__*/React.createElement("span", {
     className: "block text-[11px] uppercase tracking-[.1em] text-muted"
   }, label), /*#__PURE__*/React.createElement("strong", {
     className: "mt-1 block break-all font-mono text-sm"
-  }, value || "—")))), get(body, "has_more") && /*#__PURE__*/React.createElement("div", {
-    className: "mt-4 flex justify-end"
-  }, /*#__PURE__*/React.createElement(Button, {
-    onClick: onLoadMore,
-    disabled: loadingMore
-  }, loadingMore ? "Loading…" : "Load more")))));
+  }, value || "—"))) )))));
 }
 function App() {
   const [body, setBody] = useState(null);
@@ -451,14 +854,16 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeKey, setActiveKey] = useState("");
+  const [page, setPage] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
+  const cursors = useRef([""]);
   const open = async (value, remember) => {
     setLoading(true);
     setError("");
     try {
       const key = String(value || "").trim();
       if (!key) throw Error("Enter an API key to continue.");
-      const response = await fetch("/client/api/session", {
+      const response = await fetch("/client/api/session?limit=25", {
         headers: {
           Authorization: "Bearer " + key
         }
@@ -472,6 +877,9 @@ function App() {
       }
       if (!response.ok) throw Error(data.error || "Unable to open workspace.");
       if (remember) sessionStorage.setItem("keyshop.client", key);else sessionStorage.removeItem("keyshop.client");
+      cursors.current = [""];
+      if (data.next_cursor) cursors.current[1] = data.next_cursor;
+      setPage(1);
       setActiveKey(key);
       setBody(data);
       try {
@@ -491,23 +899,28 @@ function App() {
       setLoading(false);
     }
   };
-  const loadMore = async () => {
-    if (!body?.has_more || !body?.next_cursor) return;
+  const loadPage = async nextPage => {
+    if (nextPage < 1 || !activeKey) return;
+    const cursor = nextPage <= 1 ? "" : cursors.current[nextPage - 1] || "";
+    if (nextPage > 1 && !cursor) return;
     setLoadingMore(true);
     try {
-      const response = await fetch("/client/api/session?limit=25&cursor=" + encodeURIComponent(body.next_cursor), {
+      const response = await fetch("/client/api/session?limit=25" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : ""), {
         headers: {
           Authorization: "Bearer " + activeKey
         }
       });
       const data = await response.json();
-      if (!response.ok) throw Error(data.error || "Unable to load more requests.");
-      setBody({
-        ...body,
-        Requests: [...(body.Requests || []), ...(data.Requests || data.requests || [])],
+      if (!response.ok) throw Error(data.error || "Unable to load requests.");
+      if (data.next_cursor) cursors.current[nextPage] = data.next_cursor;
+      setPage(nextPage);
+      setBody(current => ({
+        ...(current || {}),
+        ...data,
+        Requests: data.Requests || data.requests || [],
         next_cursor: data.next_cursor || "",
         has_more: Boolean(data.has_more)
-      });
+      }));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -535,7 +948,9 @@ function App() {
       setError("");
     },
     onRefresh: () => open(activeKey, Boolean(sessionStorage.getItem("keyshop.client"))),
-    onLoadMore: loadMore,
+    page: page,
+    onPrev: () => loadPage(page - 1),
+    onNext: () => loadPage(page + 1),
     loadingMore: loadingMore
   }) : /*#__PURE__*/React.createElement(Login, {
     onOpen: open,

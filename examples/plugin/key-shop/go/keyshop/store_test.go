@@ -63,6 +63,45 @@ func TestStoreCreateHidesSecretOnList(t *testing.T) {
 	if listed[0].Display == "" || listed[0].ID != key.ID {
 		t.Fatal("list missing display")
 	}
+	if key.Label == "" || listed[0].Label != key.Label {
+		t.Fatalf("default label was not persisted: created=%q listed=%q", key.Label, listed[0].Label)
+	}
+}
+
+func TestExplicitLabelAndIDRemainStableAcrossUpdatesAndRotation(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{Label: "random-label-7f4a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Update(UpdateInput{ID: key.ID, Status: "disabled", StatusSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != key.ID || updated.Label != "random-label-7f4a" {
+		t.Fatalf("update changed identity or label: before=%+v after=%+v", key, updated)
+	}
+	renamed, err := store.Update(UpdateInput{
+		ID: key.ID, Label: "renamed-random-string", LabelSet: true,
+		Status: "active", StatusSet: true, TTLSeconds: 7200, TTLSet: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.ID != key.ID {
+		t.Fatalf("update rewrote key id: before=%s after=%s", key.ID, renamed.ID)
+	}
+	if renamed.Label != "renamed-random-string" || renamed.ExpiresAt == nil || renamed.Status == "disabled" {
+		t.Fatalf("label, status, or expiry was not applied without touching id: %+v", renamed)
+	}
+	rotated, rotatedSecret, err := store.Rotate(renamed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.ID != renamed.ID || rotated.Label != renamed.Label || rotatedSecret == secret {
+		t.Fatalf("rotation changed identity/label or kept secret: before=%+v after=%+v", renamed, rotated)
+	}
 }
 
 func TestListTreatsOpenReservationAsExhausted(t *testing.T) {
@@ -142,11 +181,11 @@ func TestRequestsPageUsesStableCursor(t *testing.T) {
 		}
 	}
 	first, page, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Limit: 2})
-	if err != nil || len(first) != 2 || !page.HasMore || page.NextCursor == "" {
+	if err != nil || len(first) != 2 || !page.HasMore || page.NextCursor == "" || page.Total != 3 {
 		t.Fatalf("first=%d page=%+v err=%v", len(first), page, err)
 	}
 	second, page, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Limit: 2, Cursor: page.NextCursor})
-	if err != nil || len(second) != 1 || page.HasMore || second[0].RequestID == first[0].RequestID || second[0].RequestID == first[1].RequestID {
+	if err != nil || len(second) != 1 || page.HasMore || page.Total != 3 || second[0].RequestID == first[0].RequestID || second[0].RequestID == first[1].RequestID {
 		t.Fatalf("second=%+v page=%+v err=%v", second, page, err)
 	}
 }
@@ -327,7 +366,7 @@ func TestRequestsFilterByTimeAndRejectionIsLogged(t *testing.T) {
 	if err != nil || admission.Code != "key_expired" {
 		t.Fatalf("admission=%+v err=%v", admission, err)
 	}
-	if err := store.RecordRejection("denied", key.ID, 403); err != nil {
+	if err := store.RecordRejection("denied", key.ID, "key_expired", 403); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := store.Requests(RequestQuery{KeyID: key.ID, From: now.Add(-time.Minute), To: now.Add(time.Minute)})
@@ -337,6 +376,14 @@ func TestRequestsFilterByTimeAndRejectionIsLogged(t *testing.T) {
 	later, err := store.Requests(RequestQuery{KeyID: key.ID, From: now.Add(time.Hour)})
 	if err != nil || len(later) != 0 {
 		t.Fatalf("later=%+v err=%v", later, err)
+	}
+	rejected, rejectedPage, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Status: "rejected", Limit: 25})
+	if err != nil || rejectedPage.Total != 1 || len(rejected) != 1 {
+		t.Fatalf("rejected total=%d rows=%d err=%v", rejectedPage.Total, len(rejected), err)
+	}
+	succeeded, succeededPage, err := store.RequestsPage(RequestQuery{KeyID: key.ID, Status: "succeeded", Limit: 25})
+	if err != nil || succeededPage.Total != 0 || len(succeeded) != 0 {
+		t.Fatalf("succeeded total=%d rows=%d err=%v", succeededPage.Total, len(succeeded), err)
 	}
 }
 

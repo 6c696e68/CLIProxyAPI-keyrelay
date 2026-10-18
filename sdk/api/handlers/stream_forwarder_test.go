@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +99,34 @@ func TestPendingStreamErrorIgnoresUnavailableErrors(t *testing.T) {
 				t.Fatalf("PendingStreamError() = (%#v, %t), want (nil, false)", got, ok)
 			}
 		})
+	}
+}
+
+func TestSSEJSONValidationKeepsDataPrefixInsideJSONString(t *testing.T) {
+	// A 32KB host read can split a response.completed event on the bytes "data:"
+	// or "event:" inside a string. Those bytes are content, not a new SSE field.
+	payload := `{"type":"response.completed","sequence_number":1775,"response":{"status":"completed","output":[{"type":"reasoning","metadata":{"turn_id":"see data: file and event: click"}}]}}`
+	frame := "event: response.completed\ndata: " + payload + "\n\n"
+	for _, needle := range []string{"data:", "event:"} {
+		split := strings.LastIndex(frame, needle)
+		if split < 0 || split < strings.Index(frame, "data: ") {
+			t.Fatalf("fixture missing embedded %q", needle)
+		}
+		state := &sseJSONValidationState{}
+		var output []byte
+		for _, chunk := range []string{frame[:split], frame[split:]} {
+			out, errAdd := state.AddChunk([]byte(chunk))
+			if errAdd != nil {
+				t.Fatalf("split on %q: %v", needle, errAdd)
+			}
+			output = append(output, out...)
+		}
+		if _, errFinish := state.Finish(); errFinish != nil {
+			t.Fatalf("split on %q: %v", needle, errFinish)
+		}
+		if !bytes.Contains(output, []byte(payload)) {
+			t.Fatalf("split on %q corrupted payload: %s", needle, output)
+		}
 	}
 }
 
