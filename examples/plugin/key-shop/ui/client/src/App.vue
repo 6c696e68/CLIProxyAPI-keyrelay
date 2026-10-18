@@ -6,7 +6,9 @@ import LoginView from './views/LoginView.vue'
 import type { ThemeName } from './types'
 
 const service = createLiveClientService()
+const storedKey = sessionStorage.getItem(CLIENT_STORAGE) || ''
 const authed = ref(false)
+const booting = ref(Boolean(storedKey))
 const loading = ref(false)
 const error = ref('')
 const theme = ref<ThemeName>('light')
@@ -34,16 +36,21 @@ function logout() {
   sessionStorage.removeItem(CLIENT_STORAGE)
   authed.value = false
 }
-onMounted(() => {
-  const storedTheme = localStorage.getItem('keyshop.client.theme')
-  if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
-  const stored = sessionStorage.getItem(CLIENT_STORAGE)
-  if (stored) void submit(stored, true)
+const storedTheme = localStorage.getItem('keyshop.client.theme')
+if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
+onMounted(async () => {
+  if (!storedKey) return
+  await submit(storedKey, true)
+  booting.value = false
 })
 </script>
 
 <template>
   <a class="skip-link" href="#content">Skip to content</a>
-  <LoginView v-if="!authed" :loading="loading" :error="error" @submit="submit" />
+  <main v-if="booting" class="boot" role="status" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true" />
+    <p>Checking key</p>
+  </main>
+  <LoginView v-else-if="!authed" :loading="loading" :error="error" @submit="submit" />
   <LedgerView v-else :service="service" :theme="theme" @logout="logout" @toggle-theme="applyTheme(theme === 'dark' ? 'light' : 'dark')" />
 </template>

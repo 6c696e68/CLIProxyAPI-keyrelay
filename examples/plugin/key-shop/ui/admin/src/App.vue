@@ -7,11 +7,12 @@ import WorkspaceView from './views/WorkspaceView.vue'
 import type { ThemeName } from './types'
 
 const service = createLiveAdminService()
+const storedKey = sessionStorage.getItem(MANAGEMENT_STORAGE) || panelKey()
 const authed = ref(false)
+const booting = ref(Boolean(storedKey))
 const loading = ref(false)
 const error = ref('')
 const theme = ref<ThemeName>('light')
-const initialKey = panelKey()
 
 function applyTheme(value: ThemeName) {
   theme.value = value
@@ -36,16 +37,21 @@ function logout() {
   sessionStorage.removeItem(MANAGEMENT_STORAGE)
   authed.value = false
 }
-onMounted(() => {
-  const storedTheme = localStorage.getItem('keyshop.admin.theme')
-  if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
-  const stored = sessionStorage.getItem(MANAGEMENT_STORAGE) || panelKey()
-  if (stored) void submit(stored, true)
+const storedTheme = localStorage.getItem('keyshop.admin.theme')
+if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
+onMounted(async () => {
+  if (!storedKey) return
+  await submit(storedKey, true)
+  booting.value = false
 })
 </script>
 
 <template>
   <a class="skip-link" href="#content">Skip to content</a>
-  <LoginView v-if="!authed" :loading="loading" :error="error" :initial="initialKey" @submit="submit" />
+  <main v-if="booting" class="boot" role="status" aria-live="polite">
+    <div class="boot-mark" aria-hidden="true" />
+    <p>Checking access</p>
+  </main>
+  <LoginView v-else-if="!authed" :loading="loading" :error="error" :initial="storedKey" @submit="submit" />
   <WorkspaceView v-else :service="service" :theme="theme" @logout="logout" @toggle-theme="applyTheme(theme === 'dark' ? 'light' : 'dark')" />
 </template>

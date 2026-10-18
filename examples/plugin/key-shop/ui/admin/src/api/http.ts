@@ -37,7 +37,7 @@ export function panelKey(): string {
   return sessionStorage.getItem(MANAGEMENT_STORAGE) || ''
 }
 
-export async function managementRequest(key: string, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+export async function managementJSON(key: string, method: string, path: string, body?: unknown): Promise<unknown> {
   let response: Response
   try {
     response = await fetch(path, {
@@ -54,18 +54,23 @@ export async function managementRequest(key: string, method: string, path: strin
     if (name === 'TimeoutError' || name === 'AbortError') throw new Error('The operations API did not respond in time.')
     throw new Error('The operations API did not respond.')
   }
-  let data: Record<string, unknown> = {}
+  let data: unknown = {}
   try {
-    data = asRecord(await response.json())
+    data = await response.json()
   } catch {
     data = {}
   }
   if (!response.ok) {
-    const err = data.error
-    const message = typeof err === 'string' ? err : pickMessage(err) || pickMessage(data.message) || 'Request failed'
+    const record = asRecord(data)
+    const err = record.error
+    const message = typeof err === 'string' ? err : pickMessage(err) || pickMessage(record.message) || 'Request failed'
     throw new Error(message)
   }
   return data
+}
+
+export async function managementRequest(key: string, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
+  return asRecord(await managementJSON(key, method, path, body))
 }
 
 function pickMessage(value: unknown): string {

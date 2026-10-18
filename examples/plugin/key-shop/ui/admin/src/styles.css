@@ -433,6 +433,10 @@ button:disabled { cursor: not-allowed; }
   box-shadow: var(--shadow);
 }
 .gate { display: grid; min-height: 100dvh; place-items: center; padding: 24px 16px 80px; }
+.boot { display: grid; min-height: 100dvh; place-items: center; align-content: center; gap: 14px; color: var(--ink-soft); }
+.boot p { margin: 0; font-size: 14px; }
+.boot-mark { width: 22px; height: 22px; border: 2px solid var(--line-strong); border-top-color: var(--ink); border-radius: 50%; animation: boot-spin 0.8s linear infinite; }
+@keyframes boot-spin { to { transform: rotate(360deg); } }
 .gate-card { width: min(440px, 100%); }
 
 @media (max-width: 1100px) {

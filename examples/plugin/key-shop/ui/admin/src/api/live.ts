@@ -1,6 +1,6 @@
 import { ttlSecondsFromLocal } from '@/lib/datetime'
 import type { AdminQuery, AdminSnapshot, CreateDraft, EditDraft, Policy, Scenario } from '@/types'
-import { managementRequest } from './http'
+import { managementJSON, managementRequest } from './http'
 import { mapDiscoveredModels, mapKey, mapPolicyModels, mapRequest, mapStats } from './map'
 import { asRecord, pickNumber, pickString } from './pick'
 
@@ -8,6 +8,7 @@ const KEYS_PATH = '/v0/management/plugins/key-shop/keys'
 const STATS_PATH = '/v0/management/plugins/key-shop/stats'
 const REQUESTS_PATH = '/v0/management/plugins/key-shop/requests?limit=25'
 const POLICY_PATH = '/v8/management/config/plugins/configs/key-shop'
+const ACCESS_KEYS_PATH = '/v8/management/config/access/api-keys'
 const PAGE_SIZE = 25
 
 export function createLiveAdminService() {
@@ -21,39 +22,50 @@ export function createLiveAdminService() {
     return managementRequest(secret, method, path, body)
   }
 
+  function savedAccessKeys(payload: unknown): string[] {
+    if (!Array.isArray(payload)) return []
+    const seen = new Set<string>()
+    const keys: string[] = []
+    for (const item of payload) {
+      const record = asRecord(item)
+      const value = typeof item === 'string' ? item : pickString(record, 'api-key', 'apiKey', 'key', 'Key')
+      const key = value.trim()
+      if (!key || seen.has(key)) continue
+      seen.add(key)
+      keys.push(key)
+    }
+    return keys
+  }
+
+  async function catalogModels(): Promise<string[]> {
+    let keys: string[] = []
+    try {
+      keys = savedAccessKeys(await managementJSON(secret, 'GET', ACCESS_KEYS_PATH))
+    } catch {
+      keys = []
+    }
+    for (const key of keys) {
+      try {
+        const response = await fetch('/v1/models', {
+          headers: { Authorization: `Bearer ${key}` },
+          signal: AbortSignal.timeout(8000),
+        })
+        if (!response.ok) continue
+        const models = mapDiscoveredModels(await response.json())
+        if (models.length) return models
+      } catch {
+        // try the next saved operator key
+      }
+    }
+    return []
+  }
+
   async function discoverModels(): Promise<string[]> {
     if (discovered) return discovered
-    let credentials: Array<Record<string, unknown>> = []
-    try {
-      const response = await call('GET', '/v8/management/credentials?page_size=200')
-      credentials = Array.isArray(response.files) ? response.files.map((item) => asRecord(item)) : []
-    } catch {
-      credentials = []
-    }
-    const candidates = credentials.filter((item) => item.auth_index && !item.disabled && !item.unavailable).sort((left, right) => {
-      const leftProvider = String(left.provider || left.type || '').toLowerCase()
-      const rightProvider = String(right.provider || right.type || '').toLowerCase()
-      return Number(rightProvider === 'codex') - Number(leftProvider === 'codex')
-    })
-    const modelsURL = new URL('/v1/models', window.location.origin).toString()
-    for (const credential of candidates) {
-      try {
-        const response = await call('POST', '/v8/management/requests/api-call', {
-          authIndex: credential.auth_index,
-          method: 'GET',
-          url: modelsURL,
-          header: { Authorization: 'Bearer $TOKEN$' },
-        })
-        if (Number(response.status_code) >= 200 && Number(response.status_code) < 300) {
-          const models = mapDiscoveredModels(response.body)
-          if (models.length) {
-            discovered = models
-            return models
-          }
-        }
-      } catch {
-        // try the next credential
-      }
+    const catalog = await catalogModels()
+    if (catalog.length) {
+      discovered = catalog
+      return discovered
     }
     const fallback = ['codex', 'gemini', 'claude', 'xai', 'meta', 'gemini-interactions']
     const responses = await Promise.all(fallback.map(async (channel) => {

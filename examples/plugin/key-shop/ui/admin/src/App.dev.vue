@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import PrototypeBar from './components/PrototypeBar.vue'
 import LoginView from './views/LoginView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
@@ -7,7 +7,7 @@ import { createAdminService } from './mock/service'
 import type { Scenario, ThemeName } from './types'
 
 const service = createAdminService()
-const authed = ref(false)
+const authed = ref(Boolean(sessionStorage.getItem('keyshop.prototype.admin')))
 const loading = ref(false)
 const error = ref('')
 const scenario = ref<Scenario>('ready')
@@ -36,11 +36,8 @@ function logout() {
   sessionStorage.removeItem('keyshop.prototype.admin')
   authed.value = false
 }
-onMounted(() => {
-  const storedTheme = localStorage.getItem('keyshop.admin.theme')
-  if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
-  if (sessionStorage.getItem('keyshop.prototype.admin')) authed.value = true
-})
+const storedTheme = localStorage.getItem('keyshop.admin.theme')
+if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
 </script>
 
 <template>

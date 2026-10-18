@@ -225,7 +225,7 @@ function secondaryMetrics(data: AdminSnapshot) {
         <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
           <div>
             <h2 class="section-title">Customer model access</h2>
-            <p class="section-copy">This policy applies only to ck_ customer keys. Operator keys are unchanged.</p>
+            <p class="section-copy">This policy applies only to ck_ customer keys. Find models uses the same /v1/models list as Available Models.</p>
           </div>
           <AppButton kind="primary" :disabled="loading || !interactive || !snapshot?.policy.loaded" @click="savePolicy">Save policy</AppButton>
         </div>

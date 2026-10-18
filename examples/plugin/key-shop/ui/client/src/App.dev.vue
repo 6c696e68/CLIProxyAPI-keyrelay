@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import PrototypeBar from './components/PrototypeBar.vue'
 import LedgerView from './views/LedgerView.vue'
 import LoginView from './views/LoginView.vue'
@@ -7,7 +7,7 @@ import { createClientService } from './mock/service'
 import type { Scenario, ThemeName } from './types'
 
 const service = createClientService()
-const authed = ref(false)
+const authed = ref(Boolean(sessionStorage.getItem('keyshop.prototype.client')))
 const loading = ref(false)
 const error = ref('')
 const scenario = ref<Scenario>('ready')
@@ -36,11 +36,8 @@ function logout() {
   sessionStorage.removeItem('keyshop.prototype.client')
   authed.value = false
 }
-onMounted(() => {
-  const storedTheme = localStorage.getItem('keyshop.client.theme')
-  if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
-  if (sessionStorage.getItem('keyshop.prototype.client')) authed.value = true
-})
+const storedTheme = localStorage.getItem('keyshop.client.theme')
+if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
 </script>
 
 <template>

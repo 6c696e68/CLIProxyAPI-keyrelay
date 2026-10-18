@@ -169,6 +169,10 @@ button:disabled, input:disabled { cursor: not-allowed; }
 .alert { border: 1px solid var(--bad-line); border-radius: 12px; background: var(--bad-bg); color: var(--bad); padding: 12px 14px; }
 .preview { position: fixed; left: 16px; bottom: 16px; z-index: 75; display: flex; align-items: center; gap: 8px; border: 1px dashed var(--line-strong); border-radius: 999px; background: var(--bg-surface); padding: 6px 8px 6px 12px; font-size: 12px; color: var(--ink-soft); }
 .gate { display: grid; min-height: 100dvh; place-items: center; padding: 24px 16px 80px; }
+.boot { display: grid; min-height: 100dvh; place-items: center; align-content: center; gap: 14px; color: var(--ink-soft); }
+.boot p { margin: 0; font-size: 14px; }
+.boot-mark { width: 22px; height: 22px; border: 2px solid var(--line-strong); border-top-color: var(--ink); border-radius: 50%; animation: boot-spin 0.8s linear infinite; }
+@keyframes boot-spin { to { transform: rotate(360deg); } }
 .gate-card { width: min(460px, 100%); }
 .page-title { font-family: var(--font-display); font-size: 36px; letter-spacing: -0.035em; line-height: 1.05; margin: 0; }
 .page-kicker { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
