@@ -9,10 +9,10 @@ The reference install that produced this file is already running on the authorin
 | Item | Value |
 | --- | --- |
 | Install root | `~/.keyrelay` |
-| Service | LaunchAgent `com.linhtran.keyrelay` |
+| Service | LaunchAgent `com.keyrelay.cliproxyapi` |
 | Listen | `127.0.0.1:8319` |
 | Date verified | 2026-10-18 |
-| Left untouched | `~/.cliproxyapi` on `127.0.0.1:8317`, LaunchAgent `com.linhtran.cliproxyapi` |
+| Left untouched | `~/.cliproxyapi` on `127.0.0.1:8317` and its existing LaunchAgent |
 
 ## Sample this file now uses
 
@@ -83,7 +83,7 @@ The sample `base-url` is always `http://127.0.0.1:11500/v1`. Do not copy any oth
 
 | Platform | Install root | Plugin dir | Service |
 | --- | --- | --- | --- |
-| macOS, verified | `~/.keyrelay` | `plugins/darwin/arm64/*.dylib` | LaunchAgent `com.linhtran.keyrelay` |
+| macOS, verified | `~/.keyrelay` | `plugins/darwin/arm64/*.dylib` | LaunchAgent `com.keyrelay.cliproxyapi` |
 | Linux user | `~/.keyrelay` | `plugins/linux/<arch>/*.so` | systemd user unit, or the system unit below if root |
 | Linux server | `/opt/keyrelay` | `plugins/linux/<arch>/*.so` | `/etc/systemd/system/keyrelay.service` |
 | Router GL-MT6000 | do not use this runbook to deploy | `plugins/linux/arm64/*.so` | existing `/etc/init.d/cliproxyapi` |
@@ -222,13 +222,13 @@ Libraries must already be in the plugin directory before the first start.
 macOS, verified:
 
 ```bash
-cat > "$HOME/Library/LaunchAgents/com.linhtran.keyrelay.plist" <<EOF
+cat > "$HOME/Library/LaunchAgents/com.keyrelay.cliproxyapi.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.linhtran.keyrelay</string>
+    <string>com.keyrelay.cliproxyapi</string>
     <key>ProgramArguments</key>
     <array>
         <string>${INSTALL_ROOT}/cli-proxy-api</string>
@@ -249,14 +249,14 @@ cat > "$HOME/Library/LaunchAgents/com.linhtran.keyrelay.plist" <<EOF
 </plist>
 EOF
 
-launchctl bootout "gui/$(id -u)/com.linhtran.keyrelay" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.linhtran.keyrelay.plist"
+launchctl bootout "gui/$(id -u)/com.keyrelay.cliproxyapi" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.keyrelay.cliproxyapi.plist"
 ```
 
 Restart after a binary, plugin, or config change:
 
 ```bash
-launchctl kickstart -k "gui/$(id -u)/com.linhtran.keyrelay"
+launchctl kickstart -k "gui/$(id -u)/com.keyrelay.cliproxyapi"
 ```
 
 Linux systemd is the VPS unit shape, adapted to this root. It was not started during the macOS verification. Enable it only on the machine being installed.
@@ -409,10 +409,10 @@ The router key-shop block is `enabled: false`. It was not used. The VPS also has
 macOS:
 
 ```bash
-launchctl bootout "gui/$(id -u)/com.linhtran.keyrelay"
+launchctl bootout "gui/$(id -u)/com.keyrelay.cliproxyapi"
 ```
 
-That does not stop `com.linhtran.cliproxyapi`. Deleting `~/.keyrelay` removes this install. Do not delete `~/.cliproxyapi`.
+That does not stop the other CPA LaunchAgent on port `8317`. Deleting `~/.keyrelay` removes this install. Do not delete `~/.cliproxyapi`.
 
 ## 11. Refresh the sample later
 
