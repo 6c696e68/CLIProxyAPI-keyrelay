@@ -195,21 +195,11 @@ func adminPage() ([]byte, error) {
 	if bytes.Contains(page, []byte("datetime-local")) {
 		return nil, fmt.Errorf("admin page still falls back to datetime-local")
 	}
-	css, err := webFS.ReadFile("web/vendor/flatpickr.min.css")
-	if err != nil {
-		return nil, err
+	if bytes.Contains(page, []byte("FLAT_PICKR")) || bytes.Contains(page, []byte("flatpickr")) {
+		return nil, fmt.Errorf("admin page still depends on Flatpickr")
 	}
-	js, err := webFS.ReadFile("web/vendor/flatpickr.min.js")
-	if err != nil {
-		return nil, err
-	}
-	if !bytes.Contains(page, []byte("/*FLAT_PICKR_CSS*/")) || !bytes.Contains(page, []byte("/*FLAT_PICKR_JS*/")) {
-		return nil, fmt.Errorf("admin page is missing flatpickr markers")
-	}
-	page = bytes.Replace(page, []byte("/*FLAT_PICKR_CSS*/"), css, 1)
-	page = bytes.Replace(page, []byte("/*FLAT_PICKR_JS*/"), js, 1)
-	if bytes.Contains(page, []byte("/*FLAT_PICKR_")) {
-		return nil, fmt.Errorf("flatpickr was not embedded")
+	if bytes.Contains(page, []byte("React.createElement")) {
+		return nil, fmt.Errorf("admin page still uses React UMD")
 	}
 	return page, nil
 }

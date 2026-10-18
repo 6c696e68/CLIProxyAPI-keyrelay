@@ -300,12 +300,32 @@ func TestPagesShowRequestLimitAccounting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, snippet := range []string{"request_limit", "unlimited_requests", "RequestQuotaUsed", "request_limit_exceeded", "keys_request_limited"} {
+	for _, snippet := range []string{
+		"request_limit",
+		"unlimited_requests",
+		"RequestQuotaUsed",
+		"request_limit_exceeded",
+		"keys_request_limited",
+		"/v0/management/plugins/key-shop/keys",
+		"/v0/management/plugins/key-shop/stats",
+		"page_size=25",
+		"cli-proxy-auth",
+	} {
 		if !bytes.Contains(admin, []byte(snippet)) {
 			t.Fatalf("admin page missing %s", snippet)
 		}
 	}
-	for _, snippet := range []string{"Request limit", "Request limit reached. Ask the administrator to raise the limit.", "RequestQuotaUsed", "RequestSuccessCount", "RequestFailureCount", "RequestCanceledCount", "RequestRejectedCount"} {
+	for _, snippet := range []string{
+		"Request limit",
+		"Request limit reached. Ask the administrator to raise the limit.",
+		"RequestQuotaUsed",
+		"RequestSuccessCount",
+		"RequestFailureCount",
+		"RequestCanceledCount",
+		"RequestRejectedCount",
+		"/client/api/session?limit=25",
+		"keyshop.client",
+	} {
 		if !bytes.Contains(dash, []byte(snippet)) {
 			t.Fatalf("client page missing %s", snippet)
 		}
@@ -313,21 +333,54 @@ func TestPagesShowRequestLimitAccounting(t *testing.T) {
 }
 
 func TestAdminModelPolicySavePreservesLoadedConfig(t *testing.T) {
-	t.Helper()
 	page, err := os.ReadFile(filepath.Join("..", "web", "admin.html"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(page)
 	for _, snippet := range []string{
-		"if (!loaded) return;",
-		"disabled: loading || saving || !loaded",
-		"...config",
-		".filter(item => item.name)",
+		"/v8/management/config/plugins/configs/key-shop",
+		"model_access_mode",
 		`"gemini-interactions"`,
 	} {
 		if !strings.Contains(source, snippet) {
 			t.Fatalf("admin model policy missing %s", snippet)
+		}
+	}
+}
+
+func TestEmbeddedPagesAreSelfContainedVue(t *testing.T) {
+	admin, err := os.ReadFile(filepath.Join("..", "web", "admin.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dash, err := os.ReadFile(filepath.Join("..", "web", "dashboard.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, page := range map[string][]byte{"admin": admin, "dashboard": dash} {
+		if bytes.Contains(page, []byte("React.createElement")) {
+			t.Fatalf("%s still uses React UMD", name)
+		}
+		if bytes.Contains(page, []byte("FLAT_PICKR")) || bytes.Contains(page, []byte("flatpickr")) {
+			t.Fatalf("%s still depends on Flatpickr", name)
+		}
+		if bytes.Contains(page, []byte("datetime-local")) {
+			t.Fatalf("%s still falls back to datetime-local", name)
+		}
+		if bytes.Contains(page, []byte(`src="http`)) || bytes.Contains(page, []byte(`href="http`)) {
+			t.Fatalf("%s still loads a remote asset", name)
+		}
+		if !bytes.Contains(page, []byte(`id="app"`)) {
+			t.Fatalf("%s is missing the Vue mount node", name)
+		}
+		for _, snippet := range []string{"This preview", "Preview scenario", "keyshop.prototype", "createAdminService", "createClientService"} {
+			if bytes.Contains(page, []byte(snippet)) {
+				t.Fatalf("%s still ships mock preview UI %q", name, snippet)
+			}
+		}
+		if !bytes.Contains(page, []byte(".only-desktop")) || !bytes.Contains(page, []byte(".only-mobile")) {
+			t.Fatalf("%s is missing explicit desktop/mobile layout rules", name)
 		}
 	}
 }

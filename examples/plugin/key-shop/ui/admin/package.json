@@ -1,0 +1,22 @@
+{
+  "name": "key-shop-admin-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5174",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "vue": "3.5.22"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.1.13",
+    "@vitejs/plugin-vue": "5.2.4",
+    "tailwindcss": "4.1.13",
+    "typescript": "5.8.3",
+    "vite": "6.3.5",
+    "vite-plugin-singlefile": "2.3.0",
+    "vue-tsc": "2.2.12"
+  }
+}
