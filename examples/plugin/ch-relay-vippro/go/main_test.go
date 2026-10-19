@@ -529,8 +529,26 @@ models:
 		if len(calls) != 1 || calls[0].URL != "http://100.105.177.35:11500/v1/chat/completions" {
 			t.Fatalf("shared http = %#v", calls)
 		}
+		if !privateBaseHost("100.64.0.0") || !privateBaseHost("100.127.255.255") {
+			t.Fatal("shared address rejected")
+		}
 		if privateBaseHost("100.63.255.255") || privateBaseHost("100.128.0.1") || privateBaseHost("8.8.8.8") {
 			t.Fatal("public address accepted for http")
+		}
+		for _, raw := range []string{
+			"http://user:pass@100.86.237.127:11500/v1",
+			"http://100.86.237.127:11500/v1?q=1",
+			"http://100.86.237.127:11500/v1#frag",
+		} {
+			if _, err := validateBaseURL(raw); err == nil {
+				t.Fatalf("accepted %s", raw)
+			}
+		}
+		if _, err := validateBaseURL("https://example.com/v1"); err != nil {
+			t.Fatalf("https rejected: %v", err)
+		}
+		if _, err := validateBaseURL("https://100.86.237.127:11500/v1"); err != nil {
+			t.Fatalf("https shared rejected: %v", err)
 		}
 	})
 
