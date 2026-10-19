@@ -19,7 +19,7 @@ Custom flows that must survive:
 - `ch-relay` and `ch-relay-vippro` forward through host relay callbacks. The plugin does not receive or refresh Codex tokens.
 - VipPro management stays `GET /v0/management/ch-relay-vippro/stats` and `POST /v0/management/ch-relay-vippro/accounts/check`. The dashboard is a plugin resource iframe, not a public status route.
 - Request paths read config with `CurrentConfig()`. Management writes hold `h.mu` and call `persistLocked`. Payload rules stay the last semantic barrier in executors.
-- `key-shop` issues `ck_` client keys with expiry and token caps. Public pages are `GET /key-dashboard` and `GET /key-dashboard/api/session`, aliased onto the plugin resource. A direct dashboard resource URL redirects there. `request.intercept_after` must not reserve again. Usage records must keep the lifecycle request id. Docs: `examples/plugin/key-shop/README.md` and `docs/key-shop.md`. Do not drop the alias when syncing upstream.
+- `key-shop` issues `ck_` client keys with expiry and token caps. Public pages are `GET /key-dashboard` and `GET /key-dashboard/api/session`, aliased onto the plugin resource. A direct dashboard resource URL redirects there. `request.intercept_after` must not reserve again. Usage records must keep the lifecycle request id. Docs: `examples/plugin/key-shop/README.md` and `docs/key-shop.md`. Do not drop the alias when syncing upstream; model groups are enforced in the plugin interceptor and must survive upstream syncs. Grouped `ck_` keys are resolved by `keyshop.resolve_model` before routing: the host rewrites a per-group alias to the upstream name and does not consult the global YAML list. A key with no group keeps that legacy list. An unknown group fails closed.
 
 Panel flows that must survive:
 

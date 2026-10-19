@@ -2,22 +2,19 @@
 import { ref } from 'vue'
 import Icon from './ui/Icon.vue'
 import AppButton from './ui/AppButton.vue'
+import { useRoute } from '@/composables/useRoute'
 import type { ThemeName } from '@/types'
 
 defineProps<{ theme: ThemeName }>()
 const emit = defineEmits<{ refresh: []; logout: []; toggleTheme: [] }>()
+const { route } = useRoute()
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const groups = [
-  { label: 'Overview', items: [{ id: 'overview', label: 'Health', icon: 'panel' }] },
-  { label: 'Access', items: [{ id: 'policy', label: 'Models', icon: 'key' }, { id: 'inventory', label: 'Keys', icon: 'search' }] },
-  { label: 'Activity', items: [{ id: 'requests', label: 'Requests', icon: 'refresh' }] },
+  { label: 'Overview', items: [{ id: 'dashboard', href: '#/', label: 'Dashboard', icon: 'panel' }] },
+  { label: 'Access', items: [{ id: 'groups', href: '#/groups', label: 'Model groups', icon: 'layers' }, { id: 'keys', href: '#/keys', label: 'Keys', icon: 'key' }] },
+  { label: 'Activity', items: [{ id: 'requests', href: '#/requests', label: 'Request log', icon: 'activity' }] },
 ]
-
-function go(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  mobileOpen.value = false
-}
 </script>
 
 <template>
@@ -34,10 +31,18 @@ function go(id: string) {
       <nav class="grid gap-3" aria-label="Sections">
         <div v-for="group in groups" :key="group.label" class="nav-group">
           <div class="nav-label">{{ group.label }}</div>
-          <button v-for="item in group.items" :key="item.id" type="button" class="nav-item" @click="go(item.id)">
+          <a
+            v-for="item in group.items"
+            :key="item.id"
+            class="nav-item"
+            :class="{ active: route === item.id }"
+            :href="item.href"
+            :aria-current="route === item.id ? 'page' : undefined"
+            @click="mobileOpen = false"
+          >
             <Icon :name="item.icon" />
             <span class="nav-text">{{ item.label }}</span>
-          </button>
+          </a>
         </div>
       </nav>
       <AppButton class="mt-auto only-desktop-flex" :aria-label="collapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="collapsed = !collapsed">

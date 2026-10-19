@@ -55,6 +55,8 @@ export function createClientService() {
         return {
           key: { ...key, tokensUsed: 0, requestQuotaUsed: 0, requestCount: 0, requestSuccessCount: 0, requestFailureCount: 0, requestCanceledCount: 0, requestRejectedCount: 0, lastUsedAt: null },
           models: [],
+          group: null,
+          modelAccessMode: 'full',
           baseUrl: 'https://relay.northline.example/v1',
           ...pageOf([], input.page),
         }
@@ -63,6 +65,8 @@ export function createClientService() {
         return {
           key: { ...key, requestQuotaUsed: 5000, requestLimit: 5000, requestLimitReached: true },
           models: ['codex-latest', 'claude-sonnet-4-5', 'gemini-2.5-pro'],
+          group: { id: 'grp_studio', name: 'Studio', allModels: false },
+          modelAccessMode: 'custom',
           baseUrl: 'https://relay.northline.example/v1',
           ...pageOf(requests, input.page),
         }
@@ -70,6 +74,8 @@ export function createClientService() {
       return {
         key,
         models,
+        group: { id: 'grp_studio', name: 'Studio', allModels: false },
+        modelAccessMode: 'custom',
         baseUrl: 'https://relay.northline.example/v1',
         ...pageOf(requests, input.page),
       }

@@ -22,6 +22,7 @@ const visible = computed(() => snapshot.value?.requests ?? [])
 const requestTotal = computed(() => snapshot.value?.requestTotal ?? 0)
 const requestHasMore = computed(() => Boolean(snapshot.value?.requestHasMore))
 const cached = computed(() => visible.value.reduce((sum, row) => sum + row.cached, 0))
+const unrestricted = computed(() => snapshot.value?.modelAccessMode === 'full' && snapshot.value.models.length === 0)
 const identityDates = computed(() => {
   const key = snapshot.value?.key
   if (!key) return []
@@ -176,12 +177,14 @@ const facts = [
         <section class="panel model-panel mt-4">
           <div class="flex items-center justify-between gap-3">
             <h2 class="text-base font-semibold">Available models</h2>
-            <span class="num text-xs text-[var(--ink-soft)]">{{ snapshot.models.length }}</span>
+            <span class="num text-xs text-[var(--ink-soft)]">{{ snapshot.models.length || (unrestricted ? 'All' : 0) }}</span>
           </div>
+          <p class="section-copy">{{ snapshot.group ? `Group · ${snapshot.group.name}` : 'No model group is assigned to this key.' }}</p>
           <div v-if="snapshot.models.length" class="model-well" tabindex="0" aria-label="Available models">
             <span v-for="model in snapshot.models" :key="model" class="model-chip">{{ model }}</span>
           </div>
-          <p v-else class="mt-3 text-sm text-[var(--ink-soft)]">No models are allowed for this key.</p>
+          <p v-else-if="unrestricted" class="mt-3 text-sm text-[var(--ink-soft)]">Every model on this server is available.</p>
+          <p v-else class="mt-3 text-sm text-[var(--ink-soft)]">No models are allowed.</p>
         </section>
 
         <section class="mt-4">

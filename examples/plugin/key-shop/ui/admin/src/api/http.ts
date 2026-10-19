@@ -1,3 +1,4 @@
+import { ApiError } from '@/lib/api-error'
 import { asRecord } from './pick'
 
 export const MANAGEMENT_STORAGE = 'keyshop.mgmt'
@@ -64,7 +65,8 @@ export async function managementJSON(key: string, method: string, path: string, 
     const record = asRecord(data)
     const err = record.error
     const message = typeof err === 'string' ? err : pickMessage(err) || pickMessage(record.message) || 'Request failed'
-    throw new Error(message)
+    const keyCount = typeof record.key_count === 'number' ? record.key_count : null
+    throw new ApiError(message, response.status, keyCount)
   }
   return data
 }

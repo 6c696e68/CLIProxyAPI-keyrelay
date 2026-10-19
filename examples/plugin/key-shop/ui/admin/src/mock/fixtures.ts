@@ -1,4 +1,4 @@
-import type { KeyRecord, ModelEntry, RequestRow } from '@/types'
+import type { KeyRecord, ModelEntry, ModelGroup, RequestRow } from '@/types'
 
 export const availableModels = [
   'gpt-5-codex',
@@ -8,6 +8,10 @@ export const availableModels = [
   'claude-opus-4-1',
   'gemini-2.5-pro',
   'gemini-2.5-flash',
+  'vippro/gpt-6-sol',
+  'vippro/gpt-6-astra',
+  'vippro/claude-sonnet',
+  'vippro/gemini-pro',
 ]
 
 export const seedPolicyModels: ModelEntry[] = [
@@ -21,6 +25,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Northline Studio',
     display: 'ck_nort…91kx',
     customer: 'Northline Studio',
+    groupId: 'grp_studio',
     status: 'active',
     tokensUsed: 18_432_110,
     tokenLimit: 28_000_000,
@@ -43,6 +48,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Mai Chen',
     display: 'ck_maic…04aa',
     customer: 'Mai Chen',
+    groupId: 'grp_studio',
     status: 'active',
     tokensUsed: 2_441_902,
     tokenLimit: 8_000_000,
@@ -65,6 +71,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Harbor Press',
     display: 'ck_harb…77e0',
     customer: 'Harbor Press',
+    groupId: '',
     status: 'expired',
     tokensUsed: 640_221,
     tokenLimit: 2_000_000,
@@ -87,6 +94,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Kite Archive',
     display: 'ck_kite…12d4',
     customer: 'Kite Archive',
+    groupId: 'grp_vippro',
     status: 'exhausted',
     tokensUsed: 1_000_000,
     tokenLimit: 1_000_000,
@@ -109,6 +117,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Lantern Desk',
     display: 'ck_lant…8811',
     customer: 'Lantern Desk',
+    groupId: 'grp_vippro',
     status: 'disabled',
     tokensUsed: 88_410,
     tokenLimit: 5_000_000,
@@ -131,6 +140,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Sable Freight',
     display: 'ck_sabl…ee21',
     customer: 'Sable Freight',
+    groupId: 'grp_vippro',
     status: 'active',
     tokensUsed: 12_904_332,
     tokenLimit: 0,
@@ -153,6 +163,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'Orchid Lab',
     display: 'ck_orch…19e7',
     customer: 'Orchid Lab',
+    groupId: 'grp_studio',
     status: 'active',
     tokensUsed: 126_440,
     tokenLimit: 4_500_000,
@@ -175,6 +186,7 @@ export const seedKeys: KeyRecord[] = [
     label: 'West Pier Books',
     display: 'ck_west…1750',
     customer: 'West Pier Books',
+    groupId: 'grp_studio',
     status: 'active',
     tokensUsed: 6_220_418,
     tokenLimit: 12_000_000,
@@ -194,26 +206,76 @@ export const seedKeys: KeyRecord[] = [
   },
 ]
 
-export const seedRequests: RequestRow[] = [
-  row('req_01', 'key_7f3a91c2', '2026-10-18T08:42:00', 'gpt-5-codex', 'websocket', 'succeeded', '', 200, 842, 6120, 1840, 966, 220, 410, 2806),
-  row('req_02', 'key_b21e04aa', '2026-10-18T07:11:00', 'claude-sonnet-4-5', 'http', 'rejected', 'request_limit_exceeded', 429, null, 38, 0, 0, 0, 0, 0),
-  row('req_03', 'key_e8b31750', '2026-10-18T06:55:00', 'gemini-2.5-pro', 'http', 'succeeded', '', 200, 1210, 4088, 990, 640, 80, 120, 1630),
-  row('req_04', 'key_c0ffee21', '2026-10-18T06:12:00', 'gpt-5.4', 'websocket', 'failed', '', 502, 640, 2204, 420, 0, 0, 0, 0),
-  row('req_05', 'key_55a019e7', '2026-10-17T21:14:00', 'gpt-5.4-mini', 'http', 'canceled', '', 499, 210, 1800, 80, 0, 0, 0, 0),
-  row('req_06', 'key_90ab12d4', '2026-10-16T19:03:00', 'claude-opus-4-1', 'http', 'rejected', 'token_limit_exceeded', 402, null, 41, 0, 0, 0, 0, 0),
-  row('req_07', 'key_7f3a91c2', '2026-10-16T11:26:00', 'gpt-5-codex(high)', 'websocket', 'succeeded', '', 200, 990, 7344, 2104, 1330, 480, 260, 3434),
-  row('req_08', 'key_44de8811', '2026-10-04T13:18:00', 'gemini-2.5-flash', 'http', 'succeeded', '', 200, 310, 980, 140, 88, 0, 20, 228),
-  row('req_09', 'key_19cc77e0', '2026-08-28T16:22:00', 'gpt-5.4', 'http', 'rejected', 'key_expired', 403, null, 22, 0, 0, 0, 0, 0),
-  row('req_10', 'key_c0ffee21', '2026-10-15T09:40:00', 'claude-sonnet-4-5', 'http', 'pending', '', null, null, null, 0, 0, 0, 0, 0),
-  row('req_11', 'key_e8b31750', '2026-10-15T08:02:00', 'gpt-5-codex', 'websocket', 'succeeded', '', 200, 760, 5011, 1502, 804, 190, 300, 2306),
-  row('req_12', 'key_b21e04aa', '2026-10-14T18:33:00', 'gpt-5.4', 'http', 'failed', '', 500, 540, 1660, 300, 12, 0, 0, 0),
+export const seedGroups: ModelGroup[] = [
+  {
+    id: 'all-models',
+    name: 'All models',
+    description: 'Every model available on this server.',
+    allModels: true,
+    models: [],
+    isSystem: true,
+    keyCount: 0,
+    createdAt: '2026-03-01T00:00:00Z',
+    updatedAt: '2026-03-01T00:00:00Z',
+  },
+  {
+    id: 'grp_vippro',
+    name: 'vippro',
+    description: 'Upstream vippro models.',
+    allModels: false,
+    models: [
+      { name: 'vippro/gpt-6-sol', alias: 'gpt-6-sol' },
+      { name: 'vippro/gpt-6-astra', alias: '' },
+      { name: 'vippro/claude-sonnet', alias: '' },
+      { name: 'vippro/gemini-pro', alias: '' },
+    ],
+    isSystem: false,
+    keyCount: 0,
+    createdAt: '2026-09-01T08:00:00Z',
+    updatedAt: '2026-10-12T08:00:00Z',
+  },
+  {
+    id: 'grp_studio',
+    name: 'Studio',
+    description: 'Writing and coding seats.',
+    allModels: false,
+    models: [
+      { name: 'gpt-5-codex', alias: '' },
+      { name: 'claude-sonnet-4-5', alias: '' },
+      { name: 'gemini-2.5-pro', alias: '' },
+    ],
+    isSystem: false,
+    keyCount: 0,
+    createdAt: '2026-06-12T08:00:00Z',
+    updatedAt: '2026-10-02T08:00:00Z',
+  },
 ]
+
+export const seedRequests: RequestRow[] = [
+  row('req_01', 'key_7f3a91c2', 'gpt-5-codex', 'gpt-5-codex', 'websocket', 'succeeded', '', 200, 842, 6120, 1840, 966, 220, 410, 2806, 'max', 'acct_northline@relay.example', 'openai'),
+  row('req_02', 'key_b21e04aa', 'claude-sonnet-4-5', 'claude-sonnet-4-5', 'http', 'rejected', 'request_limit_exceeded', 429, null, 38, 0, 0, 0, 0, 0, '', '', ''),
+  row('req_03', 'key_e8b31750', 'gemini-2.5-pro', 'gemini-2.5-pro', 'http', 'succeeded', '', 200, 1210, 4088, 990, 640, 80, 120, 1630, 'high', 'acct_westpier@relay.example', 'gemini'),
+  row('req_04', 'key_c0ffee21', 'vippro/gpt-6-astra', 'gpt-6-astra', 'websocket', 'failed', '', 502, 640, 2204, 420, 0, 0, 0, 0, 'max', 'acct_sable@relay.example', 'codex'),
+  row('req_05', 'key_55a019e7', 'gpt-5.4-mini', 'gpt-5.4-mini', 'http', 'canceled', '', 499, 210, 1800, 80, 0, 0, 0, 0, 'low', 'acct_orchid@relay.example', 'openai'),
+  row('req_06', 'key_90ab12d4', 'vippro/gpt-6-sol', 'vippro/gpt-6-sol', 'http', 'rejected', 'token_limit_exceeded', 402, null, 41, 0, 0, 0, 0, 0, '', '', ''),
+  row('req_07', 'key_7f3a91c2', 'gpt-5-codex(high)', 'gpt-5-codex', 'websocket', 'succeeded', '', 200, 990, 7344, 2104, 1330, 480, 260, 3434, 'high', 'acct_northline@relay.example', 'openai'),
+  row('req_08', 'key_44de8811', 'vippro/claude-sonnet', 'vippro/claude-sonnet', 'http', 'succeeded', '', 200, 310, 980, 140, 88, 0, 20, 228, 'medium', 'acct_lantern@relay.example', 'claude'),
+  row('req_09', 'key_19cc77e0', 'gpt-5.4', 'gpt-5.4', 'http', 'rejected', 'key_expired', 403, null, 22, 0, 0, 0, 0, 0, '', '', ''),
+  row('req_10', 'key_c0ffee21', 'vippro/gemini-pro', 'vippro/gemini-pro', 'http', 'pending', '', null, null, null, 0, 0, 0, 0, 0, '', 'acct_sable@relay.example', 'gemini'),
+  row('req_11', 'key_e8b31750', 'gpt-5-codex', 'gpt-5-codex', 'websocket', 'succeeded', '', 200, 760, 5011, 1502, 804, 190, 300, 2306, 'xhigh', 'acct_westpier@relay.example', 'openai'),
+  row('req_12', 'key_b21e04aa', 'gpt-5.4', 'gpt-5.4', 'http', 'failed', '', 500, 540, 1660, 300, 12, 0, 0, 0, 'medium', 'acct_maichen@relay.example', 'openai'),
+]
+
+function tokPerSec(output: number, latencyMs: number | null, ttftMs: number | null): number | null {
+  if (!output || !latencyMs || ttftMs == null || latencyMs <= ttftMs) return null
+  return Math.round((output / ((latencyMs - ttftMs) / 1000)) * 10) / 10
+}
 
 function row(
   requestId: string,
   keyId: string,
-  requestedAt: string,
   model: string,
+  requestedModel: string,
   transport: string,
   status: RequestRow['status'],
   rejectionCode: string,
@@ -225,12 +287,24 @@ function row(
   reasoning: number,
   cached: number,
   billed: number,
+  effort: string,
+  authId: string,
+  provider: string,
 ): RequestRow {
+  const key = seedKeys.find((item) => item.id === keyId)
+  const group = seedGroups.find((item) => item.id === key?.groupId)
   return {
     requestId,
     keyId,
-    requestedAt,
+    keyLabel: key?.label || '',
+    keyDisplay: key?.display || '',
+    customer: key?.customer || '',
+    groupId: key?.groupId || '',
+    groupName: group?.name || '',
+    requestedAt: '',
+    completedAt: status === 'pending' ? null : '',
     model,
+    requestedModel,
     transport,
     protocol: transport === 'websocket' ? 'openai-responses' : 'openai-chat',
     status,
@@ -238,10 +312,17 @@ function row(
     httpStatus,
     ttftMs,
     latencyMs,
+    tokPerSec: tokPerSec(output, latencyMs, ttftMs),
     input,
     output,
     reasoning,
     cached,
     billed,
+    provider,
+    authId,
+    authIndex: authId ? '0' : '',
+    authType: authId ? 'oauth' : '',
+    effort,
+    serviceTier: effort === 'max' ? 'priority' : '',
   }
 }

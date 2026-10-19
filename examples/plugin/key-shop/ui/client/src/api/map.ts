@@ -1,4 +1,4 @@
-import type { ClientKey, RequestRow } from '@/types'
+import type { ClientKey, RequestRow, SessionGroup } from '@/types'
 import { asRecord, pick, pickNumber, pickString, pickTime } from './pick'
 
 export function mapKey(raw: unknown): ClientKey {
@@ -42,6 +42,17 @@ export function mapRequest(raw: unknown): RequestRow {
     cached: pickNumber(row, 'Cached', 'cached'),
     billed: pickNumber(row, 'Billed', 'billed'),
   }
+}
+
+// Customer pages must not map upstream account fields (auth_id, provider, auth_index).
+
+export function mapSessionGroup(value: unknown): SessionGroup | null {
+  if (!value || typeof value !== 'object') return null
+  const row = asRecord(value)
+  const id = pickString(row, 'id', 'ID')
+  const name = pickString(row, 'name', 'Name')
+  if (!id && !name) return null
+  return { id, name: name || 'Model group', allModels: Boolean(row.all_models ?? row.AllModels) }
 }
 
 export function mapModels(value: unknown): string[] {

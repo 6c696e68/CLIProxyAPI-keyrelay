@@ -24,5 +24,7 @@ defineProps<{ name: string; size?: number }>()
     <template v-else-if="name === 'calendar'"><rect x="4" y="5" width="16" height="15" rx="2" /><path d="M8 3v4M16 3v4M4 10h16" /></template>
     <template v-else-if="name === 'left'"><path d="m14 6-6 6 6 6" /></template>
     <template v-else-if="name === 'right'"><path d="m10 6 6 6-6 6" /></template>
+    <template v-else-if="name === 'layers'"><path d="m12 4 8 4-8 4-8-4 8-4Z" /><path d="m4 12 8 4 8-4" /><path d="m4 16 8 4 8-4" /></template>
+    <template v-else-if="name === 'activity'"><path d="M4 13h4l2-6 4 10 2-4h4" /></template>
   </svg>
 </template>

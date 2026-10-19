@@ -70,6 +70,30 @@ export function statusTone(value: string): 'good' | 'warn' | 'bad' | 'muted' {
   return 'muted'
 }
 
+export function formatMs(value: number | null | undefined): string {
+  if (!value) return '—'
+  if (value < 1000) return `${formatNumber(Math.round(value))} ms`
+  const seconds = value / 1000
+  return `${seconds >= 10 ? Math.round(seconds).toLocaleString('en-US') : seconds.toFixed(1)} s`
+}
+
+export function formatTok(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return value.toFixed(1)
+}
+
+export function formatPercent(value: number | null | undefined): string {
+  if (value == null || Number.isNaN(value)) return '—'
+  return `${(value * 100).toFixed(1)}%`
+}
+
+export function shortenMiddle(value: string, head = 8, tail = 6): string {
+  const text = value.trim()
+  if (!text) return '—'
+  if (text.length <= head + tail + 1) return text
+  return `${text.slice(0, head)}…${text.slice(-tail)}`
+}
+
 export function pageRange(page: number, count: number, total: number, size = 5): string {
   if (!count || !total) return `0 of ${total}`
   const start = (Math.max(1, page) - 1) * size + 1

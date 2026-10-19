@@ -1,6 +1,6 @@
 import type { ClientQuery, ClientSnapshot, Scenario } from '@/types'
 import { asRecord, pickNumber, pickString } from './pick'
-import { mapKey, mapModels, mapRequest } from './map'
+import { mapKey, mapModels, mapRequest, mapSessionGroup } from './map'
 
 export const CLIENT_STORAGE = 'keyshop.client'
 const SESSION_PATH = '/client/api/session?limit=25'
@@ -17,7 +17,6 @@ async function readJSON(response: Response): Promise<Record<string, unknown>> {
 
 export function createLiveClientService() {
   let secret = ''
-  let models: string[] = []
   const cursors = ['']
 
   async function session(page: number): Promise<ClientSnapshot> {
@@ -32,28 +31,16 @@ export function createLiveClientService() {
     if (next) cursors[page] = next
     const key = mapKey(data.Key || data.key)
     const requests = Array.isArray(data.Requests) ? data.Requests.map(mapRequest) : Array.isArray(data.requests) ? data.requests.map(mapRequest) : []
-    if (pickString(data, 'model_access_mode') === 'custom') {
-      models = mapModels({ models: data.models })
-    } else if (page <= 1) {
-      await loadModels()
-    }
+    const mode = pickString(data, 'model_access_mode') === 'custom' ? 'custom' : 'full'
     return {
       key,
       requests,
-      models,
+      models: mapModels({ models: data.models }),
+      group: mapSessionGroup(data.group),
+      modelAccessMode: mode,
       baseUrl: pickString(data, 'base_url') || `${window.location.origin}/v1`,
       requestTotal: pickNumber(data, 'total'),
       requestHasMore: Boolean(data.has_more),
-    }
-  }
-
-  async function loadModels() {
-    try {
-      const response = await fetch('/v1/models', { headers: { Authorization: `Bearer ${secret}` } })
-      const data = await response.json()
-      models = mapModels(data)
-    } catch {
-      models = []
     }
   }
 

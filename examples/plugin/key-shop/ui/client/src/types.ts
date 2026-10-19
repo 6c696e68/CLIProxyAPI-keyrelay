@@ -44,10 +44,18 @@ export interface ClientQuery {
   page: number
 }
 
+export interface SessionGroup {
+  id: string
+  name: string
+  allModels: boolean
+}
+
 export interface ClientSnapshot {
   key: ClientKey
   requests: RequestRow[]
   models: string[]
+  group: SessionGroup | null
+  modelAccessMode: 'full' | 'custom'
   baseUrl: string
   requestTotal: number
   requestHasMore: boolean

@@ -13,13 +13,24 @@ Do not copy code from `LingyeNBird/cpa2pool`. That repository is AGPL-3.0. The u
 ```text
 ck_ secret
   -> frontend_auth.authenticate
-  -> request.intercept_before checks model access, then reserves tokens
+  -> host keyshop.resolve_model for a grouped key (global YAML list is not consulted)
+  -> request.intercept_before checks a limited group; the all-models group and ungrouped keys use the global model policy, then reserves tokens
   -> upstream
-  -> usage.handle stores the token snapshot
-  -> request.complete bills and releases the reservation
+  -> usage.handle stages the token snapshot in usage_notes
+  -> request.complete copies that note, bills, and releases the reservation
 ```
 
-Model access is plugin-wide, not per key. `model_access_mode: full` allows every model. `custom` allows the configured alias, or the upstream `name` when alias is empty. Matching is case-insensitive and keeps a client thinking suffix such as `(high)`. For a `ck_` key, the host checks this policy after global model mapping and before provider routing. An allowed alias is rewritten to its upstream name, with the thinking suffix preserved, before routing. A model outside the custom list returns HTTP 403 `model_not_allowed` before routing and before `Store.Admit()`, so it creates no token reservation. It still consumes one request-quota unit. A known customer key gets a rejected request row. Once the request limit is reached, later calls return HTTP 429. Operator keys do not enter this policy. `/v1/models` does not run the interceptor.
+Model access is two layers. The global policy is plugin-wide, not per key. `model_access_mode: full` allows every model. `custom` allows the configured alias, or the upstream `name` when alias is empty. Matching is case-insensitive and keeps a client thinking suffix such as `(high)`. For a `ck_` key, the host checks this policy after global model mapping and before provider routing. An allowed alias is rewritten to its upstream name, with the thinking suffix preserved, before routing. A model outside the custom list returns HTTP 403 `model_not_allowed` before routing and before `Store.Admit()`, so it creates no token reservation. It still consumes one request-quota unit. A known customer key gets a rejected request row. Once the request limit is reached, later calls return HTTP 429. Operator keys do not enter this policy. `/v1/models` does not run the interceptor.
+
+A model group is a second layer. For a grouped `ck_` key the host calls `keyshop.resolve_model` before provider routing and does not consult the global YAML list. The match is the group's client-visible name: the per-group alias when set, otherwise the upstream name. A bare upstream name is not accepted when that entry has an alias. An allowed alias is rewritten to the upstream name, and a thinking suffix such as `(high)` is kept. `all_models` allows the call and leaves the model unchanged. An unknown group fails closed. A key with an empty `group_id` keeps the legacy global-policy behavior. An unknown key does too. The interceptor still checks the group as defense in depth and accepts either the alias or the upstream name. A group denial is the same HTTP 403 `model_not_allowed`: a rejected request row, no token reservation. Editing a group takes effect on the next request.
+
+`request.complete` stores transport from the completion payload. `Stream` is true for HTTP SSE and for Responses websocket turns, and `Metadata.request_path` is `/v1/responses` for both. The payload has no websocket-only field, so a websocket turn is stored as `http` and carries no websocket transport label. The row is `websocket` only when metadata sets `websocket`.
+
+`usage.handle` writes tokens, latency, effort, and account facts into `usage_notes`. The sweeper drops notes for terminal rows, and notes older than retention, but it leaves the note for a still-pending request. `Finalize` copies that note onto the request row and then deletes it. A note deleted between `usage.handle` and `request.complete` would leave zeros and bill nothing.
+
+The Request log Account column is `auth_id`, the host `AuthID` for that call. It is the upstream auth id, not necessarily an email. The customer page does not show it.
+
+Opening a database from the previous plugin only adds columns and tables: `keys.group_id` (default empty), request and usage-note columns, indexes, and `model_groups` (including the `all-models` seed). An existing `model_groups` table gains `aliases_json` (`TEXT NOT NULL DEFAULT '{}'`) and keeps `models_json` as an array of upstream names, so the previous plugin can still read the group. It does not rebuild or drop existing tables. The previous `key-shop.so` names its columns, so it still runs on a migrated database. Restoring that library does not require restoring the database.
 
 `request.intercept_after` must stay a no-op for admission. The host calls it with the same request id. A second insert used to fail the SQLite primary key and return `key_store_unavailable`.
 
