@@ -302,14 +302,18 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
 	if gateErr != nil {
+		h.recordKeyShopGateDenial(ctx, entryProtocol, modelName, true, gateErr)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- gateErr
 		close(errChan)
 		return nil, nil, errChan
 	}
 	routeDecision, preparedRoute := preparedModelRouteFromContext(ctx, execOptions.SkipRouterPluginID)
+	if preparedRoute && !preparedRouteMatchesModel(ctx, modelName) {
+		preparedRoute = false
+	}
 	if !preparedRoute {
 		routeDecision = h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, true, execOptions)
 	}

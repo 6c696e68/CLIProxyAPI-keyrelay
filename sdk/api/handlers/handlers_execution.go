@@ -49,8 +49,9 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
 	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
 	if gateErr != nil {
+		h.recordKeyShopGateDenial(ctx, entryProtocol, modelName, false, gateErr)
 		return nil, nil, gateErr
 	}
 	routeDecision := h.applyModelRouter(ctx, entryProtocol, modelName, rawJSON, false, execOptions)
@@ -135,8 +136,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
 	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
 	if gateErr != nil {
+		h.recordKeyShopGateDenial(ctx, handlerType, modelName, false, gateErr)
 		return nil, nil, gateErr
 	}
 	routeDecision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, false, execOptions)

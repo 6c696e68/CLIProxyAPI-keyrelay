@@ -16,6 +16,8 @@ type selectedAuthCallbackContextKey struct{}
 
 type preparedModelRouteContextKey struct{}
 
+type preparedModelRouteModelContextKey struct{}
+
 type executionSessionContextKey struct{}
 
 type disallowFreeAuthContextKey struct{}
@@ -95,8 +97,10 @@ func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerTyp
 		ctx = context.Background()
 	}
 	modelName, rawJSON, _ = h.applyConfiguredModelMapping(modelName, rawJSON)
+	ctx, modelName, rawJSON, _ = h.applyKeyShopModelGate(ctx, modelName, rawJSON)
 	decision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, modelExecutionOptions{})
 	ctx = context.WithValue(ctx, preparedModelRouteContextKey{}, decision)
+	ctx = context.WithValue(ctx, preparedModelRouteModelContextKey{}, strings.TrimSpace(modelName))
 	hasOverride := strings.TrimSpace(decision.ExecutorPluginID) != "" || strings.TrimSpace(decision.Provider) != ""
 	return ctx, hasOverride
 }
@@ -131,16 +135,30 @@ func PreparedStreamProviderRoute(ctx context.Context) (string, string) {
 }
 
 // StreamRouteModel is the model for auth, passthrough, and compaction checks after PrepareStreamModelRoute.
-// A plugin provider target wins; otherwise the configured mapping of clientModel is used. The body is not rewritten.
+// A plugin provider target wins; otherwise the key-shop rewrite of the mapped client model is used.
 func (h *BaseAPIHandler) StreamRouteModel(ctx context.Context, clientModel string) string {
-	mapped, _, _ := h.applyConfiguredModelMapping(clientModel, nil)
+	mapped, raw, _ := h.applyConfiguredModelMapping(clientModel, nil)
 	if _, target := PreparedStreamProviderRoute(ctx); target != "" {
 		return target
+	}
+	if _, rewritten, _, gateErr := h.applyKeyShopModelGate(ctx, mapped, raw); gateErr == nil && strings.TrimSpace(rewritten) != "" {
+		return strings.TrimSpace(rewritten)
 	}
 	if strings.TrimSpace(mapped) != "" {
 		return mapped
 	}
 	return strings.TrimSpace(clientModel)
+}
+
+func preparedRouteMatchesModel(ctx context.Context, modelName string) bool {
+	if ctx == nil {
+		return false
+	}
+	prepared, ok := ctx.Value(preparedModelRouteModelContextKey{}).(string)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(prepared) == strings.TrimSpace(modelName)
 }
 
 // WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.

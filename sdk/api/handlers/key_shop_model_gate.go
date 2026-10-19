@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -23,6 +24,19 @@ type keyShopPolicySource interface {
 	KeyShopConfigYAML() []byte
 }
 
+// KeyShopResolveResult is the key-shop resolve_model response.
+// Loaded is false when the plugin is not loaded; the caller keeps the legacy YAML policy.
+type KeyShopResolveResult struct {
+	Loaded  bool
+	Mode    string
+	Allowed bool
+	Model   string
+}
+
+type keyShopModelResolver interface {
+	KeyShopResolveModel(ctx context.Context, secret, model, bodyModel string) (KeyShopResolveResult, error)
+}
+
 type keyShopModelEntry struct {
 	Name  string `yaml:"name"`
 	Alias string `yaml:"alias"`
@@ -33,31 +47,108 @@ type keyShopPolicyConfig struct {
 	Models          []keyShopModelEntry `yaml:"models"`
 }
 
-// applyKeyShopModelGate enforces ck_ model access before provider routing.
-// An allowed alias is rewritten to its upstream name. Admission stays in the plugin interceptor.
-func (h *BaseAPIHandler) applyKeyShopModelGate(ctx context.Context, modelName string, rawJSON []byte) (string, []byte, *interfaces.ErrorMessage) {
-	source, ok := h.interceptorHost().(keyShopPolicySource)
-	if !ok || source == nil {
-		return modelName, rawJSON, nil
+type keyShopGateStateKey struct{}
+
+// keyShopGateState caches one resolve_model decision for every gate call in a request.
+// The pointer is stored on the context so PrepareStreamModelRoute, StreamRouteModel,
+// and execution share it. Denial is recorded once, by the execution path.
+type keyShopGateState struct {
+	mu        sync.Mutex
+	evaluated bool
+	secret    string
+	decision  keyShopGateDecision
+	noted     bool
+}
+
+type keyShopGateDecision struct {
+	kind  string
+	model string
+}
+
+func keyShopGateStateFrom(ctx context.Context) (*keyShopGateState, context.Context) {
+	if ctx != nil {
+		if state, ok := ctx.Value(keyShopGateStateKey{}).(*keyShopGateState); ok && state != nil {
+			return state, ctx
+		}
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	state := &keyShopGateState{}
+	return state, context.WithValue(ctx, keyShopGateStateKey{}, state)
+}
+
+// applyKeyShopModelGate enforces ck_ model access before provider routing.
+// A grouped key is resolved by the plugin and does not consult the global YAML list.
+// An allowed alias is rewritten to its upstream name. The returned context carries
+// the cached decision. Admission stays in the plugin interceptor. Denial is not
+// recorded here; the execution path records it once with the lifecycle request id.
+func (h *BaseAPIHandler) applyKeyShopModelGate(ctx context.Context, modelName string, rawJSON []byte) (context.Context, string, []byte, *interfaces.ErrorMessage) {
 	secret := keyShopSecret(headersFromContext(ctx))
 	if !strings.HasPrefix(secret, "ck_") {
-		return modelName, rawJSON, nil
+		return ctx, modelName, rawJSON, nil
 	}
-	raw := source.KeyShopConfigYAML()
-	if len(strings.TrimSpace(string(raw))) == 0 {
-		return modelName, rawJSON, nil
+	state, ctx := keyShopGateStateFrom(ctx)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !state.evaluated {
+		state.secret = secret
+		state.decision = h.evaluateKeyShopGate(ctx, secret, modelName, rawJSON)
+		state.evaluated = true
 	}
-	var cfg keyShopPolicyConfig
-	if yaml.Unmarshal(raw, &cfg) != nil {
+	nextName, nextBody, errMsg := state.decision.apply(modelName, rawJSON)
+	return ctx, nextName, nextBody, errMsg
+}
+
+func (d keyShopGateDecision) apply(modelName string, rawJSON []byte) (string, []byte, *interfaces.ErrorMessage) {
+	switch d.kind {
+	case "deny":
+		return modelName, rawJSON, keyShopDenied()
+	case "unavailable":
 		return modelName, rawJSON, keyShopPolicyError(http.StatusServiceUnavailable, "model_policy_unavailable", "model policy unavailable", "server_error")
-	}
-	if !strings.EqualFold(strings.TrimSpace(cfg.ModelAccessMode), "custom") {
+	case "rewrite":
+		nextName, nextBody := applyKeyShopRewrite(modelName, rawJSON, d.model)
+		return nextName, nextBody, nil
+	default:
 		return modelName, rawJSON, nil
 	}
+}
+
+func (h *BaseAPIHandler) evaluateKeyShopGate(ctx context.Context, secret, modelName string, rawJSON []byte) keyShopGateDecision {
 	bodyModel := ""
 	if gjson.GetBytes(rawJSON, "model").Exists() {
 		bodyModel = strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	}
+	host := h.interceptorHost()
+	if resolver, ok := host.(keyShopModelResolver); ok && resolver != nil {
+		resolved, err := resolver.KeyShopResolveModel(ctx, secret, modelName, bodyModel)
+		if err != nil {
+			return keyShopGateDecision{kind: "unavailable"}
+		}
+		if resolved.Loaded && strings.EqualFold(strings.TrimSpace(resolved.Mode), "group") {
+			if !resolved.Allowed {
+				return keyShopGateDecision{kind: "deny"}
+			}
+			if keyShopResolvedModelUnchanged(modelName, bodyModel, resolved.Model) {
+				return keyShopGateDecision{kind: "keep"}
+			}
+			return keyShopGateDecision{kind: "rewrite", model: resolved.Model}
+		}
+	}
+	source, ok := host.(keyShopPolicySource)
+	if !ok || source == nil {
+		return keyShopGateDecision{kind: "keep"}
+	}
+	raw := source.KeyShopConfigYAML()
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return keyShopGateDecision{kind: "keep"}
+	}
+	var cfg keyShopPolicyConfig
+	if yaml.Unmarshal(raw, &cfg) != nil {
+		return keyShopGateDecision{kind: "unavailable"}
+	}
+	if !strings.EqualFold(strings.TrimSpace(cfg.ModelAccessMode), "custom") {
+		return keyShopGateDecision{kind: "keep"}
 	}
 	requested := strings.TrimSpace(modelName)
 	if requested == "" {
@@ -65,18 +156,68 @@ func (h *BaseAPIHandler) applyKeyShopModelGate(ctx context.Context, modelName st
 	}
 	rewritten, allowed := resolveKeyShopModel(cfg.Models, requested)
 	if !allowed {
-		h.noteKeyShopRejection(ctx, secret, "model_not_allowed", http.StatusForbidden)
-		return modelName, rawJSON, keyShopDenied()
+		return keyShopGateDecision{kind: "deny"}
 	}
 	if bodyModel != "" && !strings.EqualFold(bodyModel, requested) {
 		bodyRewritten, bodyAllowed := resolveKeyShopModel(cfg.Models, bodyModel)
 		if !bodyAllowed || bodyRewritten != rewritten {
-			h.noteKeyShopRejection(ctx, secret, "model_not_allowed", http.StatusForbidden)
-			return modelName, rawJSON, keyShopDenied()
+			return keyShopGateDecision{kind: "deny"}
 		}
 	}
+	if keyShopResolvedModelUnchanged(modelName, bodyModel, rewritten) {
+		return keyShopGateDecision{kind: "keep"}
+	}
+	return keyShopGateDecision{kind: "rewrite", model: rewritten}
+}
+
+// recordKeyShopGateDenial writes one rejected row for an execution-path denial.
+// Prepare and route checks must not call it. The lifecycle request id is used so
+// a repeated note cannot mint another gate- id and burn another quota unit.
+func (h *BaseAPIHandler) recordKeyShopGateDenial(ctx context.Context, sourceFormat, model string, stream bool, gateErr *interfaces.ErrorMessage) {
+	if gateErr == nil || gateErr.StatusCode != http.StatusForbidden || !strings.Contains(string(gateErr.Body), `"model_not_allowed"`) {
+		return
+	}
+	state, ctx := keyShopGateStateFrom(ctx)
+	state.mu.Lock()
+	if state.noted {
+		state.mu.Unlock()
+		return
+	}
+	state.noted = true
+	secret := state.secret
+	state.mu.Unlock()
+	if strings.TrimSpace(coreusage.ExecutionRequestIDFromContext(ctx)) == "" {
+		lifecycle := h.newRequestLifecycleTracker(ctx, sourceFormat, model, model, stream, nil, "")
+		ctx = coreusage.WithExecutionRequestID(ctx, lifecycle.requestID())
+	}
+	if secret == "" {
+		secret = keyShopSecret(headersFromContext(ctx))
+	}
+	h.noteKeyShopRejection(ctx, secret, "model_not_allowed", http.StatusForbidden)
+}
+
+// keyShopResolvedModelUnchanged reports that the plugin kept the requested model.
+// all_models does this, and a differing body model must not be overwritten.
+func keyShopResolvedModelUnchanged(modelName, bodyModel, resolved string) bool {
+	resolved = strings.TrimSpace(resolved)
+	requested := strings.TrimSpace(modelName)
+	if requested == "" {
+		requested = strings.TrimSpace(bodyModel)
+	}
+	return resolved == "" || resolved == requested
+}
+
+func applyKeyShopRewrite(modelName string, rawJSON []byte, rewritten string) (string, []byte) {
+	requested := strings.TrimSpace(modelName)
+	bodyModel := ""
+	if gjson.GetBytes(rawJSON, "model").Exists() {
+		bodyModel = strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+	}
+	if requested == "" {
+		requested = bodyModel
+	}
 	if rewritten == "" || rewritten == requested && (bodyModel == "" || strings.EqualFold(bodyModel, rewritten)) {
-		return modelName, rawJSON, nil
+		return modelName, rawJSON
 	}
 	updated := rawJSON
 	if gjson.GetBytes(rawJSON, "model").Exists() {
@@ -85,9 +226,9 @@ func (h *BaseAPIHandler) applyKeyShopModelGate(ctx context.Context, modelName st
 		}
 	}
 	if requested == "" {
-		return modelName, updated, nil
+		return modelName, updated
 	}
-	return rewritten, updated, nil
+	return rewritten, updated
 }
 
 func (h *BaseAPIHandler) noteKeyShopRejection(ctx context.Context, secret, code string, status int) {

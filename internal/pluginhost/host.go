@@ -270,6 +270,52 @@ func (h *Host) runKeyShopAudit() {
 	}
 }
 
+// KeyShopResolveModel asks the loaded key-shop plugin to resolve a ck_ model
+// through the key's group. Loaded is false when the plugin is not loaded.
+// A call or decode error fails closed at the handler.
+func (h *Host) KeyShopResolveModel(ctx context.Context, secret, model, bodyModel string) (handlers.KeyShopResolveResult, error) {
+	client := h.keyShopClient()
+	if client == nil {
+		return handlers.KeyShopResolveResult{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	body, err := json.Marshal(map[string]string{
+		"Secret":    secret,
+		"Model":     model,
+		"BodyModel": bodyModel,
+	})
+	if err != nil {
+		return handlers.KeyShopResolveResult{}, err
+	}
+	raw, err := client.Call(ctx, "keyshop.resolve_model", body)
+	if err != nil {
+		return handlers.KeyShopResolveResult{}, err
+	}
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Mode    string `json:"Mode"`
+			Allowed bool   `json:"Allowed"`
+			Model   string `json:"Model"`
+		} `json:"result"`
+	}
+	if err = json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return handlers.KeyShopResolveResult{}, fmt.Errorf("key-shop resolve_model failed")
+	}
+	mode := strings.TrimSpace(env.Result.Mode)
+	if mode == "" {
+		mode = "legacy"
+	}
+	return handlers.KeyShopResolveResult{
+		Loaded:  true,
+		Mode:    mode,
+		Allowed: env.Result.Allowed,
+		Model:   env.Result.Model,
+	}, nil
+}
+
 func (h *Host) keyShopClient() pluginClient {
 	if h == nil {
 		return nil
