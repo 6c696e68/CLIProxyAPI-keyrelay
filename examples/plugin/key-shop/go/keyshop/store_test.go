@@ -317,6 +317,123 @@ func TestSweepDropsOldReservationWithoutBilling(t *testing.T) {
 	}
 }
 
+func TestSweepKeepsPendingUsageNoteUntilFinalize(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: 3600, UnlimitedTokens: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "live", Path: "/v1/chat/completions", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	note := UsageNote{
+		RequestID: "live", Input: 48, Output: 20, Reasoning: 4, Cached: 8,
+		TTFT: 570 * time.Millisecond, Latency: 775 * time.Millisecond,
+		Provider: "openai-compatible-fake", AuthID: "openai-compatibility:fake-vippro:c64418315987",
+		AuthIndex: "0", AuthType: "apikey", Effort: "high", ServiceTier: "priority",
+	}
+	if err := store.NoteUsage(note); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "done", Path: "/v1/chat/completions", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteUsage(UsageNote{RequestID: "done", Input: 1, Output: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finalize(FinalizeInput{RequestID: "done", Outcome: "succeeded", RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens) VALUES ('done', 9, 9)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens) VALUES ('orphan', 3, 3)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	var pendingNotes, terminalNotes, orphanNotes int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM usage_notes WHERE request_id='live'`).Scan(&pendingNotes); err != nil || pendingNotes != 1 {
+		t.Fatalf("pending notes=%d err=%v", pendingNotes, err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM usage_notes WHERE request_id='done'`).Scan(&terminalNotes); err != nil || terminalNotes != 0 {
+		t.Fatalf("terminal notes=%d err=%v", terminalNotes, err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM usage_notes WHERE request_id='orphan'`).Scan(&orphanNotes); err != nil || orphanNotes != 0 {
+		t.Fatalf("orphan notes=%d err=%v", orphanNotes, err)
+	}
+	if err := store.Finalize(FinalizeInput{RequestID: "live", Outcome: "succeeded", RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	session, err := store.Session(secret, 10)
+	if err != nil || session.Key.TokensUsed != 70 {
+		t.Fatalf("used=%d err=%v", session.Key.TokensUsed, err)
+	}
+	rows, _, _, err := store.AdminRequests(AdminRequestQuery{KeyID: key.ID, Limit: 25})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live AdminRequest
+	for _, row := range rows {
+		if row.RequestID == "live" {
+			live = row
+		}
+	}
+	if live.Status != "succeeded" || live.Input != 48 || live.Output != 20 || live.TTFTMs != 570 || live.LatencyMs != 775 || live.AuthID != note.AuthID || live.Effort != "high" {
+		t.Fatalf("live row=%+v", live)
+	}
+	var doneInput, doneOutput int64
+	if err := store.db.QueryRow(`SELECT input_tokens, output_tokens FROM requests WHERE request_id='done'`).Scan(&doneInput, &doneOutput); err != nil || doneInput != 1 || doneOutput != 1 {
+		t.Fatalf("terminal row tokens=%d/%d err=%v", doneInput, doneOutput, err)
+	}
+}
+
+func TestSweepCancelCopiesUsageNoteBeforeDelete(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: 3600, TokenLimit: 100, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "expire", Path: "/v1/chat/completions", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	note := UsageNote{
+		RequestID: "expire", Input: 48, Output: 20, Reasoning: 4, Cached: 8,
+		TTFT: 260 * time.Millisecond, Latency: 900 * time.Millisecond,
+		Provider: "openai-compatible-fake", AuthID: "openai-compatibility:fake-vippro:c64418315987",
+		AuthIndex: "1", AuthType: "apikey", Effort: "max", ServiceTier: "priority",
+	}
+	if err := store.NoteUsage(note); err != nil {
+		t.Fatal(err)
+	}
+	store.cfg.Now = func() time.Time { return now.Add(16 * time.Minute) }
+	if err := store.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	var notes, reservations int
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM usage_notes WHERE request_id='expire'`).Scan(&notes); err != nil || notes != 0 {
+		t.Fatalf("notes=%d err=%v", notes, err)
+	}
+	if err := store.db.QueryRow(`SELECT COUNT(1) FROM reservations WHERE request_id='expire'`).Scan(&reservations); err != nil || reservations != 0 {
+		t.Fatalf("reservations=%d err=%v", reservations, err)
+	}
+	session, err := store.Session(secret, 10)
+	if err != nil || session.Key.TokensUsed != 0 {
+		t.Fatalf("canceled row billed tokens_used=%d err=%v", session.Key.TokensUsed, err)
+	}
+	rows, _, _, err := store.AdminRequests(AdminRequestQuery{KeyID: key.ID, Limit: 25})
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	row := rows[0]
+	if row.Status != "canceled" || row.Billed != 0 || row.Input != 48 || row.Output != 20 || row.Reasoning != 4 || row.Cached != 8 || row.TTFTMs != 260 || row.LatencyMs != 900 || row.AuthID != note.AuthID || row.Provider != note.Provider || row.Effort != "max" || row.ServiceTier != "priority" {
+		t.Fatalf("canceled row=%+v", row)
+	}
+}
+
 func TestUnlimitedLimitIsNeverExhausted(t *testing.T) {
 	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
 	store := testStore(t, now)

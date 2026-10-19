@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 		return ok(map[string]any{
 			"schema_version": 6,
 			"metadata": map[string]any{
-				"Name": "key-shop", "Version": "0.2.0", "Author": "cliproxyapi",
+				"Name": "key-shop", "Version": "0.3.0", "Author": "cliproxyapi",
 				"GitHubRepository": "https://github.com/router-for-me/CLIProxyAPI",
 				"ConfigFields": []map[string]any{
 					{"Name": "data_file", "Type": "string", "Description": "SQLite path. Empty uses ~/.cliproxyapi/key-shop/key-shop.db"},
@@ -59,6 +60,12 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 	case "keyshop.note_rejection":
 		s.noteRejection(payload)
 		return ok(map[string]any{})
+	case "keyshop.resolve_model":
+		result, err := s.resolveModel(payload)
+		if err != nil {
+			return nil, err
+		}
+		return ok(result)
 	case "request.intercept_after":
 		return ok(map[string]any{})
 	case "usage.handle":
@@ -141,15 +148,23 @@ func (s *Service) intercept(payload []byte) map[string]any {
 	if requestedModel == "" {
 		requestedModel = bodyModel(req.Body)
 	}
-	if key, err := s.store.Lookup(secret); err == nil && key.RequestLimitReached {
+	path, _ := req.Metadata["request_path"].(string)
+	key, keyErr := s.store.Lookup(secret)
+	if keyErr == nil && key.RequestLimitReached {
 		_ = s.store.RecordRejection(req.RequestID, key.ID, "request_limit_exceeded", http.StatusTooManyRequests)
 		return terminate(http.StatusTooManyRequests, "request_limit_exceeded", denialMessage("request_limit_exceeded"), "insufficient_quota")
 	}
-	if !modelAllowed(s.store.cfg.ModelAccessMode, s.store.cfg.Models, requestedModel) {
+	// A limited group is authoritative. The host already rewrote its alias, so
+	// matching the original client model against the global list would deny it.
+	// The all-models group still follows the global policy.
+	if !limitedGroup(s, key, keyErr) && !modelAllowed(s.store.cfg.ModelAccessMode, s.store.cfg.Models, requestedModel) {
 		_ = s.store.RejectSecret(secret, req.RequestID, "model_not_allowed", http.StatusForbidden)
 		return terminate(http.StatusForbidden, "model_not_allowed", "model is not allowed for this key", "invalid_request_error")
 	}
-	path, _ := req.Metadata["request_path"].(string)
+	if keyErr == nil && !s.groupAllowsAny(key.GroupID, requestedModel, req.Model, bodyModel(req.Body)) {
+		_ = s.store.RecordRejection(req.RequestID, key.ID, "model_not_allowed", http.StatusForbidden, strings.TrimSpace(req.Model), requestedModel)
+		return terminate(http.StatusForbidden, "model_not_allowed", "model is not allowed for this key", "invalid_request_error")
+	}
 	generate := true
 	if raw, ok := req.Metadata["generate"].(bool); ok {
 		generate = raw
@@ -202,6 +217,132 @@ func modelAllowed(mode string, models []ModelAccessModel, requested string) bool
 	return true
 }
 
+func limitedGroup(s *Service, key Key, keyErr error) bool {
+	if keyErr != nil || strings.TrimSpace(key.GroupID) == "" {
+		return false
+	}
+	group, err := s.store.Group(key.GroupID)
+	if err != nil {
+		return true
+	}
+	return !group.AllModels
+}
+
+// groupAllowsAny admits the request when the key's group allows any model name
+// the host reports for it. The host gate may already have rewritten a client
+// alias to the upstream name, so more than one candidate can be valid.
+func (s *Service) groupAllowsAny(groupID string, candidates ...string) bool {
+	if strings.TrimSpace(groupID) == "" {
+		return true
+	}
+	group, err := s.store.Group(groupID)
+	if err != nil {
+		return false
+	}
+	for _, candidate := range candidates {
+		if group.Allows(candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+type resolveModelResult struct {
+	Mode    string `json:"Mode"`
+	Allowed bool   `json:"Allowed"`
+	Model   string `json:"Model"`
+}
+
+// resolveModel maps a ck_ key's requested model through its group.
+// A key with no group, or an unknown key, stays on the legacy global policy.
+// An unknown group fails closed. all-models keeps the requested model.
+func (s *Service) resolveModel(payload []byte) (resolveModelResult, error) {
+	var req struct {
+		Secret    string
+		Model     string
+		BodyModel string
+	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return resolveModelResult{}, err
+	}
+	secret := strings.TrimSpace(req.Secret)
+	if !strings.HasPrefix(secret, "ck_") {
+		return resolveModelResult{Mode: "legacy"}, nil
+	}
+	key, err := s.store.Lookup(secret)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return resolveModelResult{Mode: "legacy"}, nil
+		}
+		return resolveModelResult{}, err
+	}
+	if strings.TrimSpace(key.GroupID) == "" {
+		return resolveModelResult{Mode: "legacy"}, nil
+	}
+	group, err := s.store.Group(key.GroupID)
+	if err != nil {
+		if errors.Is(err, ErrGroupNotFound) {
+			return resolveModelResult{Mode: "group", Allowed: false}, nil
+		}
+		return resolveModelResult{}, err
+	}
+	requested := strings.TrimSpace(req.Model)
+	if requested == "" {
+		requested = strings.TrimSpace(req.BodyModel)
+	}
+	if group.AllModels {
+		return resolveModelResult{Mode: "group", Allowed: true, Model: requested}, nil
+	}
+	rewritten, okMatch := resolveGroupModel(group, requested)
+	if !okMatch {
+		return resolveModelResult{Mode: "group", Allowed: false}, nil
+	}
+	body := strings.TrimSpace(req.BodyModel)
+	if body != "" && !strings.EqualFold(body, requested) {
+		bodyRewritten, bodyOK := resolveGroupModel(group, body)
+		if !bodyOK || bodyRewritten != rewritten {
+			return resolveModelResult{Mode: "group", Allowed: false}, nil
+		}
+	}
+	return resolveModelResult{Mode: "group", Allowed: true, Model: rewritten}, nil
+}
+
+// resolveGroupModel matches the client-visible name. A bare upstream name is
+// accepted only when that entry has no alias. The client's thinking suffix is kept.
+func resolveGroupModel(group Group, requested string) (string, bool) {
+	base, rawSuffix, hasSuffix := parseClientSuffix(requested)
+	if base == "" {
+		return "", false
+	}
+	for _, model := range group.Models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		visible := name
+		if alias := strings.TrimSpace(model.Alias); alias != "" {
+			visible = alias
+		}
+		if !strings.EqualFold(base, visible) && !strings.EqualFold(strings.TrimSpace(requested), visible) {
+			continue
+		}
+		if !hasSuffix {
+			return name, true
+		}
+		return name + "(" + rawSuffix + ")", true
+	}
+	return "", false
+}
+
+func parseClientSuffix(model string) (base, rawSuffix string, hasSuffix bool) {
+	model = strings.TrimSpace(model)
+	lastOpen := strings.LastIndex(model, "(")
+	if lastOpen == -1 || !strings.HasSuffix(model, ")") {
+		return model, "", false
+	}
+	return strings.TrimSpace(model[:lastOpen]), model[lastOpen+1 : len(model)-1], true
+}
+
 func modelNamesEqual(left, right string) bool {
 	left = strings.TrimSpace(left)
 	right = strings.TrimSpace(right)
@@ -238,9 +379,11 @@ func bodyModel(body []byte) string {
 
 func (s *Service) noteUsage(payload []byte) {
 	var rec struct {
-		RequestID string
-		Failed    bool
-		Detail    struct {
+		RequestID, Provider, AuthID, AuthIndex, AuthType  string
+		ReasoningEffort, ServiceTier, ResponseServiceTier string
+		Failed                                            bool
+		TTFT, Latency                                     time.Duration
+		Detail                                            struct {
 			InputTokens, OutputTokens, ReasoningTokens, CachedTokens int64
 		}
 	}
@@ -248,26 +391,52 @@ func (s *Service) noteUsage(payload []byte) {
 	if rec.RequestID == "" {
 		return
 	}
-	_ = s.store.NoteUsage(UsageNote{RequestID: rec.RequestID, Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Reasoning: rec.Detail.ReasoningTokens, Cached: rec.Detail.CachedTokens, Failed: rec.Failed})
+	tier := rec.ResponseServiceTier
+	if tier == "" {
+		tier = rec.ServiceTier
+	}
+	_ = s.store.NoteUsage(UsageNote{
+		RequestID: rec.RequestID, Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Reasoning: rec.Detail.ReasoningTokens, Cached: rec.Detail.CachedTokens, Failed: rec.Failed,
+		TTFT: rec.TTFT, Latency: rec.Latency, Provider: rec.Provider, AuthID: rec.AuthID, AuthIndex: rec.AuthIndex, AuthType: rec.AuthType, Effort: rec.ReasoningEffort, ServiceTier: tier,
+	})
 }
 
 func (s *Service) complete(payload []byte) {
 	var rec struct {
-		RequestID, Model, SourceFormat, Outcome string
-		StatusCode                              int
-		Stream                                  bool
-		StartedAt                               time.Time
-		Latency                                 time.Duration
+		RequestID, Model, RequestedModel, SourceFormat, Outcome string
+		StatusCode                                              int
+		Stream                                                  bool
+		StartedAt                                               time.Time
+		Latency                                                 time.Duration
+		Metadata                                                map[string]any
 	}
 	_ = json.Unmarshal(payload, &rec)
-	transport := "http"
-	if rec.Stream {
-		transport = "websocket"
-	}
 	_ = s.store.Finalize(FinalizeInput{
-		RequestID: rec.RequestID, Model: rec.Model, Transport: transport, Protocol: rec.SourceFormat,
+		RequestID: rec.RequestID, Model: rec.Model, RequestedModel: rec.RequestedModel, Transport: completionTransport(rec.Stream, rec.Metadata), Protocol: rec.SourceFormat,
 		Outcome: rec.Outcome, HTTPStatus: rec.StatusCode, RequestedAt: rec.StartedAt, Latency: rec.Latency,
 	})
+}
+
+// completionTransport records the client transport. RequestCompletion.Stream is
+// true for HTTP SSE and for Responses websocket turns. Metadata.request_path is
+// /v1/responses for both the HTTP responses API and the websocket upgrade.
+// The payload has no websocket-only field, so Stream stays "http" and a
+// websocket turn stays unlabeled.
+func completionTransport(stream bool, metadata map[string]any) string {
+	if metadata != nil {
+		switch value := metadata["websocket"].(type) {
+		case bool:
+			if value {
+				return "websocket"
+			}
+		case string:
+			if strings.EqualFold(strings.TrimSpace(value), "websocket") {
+				return "websocket"
+			}
+		}
+	}
+	_ = stream
+	return "http"
 }
 
 func (s *Service) routes() map[string]any {
@@ -282,6 +451,13 @@ func (s *Service) routes() map[string]any {
 			{"Method": "POST", "Path": "/plugins/key-shop/keys/delete"},
 			{"Method": "GET", "Path": "/plugins/key-shop/requests"},
 			{"Method": "GET", "Path": "/plugins/key-shop/stats"},
+			{"Method": "GET", "Path": "/plugins/key-shop/stats/usage"},
+			{"Method": "POST", "Path": "/plugins/key-shop/keys/bulk-update"},
+			{"Method": "POST", "Path": "/plugins/key-shop/keys/bulk-delete"},
+			{"Method": "GET", "Path": "/plugins/key-shop/groups"},
+			{"Method": "POST", "Path": "/plugins/key-shop/groups"},
+			{"Method": "POST", "Path": "/plugins/key-shop/groups/update"},
+			{"Method": "POST", "Path": "/plugins/key-shop/groups/delete"},
 		},
 		"resources": []map[string]string{
 			{"Path": "/admin", "Menu": "API Keys", "Description": "Create and manage client API keys"},
@@ -314,7 +490,19 @@ func (s *Service) manage(payload []byte) map[string]any {
 	case strings.HasSuffix(path, "/keys/bulk") && req.Method == http.MethodPost:
 		return s.createBulk(body)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodGet:
-		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
+		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryOne(req.Query, "group"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
+	case strings.HasSuffix(path, "/keys/bulk-update"):
+		return s.bulkUpdate(body)
+	case strings.HasSuffix(path, "/keys/bulk-delete"):
+		return s.bulkDelete(body)
+	case strings.HasSuffix(path, "/groups") && req.Method == http.MethodGet:
+		return s.listGroups()
+	case strings.HasSuffix(path, "/groups") && req.Method == http.MethodPost:
+		return s.createGroup(body)
+	case strings.HasSuffix(path, "/groups/update"):
+		return s.updateGroup(body)
+	case strings.HasSuffix(path, "/groups/delete"):
+		return s.deleteGroup(body)
 	case strings.HasSuffix(path, "/keys/update"):
 		return s.update(body)
 	case strings.HasSuffix(path, "/keys/rotate"):
@@ -325,6 +513,8 @@ func (s *Service) manage(payload []byte) map[string]any {
 		return s.delete(body)
 	case strings.HasSuffix(path, "/requests"):
 		return s.requests(req.Query)
+	case strings.HasSuffix(path, "/stats/usage"):
+		return s.usageStats(req.Query)
 	case strings.HasSuffix(path, "/stats"):
 		return s.stats()
 	default:
@@ -335,15 +525,19 @@ func (s *Service) manage(payload []byte) map[string]any {
 func (s *Service) create(body []byte) map[string]any {
 	var in struct {
 		Label, Customer, Note string
-		TTLSeconds            int64 `json:"ttl_seconds"`
-		NeverExpires          bool  `json:"never_expires"`
-		TokenLimit            int64 `json:"token_limit"`
-		UnlimitedTokens       bool  `json:"unlimited_tokens"`
-		RequestLimit          int64 `json:"request_limit"`
-		UnlimitedRequests     bool  `json:"unlimited_requests"`
+		TTLSeconds            int64  `json:"ttl_seconds"`
+		NeverExpires          bool   `json:"never_expires"`
+		TokenLimit            int64  `json:"token_limit"`
+		UnlimitedTokens       bool   `json:"unlimited_tokens"`
+		RequestLimit          int64  `json:"request_limit"`
+		UnlimitedRequests     bool   `json:"unlimited_requests"`
+		GroupID               string `json:"group_id"`
 	}
 	if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &in) != nil {
 		return textResponse(http.StatusBadRequest, "bad json")
+	}
+	if strings.TrimSpace(in.GroupID) == "" {
+		return jsonError(http.StatusBadRequest, "group_id is required")
 	}
 	limitSet := bytes.Contains(body, []byte(`"token_limit"`))
 	key, secret, err := s.store.Create(CreateInput{
@@ -351,8 +545,12 @@ func (s *Service) create(body []byte) map[string]any {
 		TTLSeconds: in.TTLSeconds, NeverExpires: in.NeverExpires,
 		TokenLimit: in.TokenLimit, TokenLimitSet: limitSet, UnlimitedTokens: in.UnlimitedTokens,
 		RequestLimit: in.RequestLimit, RequestLimitSet: bytes.Contains(body, []byte(`"request_limit"`)), UnlimitedRequests: in.UnlimitedRequests,
+		GroupID: in.GroupID,
 	})
 	if err != nil {
+		if resp, handled := groupFailure(err); handled {
+			return resp
+		}
 		if strings.Contains(err.Error(), "invalid request limit") {
 			return textResponse(http.StatusBadRequest, "invalid request limit")
 		}
@@ -364,16 +562,20 @@ func (s *Service) create(body []byte) map[string]any {
 func (s *Service) createBulk(body []byte) map[string]any {
 	var in struct {
 		Label, Customer, Note, LabelTemplate string
-		Count                                int   `json:"count"`
-		TTLSeconds                           int64 `json:"ttl_seconds"`
-		NeverExpires                         bool  `json:"never_expires"`
-		TokenLimit                           int64 `json:"token_limit"`
-		UnlimitedTokens                      bool  `json:"unlimited_tokens"`
-		RequestLimit                         int64 `json:"request_limit"`
-		UnlimitedRequests                    bool  `json:"unlimited_requests"`
+		Count                                int    `json:"count"`
+		TTLSeconds                           int64  `json:"ttl_seconds"`
+		NeverExpires                         bool   `json:"never_expires"`
+		TokenLimit                           int64  `json:"token_limit"`
+		UnlimitedTokens                      bool   `json:"unlimited_tokens"`
+		RequestLimit                         int64  `json:"request_limit"`
+		UnlimitedRequests                    bool   `json:"unlimited_requests"`
+		GroupID                              string `json:"group_id"`
 	}
 	if json.Unmarshal(body, &in) != nil || in.Count < 1 || in.Count > 500 {
 		return textResponse(http.StatusBadRequest, "count must be between 1 and 500")
+	}
+	if strings.TrimSpace(in.GroupID) == "" {
+		return jsonError(http.StatusBadRequest, "group_id is required")
 	}
 	label := in.Label
 	if label == "" {
@@ -384,15 +586,19 @@ func (s *Service) createBulk(body []byte) map[string]any {
 		NeverExpires: in.NeverExpires, TokenLimit: in.TokenLimit,
 		TokenLimitSet: bytes.Contains(body, []byte(`"token_limit"`)), UnlimitedTokens: in.UnlimitedTokens,
 		RequestLimit: in.RequestLimit, RequestLimitSet: bytes.Contains(body, []byte(`"request_limit"`)), UnlimitedRequests: in.UnlimitedRequests,
+		GroupID: in.GroupID,
 	}, in.Count)
 	if err != nil {
+		if resp, handled := groupFailure(err); handled {
+			return resp
+		}
 		return textResponse(http.StatusBadRequest, err.Error())
 	}
 	return jsonResponse(http.StatusOK, map[string]any{"keys": created})
 }
 
-func (s *Service) list(q, status string, page, pageSize int) map[string]any {
-	keys, total, err := s.store.ListPageFiltered(q, status, page, pageSize)
+func (s *Service) list(q, status, group string, page, pageSize int) map[string]any {
+	keys, total, err := s.store.ListPageGroup(q, status, group, page, pageSize)
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "list failed")
 	}
@@ -405,12 +611,13 @@ func (s *Service) list(q, status string, page, pageSize int) map[string]any {
 func (s *Service) update(body []byte) map[string]any {
 	var in struct {
 		ID, Label, Customer, Note, Status string
-		TTLSeconds                        int64 `json:"ttl_seconds"`
-		NeverExpires                      bool  `json:"never_expires"`
-		TokenLimit                        int64 `json:"token_limit"`
-		UnlimitedTokens                   bool  `json:"unlimited_tokens"`
-		RequestLimit                      int64 `json:"request_limit"`
-		UnlimitedRequests                 bool  `json:"unlimited_requests"`
+		TTLSeconds                        int64  `json:"ttl_seconds"`
+		NeverExpires                      bool   `json:"never_expires"`
+		TokenLimit                        int64  `json:"token_limit"`
+		UnlimitedTokens                   bool   `json:"unlimited_tokens"`
+		RequestLimit                      int64  `json:"request_limit"`
+		UnlimitedRequests                 bool   `json:"unlimited_requests"`
+		GroupID                           string `json:"group_id"`
 	}
 	if json.Unmarshal(body, &in) != nil || in.ID == "" {
 		return textResponse(http.StatusBadRequest, "bad json")
@@ -427,8 +634,12 @@ func (s *Service) update(body []byte) map[string]any {
 		UnlimitedTokens: in.UnlimitedTokens,
 		RequestLimit:    in.RequestLimit, RequestLimitSet: bytes.Contains(body, []byte(`"request_limit"`)),
 		UnlimitedRequests: in.UnlimitedRequests,
+		GroupID:           in.GroupID, GroupSet: bytes.Contains(body, []byte(`"group_id"`)),
 	})
 	if err != nil {
+		if resp, handled := groupFailure(err); handled {
+			return resp
+		}
 		return textResponse(http.StatusBadRequest, "update failed")
 	}
 	return jsonResponse(http.StatusOK, map[string]any{"key": key})
@@ -459,15 +670,16 @@ func (s *Service) delete(body []byte) map[string]any {
 }
 
 func (s *Service) requests(q map[string][]string) map[string]any {
-	limit := queryInt(q, "limit", 25)
-	rows, page, err := s.store.RequestsPage(RequestQuery{KeyID: queryOne(q, "id"), Status: queryOne(q, "status"), Model: queryOne(q, "model"), RejectionCode: queryOne(q, "code"), From: parseTimeQuery(queryOne(q, "from")), To: parseTimeQuery(queryOne(q, "to")), Limit: limit, Cursor: queryOne(q, "cursor")})
+	rows, page, summary, err := s.store.AdminRequests(AdminRequestQuery{
+		KeyID: queryOne(q, "id"), Customer: queryOne(q, "customer"), GroupID: queryOne(q, "group"), Status: queryOne(q, "status"),
+		Model: queryOne(q, "model"), Account: queryOne(q, "account"), Effort: queryOne(q, "effort"), Code: queryOne(q, "code"),
+		Search: strings.TrimSpace(queryOne(q, "q")), From: parseTimeQuery(queryOne(q, "from")), To: parseTimeQuery(queryOne(q, "to")),
+		Limit: queryInt(q, "limit", 25), Cursor: queryOne(q, "cursor"),
+	})
 	if err != nil {
-		return textResponse(http.StatusBadRequest, "requests failed")
+		return jsonError(http.StatusBadRequest, "requests failed")
 	}
-	if rows == nil {
-		rows = []Request{}
-	}
-	return jsonResponse(http.StatusOK, map[string]any{"requests": rows, "next_cursor": page.NextCursor, "has_more": page.HasMore, "total": page.Total})
+	return jsonResponse(http.StatusOK, map[string]any{"requests": rows, "next_cursor": page.NextCursor, "has_more": page.HasMore, "total": page.Total, "summary": summary})
 }
 
 func (s *Service) stats() map[string]any {
@@ -497,16 +709,19 @@ func (s *Service) session(headers map[string][]string, query map[string][]string
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "session failed")
 	}
-	mode := "full"
-	var visible []string
-	if strings.EqualFold(strings.TrimSpace(s.store.cfg.ModelAccessMode), "custom") {
-		mode = "custom"
-		visible = clientVisibleModels(s.store.cfg.Models)
+	var group *Group
+	var groupInfo any
+	if session.Key.GroupID != "" {
+		if found, errGroup := s.store.Group(session.Key.GroupID); errGroup == nil {
+			group = &found
+			groupInfo = map[string]any{"id": found.ID, "name": found.Name, "all_models": found.AllModels}
+		}
 	}
+	mode, visible := s.sessionModels(group)
 	return jsonResponse(http.StatusOK, map[string]any{
 		"Key": session.Key, "Requests": session.Requests, "base_url": requestBaseURL(headers),
 		"next_cursor": page.NextCursor, "has_more": page.HasMore, "total": page.Total,
-		"model_access_mode": mode, "models": visible,
+		"model_access_mode": mode, "models": visible, "group": groupInfo,
 	})
 }
 

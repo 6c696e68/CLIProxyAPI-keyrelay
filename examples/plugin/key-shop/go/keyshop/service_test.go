@@ -33,7 +33,7 @@ func call(t *testing.T, svc *Service, method, body string) []byte {
 
 func createSecret(t *testing.T, svc *Service, ttl, limit int64) string {
 	t.Helper()
-	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/v0/management/plugins/key-shop/keys","Body":`+string(mustJSON(t, map[string]any{"ttl_seconds": ttl, "token_limit": limit}))+`}`)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/v0/management/plugins/key-shop/keys","Body":`+string(mustJSON(t, map[string]any{"ttl_seconds": ttl, "token_limit": limit, "group_id": AllModelsGroupID}))+`}`)
 	var env struct {
 		Result struct {
 			Body []byte
@@ -60,7 +60,7 @@ func TestRegisterDeclaresAdmissionCapabilities(t *testing.T) {
 
 func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
 	svc := testService(t)
-	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"count":3,"label":"November","customer":"Acme","token_limit":5000}}`)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"group_id":"all-models","count":3,"label":"November","customer":"Acme","token_limit":5000}}`)
 	var env struct {
 		Result struct {
 			Body []byte
@@ -110,7 +110,7 @@ func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
 
 func TestCreateWithEmptyLabelGeneratesUniqueLabels(t *testing.T) {
 	svc := testService(t)
-	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"count":2}}`)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"group_id":"all-models","count":2}}`)
 	var env struct {
 		Result struct {
 			Body []byte
@@ -306,9 +306,11 @@ func TestPagesShowRequestLimitAccounting(t *testing.T) {
 		"RequestQuotaUsed",
 		"request_limit_exceeded",
 		"keys_request_limited",
-		"/v0/management/plugins/key-shop/keys",
-		"/v0/management/plugins/key-shop/stats",
-		"page_size=25",
+		// The single-file build keeps the management root and joins /keys and /stats at runtime.
+		"/v0/management/plugins/key-shop",
+		"/keys",
+		"/stats",
+		"page_size",
 		"cli-proxy-auth",
 	} {
 		if !bytes.Contains(admin, []byte(snippet)) {
@@ -414,6 +416,36 @@ func TestModelAccessPolicyLogsRejectionWithoutReserving(t *testing.T) {
 	}
 }
 
+func TestCompletionStreamIsHTTPUnlessWebsocketSignal(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 1000)
+	cases := []struct {
+		id, format, path, want string
+		stream                 bool
+		meta                   map[string]any
+	}{
+		{id: "sse", format: "openai", path: "/v1/chat/completions", stream: true, want: "http"},
+		{id: "plain", format: "openai", path: "/v1/chat/completions", stream: false, want: "http"},
+		{id: "responses-path", format: "openai-response", path: "/v1/responses", stream: true, want: "http", meta: map[string]any{"request_path": "/v1/responses"}},
+		{id: "explicit", format: "openai-response", path: "/v1/responses", stream: true, want: "websocket", meta: map[string]any{"websocket": true}},
+	}
+	for _, tc := range cases {
+		call(t, svc, "request.intercept_before", interceptModelBody(secret, tc.id, "m", tc.path, true))
+		body, err := json.Marshal(map[string]any{
+			"RequestID": tc.id, "Model": "m", "RequestedModel": "m", "SourceFormat": tc.format,
+			"Outcome": "succeeded", "StatusCode": 200, "Stream": tc.stream, "Metadata": tc.meta,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		call(t, svc, "request.complete", string(body))
+		var transport string
+		if err = svc.store.db.QueryRow(`SELECT transport FROM requests WHERE request_id=?`, tc.id).Scan(&transport); err != nil || transport != tc.want {
+			t.Fatalf("%s transport=%q want %q err=%v", tc.id, transport, tc.want, err)
+		}
+	}
+}
+
 func TestHostGateRejectionIsRecordedWithoutQuota(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 10)
@@ -434,7 +466,7 @@ func TestHostGateRejectionIsRecordedWithoutQuota(t *testing.T) {
 func TestRequestLimitReturns429AndRemainsReachable(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 100)
-	created := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"ttl_seconds":3600,"token_limit":100,"request_limit":1}}`)
+	created := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"group_id":"all-models","ttl_seconds":3600,"token_limit":100,"request_limit":1}}`)
 	var env struct {
 		Result struct{ Body []byte }
 	}
@@ -483,7 +515,7 @@ func TestRequestLimitReturns429AndRemainsReachable(t *testing.T) {
 
 func TestCreateWithoutNameKeepsNameOnLaterUpdate(t *testing.T) {
 	svc := testService(t)
-	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"","ttl_seconds":3600,"token_limit":10}}`)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"group_id":"all-models","label":"","ttl_seconds":3600,"token_limit":10}}`)
 	var created struct {
 		Result struct {
 			Body []byte
@@ -501,7 +533,7 @@ func TestCreateWithoutNameKeepsNameOnLaterUpdate(t *testing.T) {
 	if err := json.Unmarshal(created.Result.Body, &payload); err != nil || payload.Secret == "" || payload.Key.ID == "" {
 		t.Fatal("empty name create failed")
 	}
-	named := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"shop","ttl_seconds":3600,"token_limit":10}}`)
+	named := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"group_id":"all-models","label":"shop","ttl_seconds":3600,"token_limit":10}}`)
 	if err := json.Unmarshal(named, &created); err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +556,7 @@ func TestCreateWithoutNameKeepsNameOnLaterUpdate(t *testing.T) {
 
 func TestManagementCreateAndPublicSession(t *testing.T) {
 	svc := testService(t)
-	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"label":"buyer","token_limit":50}}`)
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys","Body":{"group_id":"all-models","label":"buyer","token_limit":50}}`)
 	if strings.Contains(string(raw), "secret_hash") {
 		t.Fatal("create leaked hash")
 	}

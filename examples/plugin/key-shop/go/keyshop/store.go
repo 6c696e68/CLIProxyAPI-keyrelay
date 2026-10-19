@@ -64,6 +64,7 @@ type Key struct {
 	TokenLimitReached     bool
 	RequestQuotaRemaining int64
 	LastUsedAt            *time.Time
+	GroupID               string
 }
 
 type CreateInput struct {
@@ -76,10 +77,13 @@ type CreateInput struct {
 	RequestLimit          int64
 	RequestLimitSet       bool
 	UnlimitedRequests     bool
+	GroupID               string
 }
 
 type UpdateInput struct {
 	ID, Label, Customer, Note, Status string
+	GroupID                           string
+	GroupSet                          bool
 	LabelSet, CustomerSet, NoteSet    bool
 	StatusSet                         bool
 	TTLSeconds                        int64
@@ -106,17 +110,20 @@ type Admission struct {
 }
 
 type FinalizeInput struct {
-	RequestID, Model, Transport, Protocol, Outcome string
-	HTTPStatus                                     int
-	Input, Output, Reasoning, Cached               int64
-	Latency, TTFT                                  time.Duration
-	RequestedAt                                    time.Time
+	RequestID, Model, RequestedModel, Transport, Protocol, Outcome string
+	HTTPStatus                                                     int
+	Input, Output, Reasoning, Cached                               int64
+	Latency, TTFT                                                  time.Duration
+	RequestedAt                                                    time.Time
 }
 
 type UsageNote struct {
 	RequestID                        string
 	Input, Output, Reasoning, Cached int64
 	Failed                           bool
+	TTFT, Latency                    time.Duration
+	Provider, AuthID, AuthIndex      string
+	AuthType, Effort, ServiceTier    string
 }
 
 type Request struct {
@@ -290,6 +297,17 @@ CREATE TABLE IF NOT EXISTS usage_notes (
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cached_tokens INTEGER NOT NULL DEFAULT 0,
   failed INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS model_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  all_models INTEGER NOT NULL DEFAULT 0,
+  models_json TEXT NOT NULL DEFAULT '[]',
+  aliases_json TEXT NOT NULL DEFAULT '{}',
+  is_system INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );`)
 	if err != nil {
 		return err
@@ -306,7 +324,12 @@ CREATE INDEX IF NOT EXISTS idx_reservations_created ON reservations(created_at);
 CREATE INDEX IF NOT EXISTS idx_requests_key_time ON requests(key_id, requested_at DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_time ON requests(requested_at DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_status_time ON requests(status, requested_at DESC, request_id DESC);
-CREATE INDEX IF NOT EXISTS idx_requests_rejection ON requests(key_id, rejection_code, requested_at DESC);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_requests_rejection ON requests(key_id, rejection_code, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_requests_model_time ON requests(model, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_keys_group ON keys(group_id);`); err != nil {
+		return err
+	}
+	if err = s.seedSystemGroup(); err != nil {
 		return err
 	}
 	return s.backfillRequestAccounting()
@@ -320,11 +343,36 @@ func (s *Store) ensureColumns() error {
 		"request_failure_count":  "INTEGER NOT NULL DEFAULT 0",
 		"request_canceled_count": "INTEGER NOT NULL DEFAULT 0",
 		"request_rejected_count": "INTEGER NOT NULL DEFAULT 0",
+		"group_id":               "TEXT NOT NULL DEFAULT ''",
+	}); err != nil {
+		return err
+	}
+	if err := addColumns(s.db, "usage_notes", map[string]string{
+		"ttft_ms":      "INTEGER NOT NULL DEFAULT 0",
+		"latency_ms":   "INTEGER NOT NULL DEFAULT 0",
+		"provider":     "TEXT NOT NULL DEFAULT ''",
+		"auth_id":      "TEXT NOT NULL DEFAULT ''",
+		"auth_index":   "TEXT NOT NULL DEFAULT ''",
+		"auth_type":    "TEXT NOT NULL DEFAULT ''",
+		"effort":       "TEXT NOT NULL DEFAULT ''",
+		"service_tier": "TEXT NOT NULL DEFAULT ''",
+	}); err != nil {
+		return err
+	}
+	if err := addColumns(s.db, "model_groups", map[string]string{
+		"aliases_json": "TEXT NOT NULL DEFAULT '{}'",
 	}); err != nil {
 		return err
 	}
 	return addColumns(s.db, "requests", map[string]string{
-		"rejection_code": "TEXT NOT NULL DEFAULT ''",
+		"rejection_code":  "TEXT NOT NULL DEFAULT ''",
+		"requested_model": "TEXT NOT NULL DEFAULT ''",
+		"provider":        "TEXT NOT NULL DEFAULT ''",
+		"auth_id":         "TEXT NOT NULL DEFAULT ''",
+		"auth_index":      "TEXT NOT NULL DEFAULT ''",
+		"auth_type":       "TEXT NOT NULL DEFAULT ''",
+		"effort":          "TEXT NOT NULL DEFAULT ''",
+		"service_tier":    "TEXT NOT NULL DEFAULT ''",
 	})
 }
 
@@ -426,8 +474,11 @@ func (s *Store) insertKey(in CreateInput, hash []byte, prefix, last4 string) (Ke
 	if err != nil {
 		return Key{}, err
 	}
-	_, err = s.db.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit, request_limit) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, hash, prefix, last4, label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit, requestLimit)
+	if err = s.requireGroupOn(s.db, in.GroupID); err != nil {
+		return Key{}, err
+	}
+	_, err = s.db.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit, request_limit, group_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, hash, prefix, last4, label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit, requestLimit, in.GroupID)
 	if err != nil {
 		return Key{}, err
 	}
@@ -492,6 +543,11 @@ func (s *Store) ListPage(query string, page, pageSize int) ([]Key, int, error) {
 }
 
 func (s *Store) ListPageFiltered(query, status string, page, pageSize int) ([]Key, int, error) {
+	return s.ListPageGroup(query, status, "", page, pageSize)
+}
+
+// ListPageGroup is ListPageFiltered limited to one model group. "none" selects legacy keys without a group.
+func (s *Store) ListPageGroup(query, status, group string, page, pageSize int) ([]Key, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if page < 1 {
@@ -502,6 +558,14 @@ func (s *Store) ListPageFiltered(query, status string, page, pageSize int) ([]Ke
 	}
 	var total int
 	where, args := keyListWhere(query, status, s.cfg.Now().UTC())
+	switch group {
+	case "":
+	case "none":
+		where += ` AND keys.group_id=''`
+	default:
+		where += ` AND keys.group_id=?`
+		args = append(args, group)
+	}
 	from, reserved := listSource(status)
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM `+from+` WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -545,7 +609,7 @@ func keyListWhere(query, status string, now time.Time) (string, []any) {
 	return where, args
 }
 
-const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at, keys.request_limit, keys.request_quota_used, keys.request_success_count, keys.request_failure_count, keys.request_canceled_count, keys.request_rejected_count`
+const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at, keys.request_limit, keys.request_quota_used, keys.request_success_count, keys.request_failure_count, keys.request_canceled_count, keys.request_rejected_count, keys.group_id`
 
 const requestColumns = `request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at, rejection_code`
 
@@ -610,8 +674,18 @@ func (s *Store) Update(in UpdateInput) (Key, error) {
 		}
 		requestLimit = in.RequestLimit
 	}
-	_, err = s.db.Exec(`UPDATE keys SET label=?, customer=?, note=?, status=?, expires_at=?, token_limit=?, request_limit=? WHERE id=? AND deleted_at IS NULL`,
-		label, customer, note, status, formatTime(expires), limit, requestLimit, in.ID)
+	groupID := key.GroupID
+	if in.GroupSet {
+		if strings.TrimSpace(in.GroupID) == "" {
+			return Key{}, ErrGroupRequired
+		}
+		if err = s.requireGroupOn(s.db, in.GroupID); err != nil {
+			return Key{}, err
+		}
+		groupID = in.GroupID
+	}
+	_, err = s.db.Exec(`UPDATE keys SET label=?, customer=?, note=?, status=?, expires_at=?, token_limit=?, request_limit=?, group_id=? WHERE id=? AND deleted_at IS NULL`,
+		label, customer, note, status, formatTime(expires), limit, requestLimit, groupID, in.ID)
 	if err != nil {
 		return Key{}, err
 	}
@@ -780,7 +854,7 @@ func (s *Store) existingAdmission(tx *sql.Tx, requestID, keyID string) (Admissio
 	return Admission{Allowed: true, KeyID: keyID, Reserved: held}, true, nil
 }
 
-func (s *Store) RecordRejection(requestID, keyID, code string, httpStatus int) error {
+func (s *Store) RecordRejection(requestID, keyID, code string, httpStatus int, models ...string) error {
 	if strings.TrimSpace(requestID) == "" || strings.TrimSpace(keyID) == "" {
 		return nil
 	}
@@ -800,12 +874,24 @@ func (s *Store) RecordRejection(requestID, keyID, code string, httpStatus int) e
 		return err
 	}
 	now := s.cfg.Now().UTC().Format(time.RFC3339Nano)
+	model, requested := "", ""
+	if len(models) > 0 {
+		model = strings.TrimSpace(models[0])
+	}
+	if len(models) > 1 {
+		requested = strings.TrimSpace(models[1])
+	}
 	if _, err = tx.Exec(`UPDATE keys SET request_count=request_count+1, request_quota_used=request_quota_used+1, request_rejected_count=request_rejected_count+1, last_used_at=? WHERE id=? AND deleted_at IS NULL`, now, keyID); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO requests (`+requestColumns+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		requestID, keyID, "", "http", "", "rejected", httpStatus, 0, 0, 0, 0, 0, 0, 0, now, now, code); err != nil {
+		requestID, keyID, model, "http", "", "rejected", httpStatus, 0, 0, 0, 0, 0, 0, 0, now, now, code); err != nil {
 		return err
+	}
+	if requested != "" {
+		if _, err = tx.Exec(`UPDATE requests SET requested_model=? WHERE request_id=?`, requested, requestID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -833,15 +919,66 @@ func (s *Store) NoteUsage(note UsageNote) error {
 		return err
 	}
 	if err == nil && status != "pending" {
-		return nil
+		return s.applyLateUsage(note)
 	}
 	failed := 0
 	if note.Failed {
 		failed = 1
 	}
-	_, err = s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed) VALUES (?,?,?,?,?,?)
-ON CONFLICT(request_id) DO UPDATE SET input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, reasoning_tokens=excluded.reasoning_tokens, cached_tokens=excluded.cached_tokens, failed=excluded.failed`,
-		note.RequestID, note.Input, note.Output, note.Reasoning, note.Cached, failed)
+	_, err = s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(request_id) DO UPDATE SET input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, reasoning_tokens=excluded.reasoning_tokens, cached_tokens=excluded.cached_tokens, failed=excluded.failed,
+  ttft_ms=excluded.ttft_ms, latency_ms=excluded.latency_ms, provider=excluded.provider, auth_id=excluded.auth_id, auth_index=excluded.auth_index, auth_type=excluded.auth_type, effort=excluded.effort, service_tier=excluded.service_tier`,
+		note.RequestID, note.Input, note.Output, note.Reasoning, note.Cached, failed, note.TTFT.Milliseconds(), note.Latency.Milliseconds(), note.Provider, note.AuthID, note.AuthIndex, note.AuthType, note.Effort, note.ServiceTier)
+	return err
+}
+
+// applyLateUsage fills a row that finalized before the usage note arrived.
+// The host completion payload does not carry latency, and a fast completion
+// can also land before token counts. Billing is applied only when the row
+// has not already billed.
+func (s *Store) applyLateUsage(note UsageNote) error {
+	var status string
+	var input, output, latency, ttft, billed int64
+	var provider string
+	err := s.db.QueryRow(`SELECT status, input_tokens, output_tokens, latency_ms, ttft_ms, billed_tokens, provider FROM requests WHERE request_id=?`, note.RequestID).
+		Scan(&status, &input, &output, &latency, &ttft, &billed, &provider)
+	if err != nil {
+		return err
+	}
+	nextLatency := latency
+	if nextLatency <= 0 && note.Latency > 0 {
+		nextLatency = note.Latency.Milliseconds()
+	}
+	nextTTFT := ttft
+	if nextTTFT <= 0 && note.TTFT > 0 {
+		nextTTFT = note.TTFT.Milliseconds()
+	}
+	nextInput, nextOutput, nextReasoning, nextCached := input, output, int64(0), int64(0)
+	var reasoning, cached int64
+	_ = s.db.QueryRow(`SELECT reasoning_tokens, cached_tokens FROM requests WHERE request_id=?`, note.RequestID).Scan(&reasoning, &cached)
+	nextReasoning, nextCached = reasoning, cached
+	addBilled := int64(0)
+	if input+output == 0 && note.Input+note.Output > 0 {
+		nextInput, nextOutput, nextReasoning, nextCached = note.Input, note.Output, note.Reasoning, note.Cached
+		if status == "succeeded" && billed == 0 {
+			addBilled = BilledTokens(note.Input, note.Output)
+		}
+	}
+	if _, err = s.db.Exec(`UPDATE requests SET input_tokens=?, output_tokens=?, reasoning_tokens=?, cached_tokens=?, billed_tokens=billed_tokens+?, latency_ms=?, ttft_ms=?,
+provider=CASE WHEN provider='' THEN ? ELSE provider END,
+auth_id=CASE WHEN auth_id='' THEN ? ELSE auth_id END,
+auth_index=CASE WHEN auth_index='' THEN ? ELSE auth_index END,
+auth_type=CASE WHEN auth_type='' THEN ? ELSE auth_type END,
+effort=CASE WHEN effort='' THEN ? ELSE effort END,
+service_tier=CASE WHEN service_tier='' THEN ? ELSE service_tier END
+WHERE request_id=?`,
+		nextInput, nextOutput, nextReasoning, nextCached, addBilled, nextLatency, nextTTFT,
+		note.Provider, note.AuthID, note.AuthIndex, note.AuthType, note.Effort, note.ServiceTier, note.RequestID); err != nil {
+		return err
+	}
+	if addBilled > 0 {
+		_, err = s.db.Exec(`UPDATE keys SET tokens_used=tokens_used+? WHERE id=(SELECT key_id FROM requests WHERE request_id=?)`, addBilled, note.RequestID)
+	}
 	return err
 }
 
@@ -883,9 +1020,15 @@ func (s *Store) finalizeLegacy(tx *sql.Tx, in FinalizeInput) error {
 }
 
 func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, legacy bool) error {
-	input, output, reasoning, cached, failed, err := usageSnapshot(tx, in)
+	input, output, reasoning, cached, failed, meta, err := usageSnapshot(tx, in)
 	if err != nil {
 		return err
+	}
+	if in.TTFT <= 0 && meta.TTFTMs > 0 {
+		in.TTFT = time.Duration(meta.TTFTMs) * time.Millisecond
+	}
+	if in.Latency <= 0 && meta.LatencyMs > 0 {
+		in.Latency = time.Duration(meta.LatencyMs) * time.Millisecond
 	}
 	status, column, bill := requestOutcome(in.Outcome, failed)
 	billed := int64(0)
@@ -915,6 +1058,10 @@ func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, lega
 			return nil
 		}
 	}
+	if _, err = tx.Exec(`UPDATE requests SET requested_model=?, provider=?, auth_id=?, auth_index=?, auth_type=?, effort=?, service_tier=? WHERE request_id=?`,
+		in.RequestedModel, meta.Provider, meta.AuthID, meta.AuthIndex, meta.AuthType, meta.Effort, meta.ServiceTier, in.RequestID); err != nil {
+		return err
+	}
 	if err = incrementOutcome(tx, column, billed, keyID, legacy, completedText); err != nil {
 		return err
 	}
@@ -927,18 +1074,26 @@ func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, lega
 	return tx.Commit()
 }
 
-func usageSnapshot(tx *sql.Tx, in FinalizeInput) (int64, int64, int64, int64, bool, error) {
+// usageMeta carries the non-token facts a usage note records about a request.
+type usageMeta struct {
+	TTFTMs, LatencyMs             int64
+	Provider, AuthID, AuthIndex   string
+	AuthType, Effort, ServiceTier string
+}
+
+func usageSnapshot(tx *sql.Tx, in FinalizeInput) (int64, int64, int64, int64, bool, usageMeta, error) {
 	input, output, reasoning, cached := in.Input, in.Output, in.Reasoning, in.Cached
 	var failed bool
-	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed FROM usage_notes WHERE request_id=?`, in.RequestID).
-		Scan(&input, &output, &reasoning, &cached, &failed)
+	var meta usageMeta
+	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier FROM usage_notes WHERE request_id=?`, in.RequestID).
+		Scan(&input, &output, &reasoning, &cached, &failed, &meta.TTFTMs, &meta.LatencyMs, &meta.Provider, &meta.AuthID, &meta.AuthIndex, &meta.AuthType, &meta.Effort, &meta.ServiceTier)
 	if err == sql.ErrNoRows {
-		return input, output, reasoning, cached, false, nil
+		return input, output, reasoning, cached, false, usageMeta{}, nil
 	}
 	if err != nil {
-		return 0, 0, 0, 0, false, err
+		return 0, 0, 0, 0, false, usageMeta{}, err
 	}
-	return input, output, reasoning, cached, failed, nil
+	return input, output, reasoning, cached, failed, meta, nil
 }
 
 func requestOutcome(outcome string, usageFailed bool) (string, string, bool) {
@@ -1171,6 +1326,9 @@ func (s *Store) cancelExpiredLocked(now time.Time, cutoff string) (int, error) {
 			if _, errExec = tx.Exec(`UPDATE keys SET request_canceled_count=request_canceled_count+1 WHERE id=?`, item.keyID); errExec != nil {
 				return 0, errExec
 			}
+			if errExec = copyUsageNote(tx, item.requestID); errExec != nil {
+				return 0, errExec
+			}
 			canceled++
 		}
 		if _, errExec = tx.Exec(`DELETE FROM reservations WHERE request_id=?`, item.requestID); errExec != nil {
@@ -1184,6 +1342,34 @@ func (s *Store) cancelExpiredLocked(now time.Time, cutoff string) (int, error) {
 		return 0, err
 	}
 	return canceled, nil
+}
+
+// copyUsageNote writes a staged usage note onto its request before the note is deleted.
+// Reservation expiry cancels the row in the same transaction, so the log would otherwise
+// keep zero tokens, latency, and account. Canceled rows are not billed.
+func copyUsageNote(tx *sql.Tx, requestID string) error {
+	var input, output, reasoning, cached, ttft, latency int64
+	var provider, authID, authIndex, authType, effort, tier string
+	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier FROM usage_notes WHERE request_id=?`, requestID).
+		Scan(&input, &output, &reasoning, &cached, &ttft, &latency, &provider, &authID, &authIndex, &authType, &effort, &tier)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE requests SET input_tokens=?, output_tokens=?, reasoning_tokens=?, cached_tokens=?,
+ttft_ms=CASE WHEN ttft_ms<=0 THEN ? ELSE ttft_ms END,
+latency_ms=CASE WHEN latency_ms<=0 THEN ? ELSE latency_ms END,
+provider=CASE WHEN provider='' THEN ? ELSE provider END,
+auth_id=CASE WHEN auth_id='' THEN ? ELSE auth_id END,
+auth_index=CASE WHEN auth_index='' THEN ? ELSE auth_index END,
+auth_type=CASE WHEN auth_type='' THEN ? ELSE auth_type END,
+effort=CASE WHEN effort='' THEN ? ELSE effort END,
+service_tier=CASE WHEN service_tier='' THEN ? ELSE service_tier END
+WHERE request_id=?`,
+		input, output, reasoning, cached, ttft, latency, provider, authID, authIndex, authType, effort, tier, requestID)
+	return err
 }
 
 func (s *Store) sweepBatch() (int, error) {
@@ -1211,9 +1397,11 @@ func (s *Store) sweepBatch() (int, error) {
 	if err := deleteN(`DELETE FROM reservations WHERE request_id IN (SELECT request_id FROM reservations WHERE created_at < ? LIMIT 500)`, reservationCutoff); err != nil {
 		return total, err
 	}
-	// Notes are copied into the request row at finalize. Drop leftovers in small
-	// batches so a large history cannot hold the admission lock.
-	if err := deleteN(`DELETE FROM usage_notes WHERE request_id IN (SELECT notes.request_id FROM usage_notes AS notes INNER JOIN requests ON requests.request_id = notes.request_id LIMIT 500)`); err != nil {
+	// Notes are copied into the request row at finalize. Drop leftovers for
+	// terminal rows only. A pending row still needs its note: NoteUsage stages
+	// tokens and account facts there, and Finalize copies them. Deleting that
+	// note between usage.handle and request.complete leaves zeros and never bills.
+	if err := deleteN(`DELETE FROM usage_notes WHERE request_id IN (SELECT notes.request_id FROM usage_notes AS notes INNER JOIN requests ON requests.request_id = notes.request_id WHERE requests.status<>'pending' LIMIT 500)`); err != nil {
 		return total, err
 	}
 	if err := deleteN(`DELETE FROM usage_notes WHERE request_id IN (SELECT request_id FROM requests WHERE requested_at < ? LIMIT 500)`, cutoff); err != nil {
@@ -1278,6 +1466,7 @@ type keyRow struct {
 	requestLimit, quotaUsed, success, failure        int64
 	canceled, rejected                               int64
 	deleted                                          bool
+	group                                            string
 }
 
 type rowQuery interface {
@@ -1316,7 +1505,7 @@ func (s *Store) scanKey(sc rowScanner) (Key, error) {
 	var row keyRow
 	var created, expires, lastUsed sql.NullString
 	var reserved int64
-	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &row.requestLimit, &row.quotaUsed, &row.success, &row.failure, &row.canceled, &row.rejected, &reserved); err != nil {
+	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &row.requestLimit, &row.quotaUsed, &row.success, &row.failure, &row.canceled, &row.rejected, &row.group, &reserved); err != nil {
 		return Key{}, err
 	}
 	row.created = parseTime(created.String)
@@ -1337,7 +1526,7 @@ func (s *Store) scanKey(sc rowScanner) (Key, error) {
 		TokensUsed: row.used, RequestCount: row.count, RequestLimit: row.requestLimit, RequestQuotaUsed: row.quotaUsed,
 		RequestSuccessCount: row.success, RequestFailureCount: row.failure, RequestCanceledCount: row.canceled,
 		RequestRejectedCount: row.rejected, RequestLimitReached: requestReached, TokenLimitReached: tokenReached,
-		RequestQuotaRemaining: remaining, LastUsedAt: row.lastUsed,
+		RequestQuotaRemaining: remaining, LastUsedAt: row.lastUsed, GroupID: row.group,
 	}, nil
 }
 
