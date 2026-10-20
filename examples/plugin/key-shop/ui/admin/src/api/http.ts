@@ -2,6 +2,13 @@ import { asRecord } from './pick'
 
 export const MANAGEMENT_STORAGE = 'keyshop.mgmt'
 
+export class ManagementAPIError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message)
+    this.name = 'ManagementAPIError'
+  }
+}
+
 function decode(payload: string): string {
   if (!payload || !payload.startsWith('enc::v1::')) return payload
   const binary = atob(payload.slice(8))
@@ -64,7 +71,7 @@ export async function managementJSON(key: string, method: string, path: string, 
     const record = asRecord(data)
     const err = record.error
     const message = typeof err === 'string' ? err : pickMessage(err) || pickMessage(record.message) || 'Request failed'
-    throw new Error(message)
+    throw new ManagementAPIError(response.status, message)
   }
   return data
 }

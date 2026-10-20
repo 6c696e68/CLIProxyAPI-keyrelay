@@ -24,10 +24,11 @@ async function submit(value: string, remember: boolean) {
   error.value = ''
   try {
     await service.authenticate(value)
-    if (remember) sessionStorage.setItem(MANAGEMENT_STORAGE, value)
+    if (remember) sessionStorage.setItem(MANAGEMENT_STORAGE, value.trim())
     else sessionStorage.removeItem(MANAGEMENT_STORAGE)
     authed.value = true
   } catch (err) {
+    sessionStorage.removeItem(MANAGEMENT_STORAGE)
     error.value = err instanceof Error ? err.message : 'Authentication failed'
   } finally {
     loading.value = false

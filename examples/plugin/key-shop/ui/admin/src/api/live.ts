@@ -1,6 +1,6 @@
 import { ttlSecondsFromLocal } from '@/lib/datetime'
 import type { AdminQuery, AdminSnapshot, CreateDraft, EditDraft, Policy, Scenario } from '@/types'
-import { managementJSON, managementRequest } from './http'
+import { ManagementAPIError, managementJSON, managementRequest } from './http'
 import { mapDiscoveredModels, mapKey, mapPolicyModels, mapRequest, mapStats } from './map'
 import { asRecord, pickNumber, pickString } from './pick'
 
@@ -130,16 +130,21 @@ export function createLiveAdminService() {
   return {
     pageSize: PAGE_SIZE,
     async authenticate(value: string) {
+      secret = ''
       const next = value.trim()
       if (!next) throw new Error('Enter the management key.')
+      if (next.startsWith('ck_')) {
+        throw new Error('This is a customer API key (ck_...). Use management_password from ACCESS.txt to open the admin workspace.')
+      }
       secret = next
       try {
         await call('GET', STATS_PATH)
       } catch (error) {
         secret = ''
-        const message = error instanceof Error ? error.message : ''
-        if (message.includes('did not respond')) throw error
-        throw new Error('The management key could not be authenticated.')
+        if (error instanceof ManagementAPIError && error.status === 401) {
+          throw new Error('The management password is incorrect. Use management_password from ACCESS.txt, not a customer API key.')
+        }
+        throw error
       }
     },
     async load(input: AdminQuery): Promise<AdminSnapshot> {

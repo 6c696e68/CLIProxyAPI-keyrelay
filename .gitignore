@@ -67,3 +67,8 @@ docker-compose.override.yml
 
 # Local LLM Wiki vault
 .llm-wiki
+
+# Local Windows administration and toolchains (never publish credentials).
+/.keyrelay-runtime/
+/.keyrelay-tools/
+**/__pycache__/
