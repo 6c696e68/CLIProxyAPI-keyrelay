@@ -18,6 +18,14 @@ the model name and the project directory. The key is entered at a hidden
 prompt and is not stored in the launcher preferences. Use ADMIN-PASSWORD.txt
 only for the management website, never for this client.
 
+On the current computer, a dedicated key is already in the private
+`.keyrelay-runtime/CLIENT-API-KEY.txt` file. At the key prompt, press Enter to
+use it with `http://127.0.0.1:8319/v1`. The launcher checks it with the server
+before starting Codex. For other endpoints, enter their own key manually.
+An empty input without a local key asks again instead of closing the launcher.
+Rotating a key in the panel invalidates its previous value, including a key
+already used by an open Codex window. Restart with the newest key afterward.
+
 The client connects directly to the selected endpoint. It does not add another
 proxy or perform ChatGPT login. Model access requires a healthy upstream,
 not just a customer key. The current administration-only install still lacks
@@ -106,6 +114,7 @@ setup runs its development server rather than deploying management.html.
 The direct Codex launcher has an offline integration check:
 
 ```bat
+python -m unittest discover -s windows/tests -p test_client_credentials.py -v
 python windows\tests\check_codex_client.py
 ```
 

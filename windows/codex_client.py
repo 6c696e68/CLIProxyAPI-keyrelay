@@ -88,6 +88,40 @@ def prompt(label, default=""):
     return input(f"{label}" + (f" [{default}]" if default else "") + ": ").strip() or default
 
 
+def load_local_client_key(runtime, endpoint):
+    # This file belongs to this installation, never to an arbitrary endpoint.
+    parsed = urllib.parse.urlsplit(endpoint)
+    if (parsed.scheme != "http" or parsed.hostname not in ("127.0.0.1", "localhost", "::1")
+            or parsed.port != 8319 or parsed.path != "/v1"):
+        return None
+    try:
+        key = (runtime / "CLIENT-API-KEY.txt").read_text(encoding="utf-8-sig").strip()
+    except FileNotFoundError:
+        return None
+    if not key.startswith("ck_") or any(char.isspace() for char in key):
+        print("CLIENT-API-KEY.txt does not contain one client key; enter a key manually.")
+        return None
+    return key
+
+
+def prompt_client_key(local_key=None):
+    if local_key:
+        print("Press Enter to use CLIENT-API-KEY.txt for this local server, or paste another key.")
+    while True:
+        key = getpass.getpass("Client API key ck_... (hidden; characters do not appear): ").strip()
+        if not key and local_key:
+            print("Using the local client key from CLIENT-API-KEY.txt.")
+            return local_key
+        if not key:
+            print("No key entered. Paste the client key and press Enter (Ctrl+C to cancel).")
+        elif key.startswith("KR-"):
+            print("This is a management password. Enter the client ck_ key instead.")
+        elif any(char.isspace() for char in key):
+            print("The key must be one line without spaces. Please paste it again.")
+        else:
+            return key
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runtime-root", type=Path,
@@ -103,22 +137,23 @@ def main():
         saved = {}
     print("Codex CLI -> your KEYRELAY endpoint\n")
     endpoint = endpoint_url(prompt("Endpoint", saved.get("endpoint", "http://127.0.0.1:8319/v1")))
-    key = getpass.getpass("Client API key ck_... (hidden): ").strip()
-    if not key or any(char in key for char in "\r\n"):
-        raise ValueError("Enter the client API key")
-    if key.startswith("KR-"):
-        raise ValueError("That is a management password. Use a client ck_ key or an operator API key")
+    local_key = load_local_client_key(runtime, endpoint)
     models = []
-    try:
-        catalog = get_json(endpoint + "/models", key)
-        models = sorted({item["id"] for item in catalog.get("data", [])
-                         if isinstance(item, dict) and isinstance(item.get("id"), str)})
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
-            raise RuntimeError(f"Endpoint rejected the client key: HTTP {error.code}") from None
-        print(f"Model listing returned HTTP {error.code}; enter a model manually")
-    except (urllib.error.URLError, TimeoutError) as error:
-        raise RuntimeError("The endpoint is unavailable. Start the server on this computer first") from error
+    while True:
+        key = prompt_client_key(local_key)
+        try:
+            catalog = get_json(endpoint + "/models", key)
+            models = sorted({item["id"] for item in catalog.get("data", [])
+                             if isinstance(item, dict) and isinstance(item.get("id"), str)})
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                print(f"Key rejected: HTTP {error.code}. Rotate invalidates the previous key; enter the newest key.")
+                local_key = None
+                continue
+            print(f"Model listing returned HTTP {error.code}; enter a model manually")
+        except (urllib.error.URLError, TimeoutError) as error:
+            raise RuntimeError("The endpoint is unavailable. Start the server on this computer first") from error
+        break
     for number, name in enumerate(models, 1):
         print(f"  {number}. {name}")
     if not models:
