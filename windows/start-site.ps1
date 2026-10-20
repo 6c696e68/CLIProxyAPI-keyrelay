@@ -28,3 +28,7 @@ if (-not $panelListener) {
     if ($panelListener[0].OwningProcess -ne $expectedPid) { throw 'Port 5173 belongs to another process.' }
 }
 Write-Output 'Administration processes started. Main panel: http://127.0.0.1:5173'
+if (Test-Path -LiteralPath (Join-Path $runtimeRoot 'relay-install.json')) {
+    & python (Join-Path $PSScriptRoot 'relay_manager.py') start --workspace-root $taskRoot
+    if ($LASTEXITCODE -ne 0) { throw 'The installed model relay could not start.' }
+}

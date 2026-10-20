@@ -157,7 +157,7 @@ def main():
     for number, name in enumerate(models, 1):
         print(f"  {number}. {name}")
     if not models:
-        print("No active models were advertised. A client key does not configure the model backend.")
+        raise RuntimeError("No active models are available. Complete SETUP-RELAY.cmd and LOGIN-PLUS.cmd first")
     selected = prompt("Model number or exact name", saved.get("model", "gpt-6.1-sol"))
     if selected.isdecimal() and 1 <= int(selected) <= len(models):
         selected = models[int(selected) - 1]
