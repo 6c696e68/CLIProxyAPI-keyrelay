@@ -191,6 +191,32 @@ export function mapStats(raw: unknown): Stats {
   }
 }
 
+export function mapTunnel(raw: unknown): import('@/types').Tunnel {
+  const row = asRecord(raw)
+  const kind = pickString(row, 'kind') === 'quick' ? 'quick' : 'token'
+  const status = pickString(row, 'status')
+  const known = status === 'running' || status === 'starting' || status === 'failed' ? status : 'stopped'
+  const desired = pickString(row, 'desired') === 'running' ? 'running' : 'stopped'
+  return {
+    id: pickString(row, 'id'),
+    name: pickString(row, 'name'),
+    kind,
+    targetUrl: pickString(row, 'target_url'),
+    hasToken: Boolean(row.has_token),
+    tokenHint: pickString(row, 'token_hint'),
+    autostart: Boolean(row.autostart),
+    desired,
+    status: known,
+    pid: pickNumber(row, 'pid'),
+    publicUrl: pickString(row, 'public_url'),
+    lastError: pickString(row, 'last_error'),
+    restarts: pickNumber(row, 'restarts'),
+    startedAt: pickTime(row, 'started_at'),
+    createdAt: pickString(row, 'created_at'),
+    updatedAt: pickString(row, 'updated_at'),
+  }
+}
+
 export function mapPolicyModels(value: unknown): Array<{ name: string; alias: string }> {
   return Array.isArray(value)
     ? value.map((item) => {

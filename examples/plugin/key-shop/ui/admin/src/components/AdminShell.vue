@@ -5,15 +5,19 @@ import AppButton from './ui/AppButton.vue'
 import { useRoute } from '@/composables/useRoute'
 import type { ThemeName } from '@/types'
 
-defineProps<{ theme: ThemeName }>()
+const props = defineProps<{ theme: ThemeName; busy?: boolean }>()
 const emit = defineEmits<{ refresh: []; logout: []; toggleTheme: [] }>()
+function refresh() {
+  if (props.busy) return
+  emit('refresh')
+}
 const { route } = useRoute()
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const groups = [
   { label: 'Overview', items: [{ id: 'dashboard', href: '#/', label: 'Dashboard', icon: 'panel' }] },
   { label: 'Access', items: [{ id: 'groups', href: '#/groups', label: 'Model groups', icon: 'layers' }, { id: 'keys', href: '#/keys', label: 'Keys', icon: 'key' }] },
-  { label: 'Activity', items: [{ id: 'requests', href: '#/requests', label: 'Request log', icon: 'activity' }] },
+  { label: 'Activity', items: [{ id: 'requests', href: '#/requests', label: 'Request log', icon: 'activity' }, { id: 'tunnels', href: '#/tunnels', label: 'Tunnels', icon: 'layers' }] },
 ]
 </script>
 
@@ -58,7 +62,7 @@ const groups = [
       <slot />
       <nav class="dock" aria-label="Workspace actions">
         <div class="float-cluster">
-          <AppButton class="icon-btn" aria-label="Refresh" @click="emit('refresh')"><Icon name="refresh" /></AppButton>
+          <AppButton class="icon-btn" :aria-label="busy ? 'Refreshing' : 'Refresh'" :disabled="busy" @click="refresh"><Icon name="refresh" /></AppButton>
           <AppButton class="icon-btn" :aria-label="theme === 'dark' ? 'Use light theme' : 'Use dark theme'" @click="emit('toggleTheme')">
             <Icon :name="theme === 'dark' ? 'sun' : 'moon'" />
           </AppButton>

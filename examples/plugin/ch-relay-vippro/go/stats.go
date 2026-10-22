@@ -887,7 +887,7 @@ func classifyEnabled(file pluginapi.HostAuthFileEntry, callbackID string, now ti
 	if file.Unavailable || errGet != nil || strings.TrimSpace(token) == "" {
 		return kindUnavailable, false
 	}
-	if !file.NextRetryAfter.IsZero() && file.NextRetryAfter.After(now) {
+	if (!file.NextRetryAfter.IsZero() && file.NextRetryAfter.After(now)) || cooled(index, token, now) {
 		return kindCooling, false
 	}
 	return kindEligible, plus

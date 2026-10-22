@@ -60,7 +60,7 @@ plugins:
           fallback: []
 ```
 
-`priority` is only the host's plugin order. Account choice uses each Codex auth record's own priority and keeps the highest tier.
+`priority` is only the host's plugin order. Account choice uses each Codex auth record's own priority and keeps the highest tier. `defaultPluginConfig` inside the plugin is `enabled: true` with no models. The host default for a missing plugin block is `enabled: false`. A rejected reload keeps the previous in-process config and still returns success, because a failed `plugin.reconfigure` makes the host drop the plugin. `upstream-cache` is deprecated and ignored. A document that sets it still loads. It is not shown in the management schema.
 
 ## Config fields
 
@@ -70,13 +70,13 @@ plugins:
 | `base-url` | HTTPS origin plus optional path. Empty uses `https://7656b154.linhtd.com/v1`. `http` is accepted only for localhost, private IPs such as `192.168.8.1`, and shared addresses in `100.64.0.0/10` (Tailscale). Userinfo, query, and fragment are rejected. |
 | `prefix` | Client model prefix. Trimmed of slashes. A value that still contains `/` claims nothing. |
 | `headers` | Extra upstream headers. `$NAME` copies that client header. `$CPA-SESSION-ID` uses the executor session. A missing source drops the header. |
-| `request-retry` | Extra attempts on the next account with the same upstream model. `0` sends once. Default `3`. Maximum `32`. A value outside that range is clamped. The total number of account attempts is `1 + request-retry`. |
+| `request-retry` | Extra attempts on the next account with the same upstream model. `0` sends once. Default `3`. Maximum `32`. A value outside that range is clamped. The total number of account attempts is `1 + request-retry`. Alias rows do not change the upstream name inside this budget. |
 | `fallback-retry` | Extra attempts with the row `fallback` names after every primary attempt failed because the upstream refused the model. `0` disables fallback even when a list is filled in. Default `0`. Maximum `3`. These calls do not spend `request-retry`. |
 | `rotation-mode` | `round-robin`, `fill-first`, `least-recent`, or `sticky`. |
 | `plus-preference` | `off`, `prefer`, or `only`. `ignore` is stored as `off`. Default `prefer`. |
 | `sticky-seconds` | Sticky session lifetime. Default `300`. Maximum `86400`. |
 | `model-cooldown-minutes` | After the upstream says the model is not supported for a ChatGPT account, skip that account and that access token for this many minutes. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. When `stats-file` is set, the skip is saved in `stats-file + ".cooldowns.json"` and survives restart. The file stores a token hash, not the access token. |
-| `stats-file` | JSON file of hourly buckets kept for 90 days. Empty does not write a file. |
+| `stats-file` | JSON file of hourly buckets kept for 90 days. Empty does not write a file. Reloading replaces in-memory model cooldowns with that file's sidecar, and an empty value clears them. |
 | `models` | Rows of upstream model name, optional alias, optional fallback names, and optional OpenAI model fields. |
 
 ## Models
@@ -85,9 +85,9 @@ With `prefix: vippro` and alias `gpt-5.4`, clients call `vippro/gpt-5.4`. The up
 
 A thinking suffix such as `(high)` is accepted on the client model and copied onto the upstream name.
 
-Several rows with the same alias are one catalog model. The plugin rotates those upstream names. An exact repeat of the same `name` and `alias` keeps the first row and does not fail registration. A row with an alias and an empty name is rejected. A blank name row is skipped.
+Several rows with the same alias are one catalog model. The plugin rotates those upstream names across requests. One request's `request-retry` budget stays on the name chosen for that request. An exact repeat of the same `name` and `alias` keeps the first row and does not fail registration. A row with an alias and an empty name is rejected. A blank name row is skipped.
 
-Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`. If `thinking` is omitted, the row inherits the canonical model's levels, including `xhigh` and `max` when that model supports them. An explicit `thinking.levels` list still wins.
+Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`. The catalog receives `max-context-length` and the modality lists. `force-mapping`, `image`, `is-compat`, and `use-max-completion-tokens` are stored and not advertised. If `thinking` is omitted, the row inherits the canonical model's levels, including `xhigh` and `max` when that model supports them. An explicit `thinking` object wins even when `levels` is absent. A pool of several upstream names advertises the alias, not the first name. Calling a bare upstream name pins that name.
 
 `fallback` is an ordered list of upstream names. The row's own name and repeats are dropped. With `fallback-retry` above `0`, the plugin first tries the row `name` on the selected accounts. When every one of those attempts fails with a model refusal (the ChatGPT model-not-supported error, `model_not_found`, or "model ... does not exist"), or every account is in model cooldown, it sends the fallback names instead. A thinking suffix such as `(high)` stays attached. Fallback calls may use accounts in model cooldown, because that cooldown only means the primary model was refused.
 
@@ -120,7 +120,7 @@ Among the accounts that remain, only the highest auth `priority` is used.
 - `round-robin` keeps the access token that succeeded. One upstream error moves to the next account and stays there if that account succeeds. A client cancel does not move the token.
 - `fill-first` keeps using the first account in the sorted pool.
 - `least-recent` orders by `UpdatedAt`, earliest first.
-- `sticky` keeps one account for a session until `sticky-seconds` elapses.
+- `sticky` keeps one account for a session until `sticky-seconds` elapses. The bind is written only after that account returns 2xx. `0` stores no bind.
 
 The session id is the first non-empty value among executor metadata `canonical_session_id`, `execution_session_id`, and `session_id`, then the headers `Session-Id`, `X-Session-Id`, and `X-Claude-Code-Session-Id`. `$CPA-SESSION-ID` uses that same value. A client header whose name is literally `CPA-SESSION-ID` is not copied.
 
@@ -161,7 +161,7 @@ The client `Authorization` header is not forwarded. The plugin sets `Authorizati
 | `total` | Enabled Codex records considered. |
 | `eligible` | Enabled, available, not cooling, with a token. This includes free accounts. |
 | `plus` | Eligible records whose live token plan is `plus`. |
-| `cooling` | Enabled records still before `next_retry_after`. |
+| `cooling` | Enabled records still before `next_retry_after`, or skipped by model cooldown. The timer scan calls `host.auth.list` with an empty callback id, so a failed list leaves the previous snapshot. |
 | `unavailable` | Enabled records that are unavailable or have no token. |
 | `disabled_skipped` | Disabled Codex records. They are not part of `total`. |
 | `checked_at` | RFC3339 time, or empty. |
@@ -183,5 +183,6 @@ The management page is the plugin resource above. Plugin config stays in the hos
 | `unsupported_format` | The format is not Chat Completions or Responses. |
 | `no_plus_account` | `prefer` or `only` has no usable Plus account. |
 | `no_account` | No eligible Codex account is left. |
+| `accounts_cooling` | Every selected account is in model cooldown and fallback is off. |
 | `auth_unavailable` | `host.auth.list` failed. |
 | `upstream_error` | The last upstream attempt failed. HTTP status is the upstream status. The body is the upstream body. |

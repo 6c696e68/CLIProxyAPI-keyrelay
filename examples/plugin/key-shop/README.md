@@ -185,6 +185,14 @@ Tables:
 
 Stored status is `active` or `disabled`. Computed status adds `expired` and `exhausted`. Request status is `pending`, `succeeded`, `failed`, `rejected`, or `canceled`.
 
+## Tunnels
+
+Optional management routes under `/plugins/key-shop/tunnels` start and stop Cloudflare tunnels the plugin itself created. Set `tunnels_enabled: false` to disable the routes and never spawn a child. `cloudflared_path` defaults to looking up `cloudflared` on `PATH`. A missing binary is not a startup error; start returns 409.
+
+Each row is `token` (named tunnel, token only in the child env as `TUNNEL_TOKEN`) or `quick` (`--url`, public `trycloudflare.com` URL parsed from the child output). The API returns `has_token` and a 4-character hint, never the token. The plugin signals only processes it spawned, or a recorded pid whose environ contains `KEYSHOP_TUNNEL_ID` on Linux. It does not scan or signal other cloudflared processes. Child `HOME` is `<data dir>/tunnels/<id>`, so the device `~/.cloudflared` config is not used.
+
+The admin page has a Tunnels screen at `#/tunnels`. The token field is write-only: edit leaves it blank, and an empty token keeps the stored value. See [docs/key-shop.md](../../../docs/key-shop.md) for the route table and isolation rules.
+
 ## Tests
 
 ```bash

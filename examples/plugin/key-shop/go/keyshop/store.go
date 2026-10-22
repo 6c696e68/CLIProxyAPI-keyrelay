@@ -28,6 +28,9 @@ type Config struct {
 	DeletedRetentionDays int
 	ModelAccessMode      string
 	Models               []ModelAccessModel
+	CloudflaredPath      string
+	TunnelsEnabled       *bool
+	TunnelTargetURL      string
 	Now                  func() time.Time
 }
 
@@ -221,6 +224,7 @@ func Open(cfg Config) (*Store, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	cfg.DataFile = path
 	store := &Store{db: db, cfg: cfg}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
@@ -306,6 +310,20 @@ CREATE TABLE IF NOT EXISTS model_groups (
   models_json TEXT NOT NULL DEFAULT '[]',
   aliases_json TEXT NOT NULL DEFAULT '{}',
   is_system INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tunnels (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  kind TEXT NOT NULL,
+  target_url TEXT NOT NULL DEFAULT '',
+  token TEXT NOT NULL DEFAULT '',
+  autostart INTEGER NOT NULL DEFAULT 0,
+  desired TEXT NOT NULL DEFAULT 'stopped',
+  pid INTEGER NOT NULL DEFAULT 0,
+  public_url TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );`)

@@ -61,10 +61,10 @@ function addManual() {
       </div>
       <div class="model-scroll">
         <div v-for="item in modelValue" :key="item.name" class="model-selected">
-          <div class="model-row">
-            <span class="num truncate text-xs">{{ item.name }}</span>
+          <div class="model-selected-row">
+            <span class="num model-selected-name" :title="item.name">{{ item.name }}</span>
             <AppTextInput class="model-alias" :model-value="item.alias" placeholder="Client alias" :disabled="disabled" @update:model-value="setAlias(item.name, $event)" />
-            <AppButton small kind="danger" :disabled="disabled" @click="remove(item.name)">Remove</AppButton>
+            <AppButton small kind="ghost" class="model-remove" :disabled="disabled" :aria-label="`Remove ${item.name}`" @click="remove(item.name)">Remove</AppButton>
           </div>
           <p v-if="problems?.[item.name]" class="model-alias-error" role="alert">{{ problems[item.name] }}</p>
         </div>

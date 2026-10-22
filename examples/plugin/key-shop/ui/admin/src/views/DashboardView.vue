@@ -5,7 +5,8 @@ import MetricCard from '@/components/MetricCard.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import RankList from '@/components/RankList.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
-import { notifyKey, refreshKey } from '@/composables/useToast'
+import { useLoadGuard } from '@/composables/useLoadGuard'
+import { bindViewBusy, notifyKey, refreshKey } from '@/composables/useToast'
 import { formatMs, formatNumber, formatPercent, splitWhen } from '@/lib/format'
 import { presetRange, type RangePreset } from '@/lib/range'
 import { fillSeries } from '@/lib/series'
@@ -18,7 +19,8 @@ const stats = ref<Stats | null>(null)
 const usage = ref<UsageReport | null>(null)
 const latest = ref<RequestRow[]>([])
 const error = ref('')
-const loading = ref(false)
+const { loading, load: runLoad } = useLoadGuard()
+bindViewBusy(loading)
 const preset = ref<RangePreset>('24h')
 const presets: RangePreset[] = ['1h', '24h', '7d', '30d']
 
@@ -41,14 +43,14 @@ const mix = computed(() => {
   ]
 })
 
-async function load() {
+function load() {
+  return runLoad(async () => {
   if (props.scenario === 'loading') {
     stats.value = null
     usage.value = null
     latest.value = []
     return
   }
-  loading.value = true
   error.value = ''
   const range = presetRange(preset.value)
   try {
@@ -66,9 +68,8 @@ async function load() {
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Request failed'
     notify(error.value)
-  } finally {
-    loading.value = false
   }
+  })
 }
 watch(() => props.scenario, () => { void load() }, { immediate: true })
 watch(refreshTick, () => { void load() })
@@ -78,7 +79,7 @@ watch(preset, () => { void load() })
 <template>
   <div>
     <PageHeader kicker="Key shop" title="Dashboard" copy="Lifetime key health, plus usage for the selected range." />
-    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" @click="load">Retry</button></p>
+    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" :disabled="loading" @click="load">{{ loading ? 'Loading...' : 'Retry' }}</button></p>
     <p v-if="loading && !stats" class="panel" role="status">Loading dashboard…</p>
     <template v-else-if="stats">
       <div class="metric-grid">

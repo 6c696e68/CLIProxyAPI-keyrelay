@@ -38,7 +38,7 @@ export function panelKey(): string {
   return sessionStorage.getItem(MANAGEMENT_STORAGE) || ''
 }
 
-export async function managementJSON(key: string, method: string, path: string, body?: unknown): Promise<unknown> {
+export async function managementJSON(key: string, method: string, path: string, body?: unknown, timeoutMs = 8000): Promise<unknown> {
   let response: Response
   try {
     response = await fetch(path, {
@@ -48,7 +48,7 @@ export async function managementJSON(key: string, method: string, path: string, 
         'Content-Type': 'application/json',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
   } catch (error) {
     const name = error instanceof Error ? error.name : ''
@@ -71,8 +71,8 @@ export async function managementJSON(key: string, method: string, path: string, 
   return data
 }
 
-export async function managementRequest(key: string, method: string, path: string, body?: unknown): Promise<Record<string, unknown>> {
-  return asRecord(await managementJSON(key, method, path, body))
+export async function managementRequest(key: string, method: string, path: string, body?: unknown, timeoutMs = 8000): Promise<Record<string, unknown>> {
+  return asRecord(await managementJSON(key, method, path, body, timeoutMs))
 }
 
 function pickMessage(value: unknown): string {

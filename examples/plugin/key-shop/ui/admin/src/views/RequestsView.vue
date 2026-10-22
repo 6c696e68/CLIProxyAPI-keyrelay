@@ -11,7 +11,8 @@ import AppSwitch from '@/components/ui/AppSwitch.vue'
 import AppTextInput from '@/components/ui/AppTextInput.vue'
 import Pager from '@/components/ui/Pager.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
-import { notifyKey, refreshKey } from '@/composables/useToast'
+import { useLoadGuard } from '@/composables/useLoadGuard'
+import { bindViewBusy, notifyKey, refreshKey } from '@/composables/useToast'
 import { toLocalInput } from '@/lib/datetime'
 import { formatMs, formatNumber, formatTok, pageRange, rejectionLabel, shortenMiddle, splitWhen } from '@/lib/format'
 import { presetRange, type RangePreset } from '@/lib/range'
@@ -23,7 +24,8 @@ const refreshTick = inject(refreshKey, ref(0))
 const groups = ref<ModelGroup[]>([])
 const pageData = ref<RequestPage | null>(null)
 const error = ref('')
-const loading = ref(false)
+const { loading, load: runLoad } = useLoadGuard()
+bindViewBusy(loading)
 const preset = ref<RangePreset | 'custom'>('7d')
 const presets = ['1h', '24h', '7d', '30d', 'all', 'custom'] as const
 const customFrom = ref(toLocalInput(new Date(Date.now() - 86_400_000)))
@@ -66,7 +68,8 @@ function range() {
   }
   return presetRange(preset.value)
 }
-async function load() {
+function load() {
+  return runLoad(async () => {
   const generation = ++loadGeneration
   if (props.scenario === 'loading') {
     pageData.value = null
@@ -80,7 +83,6 @@ async function load() {
     page.value = 1
     return
   }
-  loading.value = true
   if (keepCursorError) keepCursorError = false
   else error.value = ''
   const bounds = range()
@@ -103,9 +105,8 @@ async function load() {
     if (generation !== loadGeneration) return
     error.value = err instanceof Error ? err.message : 'Request failed'
     notify(error.value)
-  } finally {
-    if (generation === loadGeneration) loading.value = false
   }
+  })
 }
 function reset() {
   cursors.value = ['']
@@ -146,9 +147,9 @@ function onRowKey(event: KeyboardEvent, row: RequestRow) {
   <div>
     <PageHeader kicker="Activity" title="Request log" copy="Each row is one customer call. Account is the upstream auth id for that call.">
       <AppSwitch :on="auto" text="Auto" label="Auto-refresh every 15 seconds" @toggle="auto = !auto" />
-      <AppButton @click="load">Refresh</AppButton>
+      <AppButton :disabled="loading" @click="load">{{ loading ? 'Loading...' : 'Refresh' }}</AppButton>
     </PageHeader>
-    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" @click="load">Retry</button></p>
+    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" :disabled="loading" @click="load">{{ loading ? 'Loading...' : 'Retry' }}</button></p>
     <section class="panel">
       <div class="preset-row mb-3" role="group" aria-label="Time range">
         <button v-for="item in presets" :key="item" type="button" class="preset" :aria-pressed="preset === item" @click="preset = item">{{ item }}</button>

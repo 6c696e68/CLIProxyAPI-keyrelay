@@ -69,6 +69,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,6 +100,8 @@ const (
 	cooldownReasonUnsupported   = "chatgpt_model_unsupported"
 )
 
+var modelDoesNotExist = regexp.MustCompile(`\bmodel\b[\w\s'".-]{0,80}does not exist`)
+
 type envelope struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result,omitempty"`
@@ -128,8 +131,9 @@ type pluginConfig struct {
 	StickySeconds        *int              `yaml:"sticky-seconds"`
 	ModelCooldownMinutes *int              `yaml:"model-cooldown-minutes"`
 	StatsFile            string            `yaml:"stats-file"`
-	UpstreamCache        bool              `yaml:"upstream-cache"`
-	Models               []modelSpec       `yaml:"models"`
+	// UpstreamCache is deprecated and ignored. Production configs still set it.
+	UpstreamCache bool        `yaml:"upstream-cache"`
+	Models        []modelSpec `yaml:"models"`
 }
 
 type modelSpec struct {
@@ -181,11 +185,16 @@ type managementCall struct {
 }
 
 type modelPool struct {
-	alias     string
-	clientID  string
-	names     []string
-	fallbacks [][]string
-	display   string
+	alias            string
+	clientID         string
+	names            []string
+	fallbacks        [][]string
+	display          string
+	contextLength    int64
+	inputModalities  []string
+	outputModalities []string
+	thinkingSet      bool
+	thinkingSupport  *pluginapi.ThinkingSupport
 }
 
 type account struct {
@@ -766,7 +775,7 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "base-url", Type: pluginapi.ConfigFieldTypeString, Description: "HTTPS OpenAI-compatible base URL. Empty uses the built-in default."},
 		{Name: "prefix", Type: pluginapi.ConfigFieldTypeString, Description: "Client model prefix. A value that still contains a slash claims nothing."},
 		{Name: "headers", Type: pluginapi.ConfigFieldTypeObject, Description: "Extra upstream headers. $NAME copies a client header. $CPA-SESSION-ID uses the executor session."},
-		{Name: "request-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts on the next account with the same upstream model. 0 sends once. Default 3. Maximum 32. Values outside 0 to 32 are clamped so the plugin stays registered."},
+		{Name: "request-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts on the next account with the same upstream model. 0 sends once. Default 3. Maximum 32. The management panel rejects values outside 0 to 32. The plugin still clamps them so it stays registered."},
 		{Name: "fallback-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts with the model fallback names after every primary attempt failed because the upstream refused the model. Only the request model changes; response bytes are not touched. 0 disables fallback. Maximum 3."},
 		{Name: "rotation-mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"round-robin", "fill-first", "least-recent", "sticky"}, Description: "Codex account rotation. round-robin keeps a successful access token and moves to the next account after one upstream error."},
 		{Name: "plus-preference", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "prefer", "only"}, Description: "plus is the ChatGPT plan inside the account token. A stale plan_type of plus is ignored when the token says free. prefer stays on Plus while any enabled Plus account exists. ignore is stored as off."},
@@ -792,6 +801,19 @@ func (c pluginConfig) pools() []modelPool {
 		pool.fallbacks = append(pool.fallbacks, append([]string(nil), model.Fallback...))
 		if pool.display == "" {
 			pool.display = model.DisplayName
+		}
+		if pool.contextLength == 0 && model.MaxContextLength > 0 {
+			pool.contextLength = int64(model.MaxContextLength)
+		}
+		if len(pool.inputModalities) == 0 {
+			pool.inputModalities = append([]string(nil), model.InputModalities...)
+		}
+		if len(pool.outputModalities) == 0 {
+			pool.outputModalities = append([]string(nil), model.OutputModalities...)
+		}
+		if !pool.thinkingSet {
+			pool.thinkingSupport = thinkingFromSpec(model)
+			pool.thinkingSet = model.Thinking != nil
 		}
 	}
 	out := make([]modelPool, 0, len(order))
@@ -820,53 +842,101 @@ func modelList(cfg pluginConfig) pluginapi.ModelResponse {
 	if cfg.Enabled {
 		for _, pool := range cfg.pools() {
 			models = append(models, pluginapi.ModelInfo{
-				ID:          pool.clientID,
-				Object:      "model",
-				OwnedBy:     pluginID,
-				Name:        pool.names[0],
-				DisplayName: pool.display,
-				UserDefined: true,
-				Thinking:    pool.thinking(),
+				ID:                        pool.clientID,
+				Object:                    "model",
+				OwnedBy:                   pluginID,
+				Name:                      pool.advertisedName(),
+				Description:               pool.describe(),
+				DisplayName:               pool.display,
+				ContextLength:             pool.contextLength,
+				SupportedInputModalities:  append([]string(nil), pool.inputModalities...),
+				SupportedOutputModalities: append([]string(nil), pool.outputModalities...),
+				UserDefined:               true,
+				Thinking:                  pool.thinking(),
 			})
 		}
 	}
 	return pluginapi.ModelResponse{Provider: pluginID, Models: models}
 }
 
-func (p modelPool) thinking() *pluginapi.ThinkingSupport {
-	for _, model := range currentConfig().Models {
-		if model.publicName() != p.alias {
-			continue
-		}
-		if support := thinkingFromSpec(model); support != nil {
-			return support
-		}
-		return thinkingFromCanonical(model.Name)
+func (p modelPool) advertisedName() string {
+	if len(p.names) > 1 {
+		return p.alias
 	}
-	return nil
+	if len(p.names) == 1 {
+		return p.names[0]
+	}
+	return p.alias
+}
+
+func (p modelPool) describe() string {
+	if len(p.names) < 2 {
+		return ""
+	}
+	return "upstream names: " + strings.Join(p.names, ", ")
+}
+
+func (p modelPool) thinking() *pluginapi.ThinkingSupport {
+	if p.thinkingSet {
+		return p.thinkingSupport
+	}
+	if len(p.names) == 0 {
+		return nil
+	}
+	return thinkingFromCanonical(p.names[0])
 }
 
 func thinkingFromSpec(model modelSpec) *pluginapi.ThinkingSupport {
-	raw, ok := model.Thinking["levels"].([]any)
-	if !ok {
+	if model.Thinking == nil {
 		return nil
 	}
-	levels := make([]string, 0, len(raw))
-	for _, item := range raw {
-		level, ok := item.(string)
-		if !ok {
-			continue
+	support := &pluginapi.ThinkingSupport{}
+	if raw, ok := model.Thinking["levels"].([]any); ok {
+		for _, item := range raw {
+			level, ok := item.(string)
+			if !ok {
+				continue
+			}
+			level = strings.TrimSpace(level)
+			if level == "" {
+				continue
+			}
+			support.Levels = append(support.Levels, level)
 		}
-		level = strings.TrimSpace(level)
-		if level == "" {
-			continue
-		}
-		levels = append(levels, level)
 	}
-	if len(levels) == 0 {
-		return nil
+	if value, ok := intFromMap(model.Thinking["min"]); ok {
+		support.Min = value
 	}
-	return &pluginapi.ThinkingSupport{Levels: levels, DynamicAllowed: true, ZeroAllowed: true}
+	if value, ok := intFromMap(model.Thinking["max"]); ok {
+		support.Max = value
+	}
+	if value, ok := model.Thinking["zero-allowed"].(bool); ok {
+		support.ZeroAllowed = value
+	} else if len(support.Levels) > 0 {
+		support.ZeroAllowed = true
+	}
+	if value, ok := model.Thinking["dynamic-allowed"].(bool); ok {
+		support.DynamicAllowed = value
+	} else if len(support.Levels) > 0 {
+		support.DynamicAllowed = true
+	}
+	if value, ok := model.Thinking["disable-type"].(string); ok {
+		support.DisableType = strings.TrimSpace(value)
+	}
+	return support
+}
+
+func intFromMap(value any) (int, bool) {
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	default:
+		return 0, false
+	}
 }
 
 func thinkingFromCanonical(name string) *pluginapi.ThinkingSupport {
@@ -989,7 +1059,11 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 	ordered := planAccountsLocked(cfg, ready, session, now)
 	plannedNames := planNamesLocked(alias, names, explicit)
 	runtimeMu.Unlock()
-	attempts := buildAttempts(ordered, plannedNames, 1+cfg.retry(), suffix)
+	primaryNames := plannedNames
+	if len(primaryNames) > 1 {
+		primaryNames = primaryNames[:1]
+	}
+	attempts := buildAttempts(ordered, primaryNames, 1+cfg.retry(), suffix)
 	var fallbackAttempts []attempt
 	if canFallback {
 		// Cooldown only means the primary model was refused, so cooled accounts may still serve a fallback name.
@@ -1100,8 +1174,9 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 			return attemptResult{rewrite: errPost}
 		}
 		if status >= 200 && status < 300 {
-			if chatgptModelUnsupported(body) {
-				markModelCooldown(at.index, at.token, cfg.modelCooldown())
+			refused := chatgptModelUnsupported(body)
+			if refused {
+				markModelCooldown(at.index, at.token, cfg.modelCooldown(), cfg.StatsFile)
 			}
 			if stream && resp.streamID() == "" {
 				lastStatus = http.StatusBadGateway
@@ -1110,11 +1185,11 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 				noteRequest(false, 0, 0, 0, at.email)
 				continue
 			}
-			if cfg.RotationMode == "sticky" {
+			if cfg.RotationMode == "sticky" && !refused {
 				bindSticky(prepared.session, at.index, cfg.stickySeconds())
 			}
 			if cfg.RotationMode == "round-robin" {
-				pinRoundRobin(at.index, false)
+				pinRoundRobin(at.index, refused)
 			}
 			return attemptResult{
 				success: true,
@@ -1145,7 +1220,7 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 			return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, email: at.email, noted: true}
 		}
 		if chatgptModelUnsupported(body) {
-			markModelCooldown(at.index, at.token, cfg.modelCooldown())
+			markModelCooldown(at.index, at.token, cfg.modelCooldown(), cfg.StatsFile)
 		}
 		if modelUnavailable(body) {
 			modelMissing = true
@@ -1202,7 +1277,10 @@ func modelUnavailable(body []byte) bool {
 		return true
 	}
 	text := strings.ToLower(string(body))
-	return strings.Contains(text, "model_not_found") || (strings.Contains(text, "model") && strings.Contains(text, "does not exist"))
+	if strings.Contains(text, "model_not_found") {
+		return true
+	}
+	return modelDoesNotExist.MatchString(text)
 }
 
 // readStreamBody copies upstream bytes as-is, then closes the host stream.
@@ -1254,7 +1332,7 @@ func tokenKey(token string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func markModelCooldown(index, token string, d time.Duration) {
+func markModelCooldown(index, token string, d time.Duration, statsFile string) {
 	if d <= 0 || (index == "" && token == "") {
 		return
 	}
@@ -1271,9 +1349,8 @@ func markModelCooldown(index, token string, d time.Duration) {
 			runtime.cooldownToken[key] = until
 		}
 	}
-	path := cooldownFilePath(runtime.cfg.StatsFile)
 	runtimeMu.Unlock()
-	persistCooldowns(path)
+	persistCooldowns(cooldownFilePath(statsFile))
 }
 
 func ensureCooldownMapsLocked() {
@@ -1295,10 +1372,20 @@ func cooldownFilePath(statsFile string) string {
 
 func loadCooldowns(path string) {
 	if path == "" {
+		runtimeMu.Lock()
+		runtime.cooldownIndex = map[string]time.Time{}
+		runtime.cooldownToken = map[string]time.Time{}
+		runtimeMu.Unlock()
 		return
 	}
 	raw, errRead := os.ReadFile(path)
 	if errRead != nil || len(bytes.TrimSpace(raw)) == 0 {
+		if errRead == nil || os.IsNotExist(errRead) {
+			runtimeMu.Lock()
+			runtime.cooldownIndex = map[string]time.Time{}
+			runtime.cooldownToken = map[string]time.Time{}
+			runtimeMu.Unlock()
+		}
 		return
 	}
 	var records []cooldownRecord
@@ -1307,7 +1394,8 @@ func loadCooldowns(path string) {
 	}
 	now := nowFn()
 	runtimeMu.Lock()
-	ensureCooldownMapsLocked()
+	runtime.cooldownIndex = map[string]time.Time{}
+	runtime.cooldownToken = map[string]time.Time{}
 	for _, record := range records {
 		if !now.Before(record.Until) {
 			continue
@@ -1394,6 +1482,19 @@ func writeCooldownFile(path string, records []cooldownRecord) error {
 		return errRename
 	}
 	return nil
+}
+
+func clearSticky(index string) {
+	if index == "" {
+		return
+	}
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	for session, bind := range runtime.sticky {
+		if bind.authIndex == index {
+			delete(runtime.sticky, session)
+		}
+	}
 }
 
 func bindSticky(session, index string, seconds int) {
@@ -1483,7 +1584,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 		if len(used) > 0 {
 			token = used[len(used)-1]
 		}
-		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, cfg.modelCooldown())
+		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, cfg.modelCooldown(), cfg.StatsFile, cfg.RotationMode)
 		return okEnvelope(map[string]any{
 			"headers": responseHeaders(result.resp, "text/event-stream"),
 		})
@@ -1494,7 +1595,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 	return errorEnvelope("upstream_error", failureMessage(result.status, result.body, result.tokens), result.status), nil
 }
 
-func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email, index, token string, cooldown time.Duration) {
+func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email, index, token string, cooldown time.Duration, statsFile, rotation string) {
 	var buffer helps.StreamUsageBuffer
 	failed := false
 	errText := ""
@@ -1530,7 +1631,11 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 		}
 		if chatgptModelUnsupported(scan) {
 			cooledStream = true
-			markModelCooldown(index, token, cooldown)
+			markModelCooldown(index, token, cooldown, statsFile)
+			if rotation == "round-robin" {
+				pinRoundRobin(index, true)
+			}
+			clearSticky(index)
 		}
 	}
 	// One empty delta opens the client response immediately. Without it the
@@ -1807,7 +1912,7 @@ func tokenFromPath(path string) (string, bool, bool) {
 		cacheKey = path + "\x00" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "\x00" + strconv.FormatInt(info.Size(), 10)
 		if value, ok := plusFileCache.Load(cacheKey); ok {
 			cached := value.(cachedPlan)
-			return cached.token, cached.plus, true
+			return "", cached.plus, false
 		}
 	}
 	data, errRead := os.ReadFile(path)
@@ -1819,14 +1924,13 @@ func tokenFromPath(path string) (string, bool, bool) {
 		return "", false, false
 	}
 	if cacheKey != "" {
-		plusFileCache.Store(cacheKey, cachedPlan{token: token, plus: plus})
+		plusFileCache.Store(cacheKey, cachedPlan{plus: plus})
 	}
 	return token, plus, true
 }
 
 type cachedPlan struct {
-	token string
-	plus  bool
+	plus bool
 }
 
 func readAuth(callbackID, index string) (string, bool, error) {
@@ -2060,14 +2164,7 @@ func stickyOrderLocked(cfg pluginConfig, primary []account, session string, now 
 		start = runtime.stickyCursor % len(primary)
 		runtime.stickyCursor++
 	}
-	ordered := rotateAccounts(primary, start)
-	if session != "" && len(ordered) > 0 {
-		runtime.sticky[session] = stickyBind{
-			authIndex: ordered[0].index,
-			until:     now.Add(time.Duration(cfg.stickySeconds()) * time.Second),
-		}
-	}
-	return ordered
+	return rotateAccounts(primary, start)
 }
 
 func accountIndex(accounts []account, index string) int {
@@ -2149,25 +2246,33 @@ func buildAttempts(accounts []account, names []string, budget int, suffix string
 	}
 	used := make(map[string]struct{}, accountCount*nameCount)
 	out := make([]attempt, 0, budget)
-	add := func(item account, nameIndex int) {
+	add := func(item account, nameIndex int, repeat bool) {
 		if len(out) >= budget {
 			return
 		}
 		name := names[nameIndex]
 		key := item.index + "\x00" + name
-		if _, ok := used[key]; ok {
-			return
+		if !repeat {
+			if _, ok := used[key]; ok {
+				return
+			}
+			used[key] = struct{}{}
 		}
-		used[key] = struct{}{}
 		out = append(out, attempt{index: item.index, token: item.token, email: item.email, model: name + suffix})
 	}
-	limit := accountCount * nameCount
-	for step := 0; step < limit && len(out) < budget; step++ {
-		add(accounts[step%accountCount], step%nameCount)
+	// The first name spends the budget across accounts. Later names are used only
+	// when that budget is not exhausted, which is how fallback lists walk in order.
+	for step := 0; step < accountCount && len(out) < budget; step++ {
+		add(accounts[step], 0, false)
 	}
-	for nameIndex := 0; nameIndex < nameCount && len(out) < budget; nameIndex++ {
+	if nameCount == 1 {
+		for len(out) < budget {
+			add(accounts[len(out)%accountCount], 0, true)
+		}
+	}
+	for nameIndex := 1; nameIndex < nameCount && len(out) < budget; nameIndex++ {
 		for accountIndex := 0; accountIndex < accountCount && len(out) < budget; accountIndex++ {
-			add(accounts[accountIndex], nameIndex)
+			add(accounts[accountIndex], nameIndex, false)
 		}
 	}
 	return out

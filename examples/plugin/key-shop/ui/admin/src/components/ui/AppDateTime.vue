@@ -94,7 +94,7 @@ function choose(date: Date) {
   if (date.getMonth() !== month.value.getMonth()) month.value = new Date(date.getFullYear(), date.getMonth(), 1)
 }
 function apply() {
-  if (!valid.value) return
+  if (props.disabled || !valid.value) return
   const [year, monthPart, day] = keyOf(selected.value).split('-').map(Number)
   const next = new Date(year, (monthPart ?? 1) - 1, day, Number(hours.value), Number(minutes.value))
   emit('update:modelValue', toLocalInput(next))

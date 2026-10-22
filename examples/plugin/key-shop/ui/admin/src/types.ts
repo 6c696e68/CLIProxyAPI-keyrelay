@@ -3,7 +3,9 @@ export type ThemeName = 'light' | 'dark'
 export type KeyStatus = 'active' | 'disabled' | 'expired' | 'exhausted'
 export type RequestStatus = 'succeeded' | 'failed' | 'pending' | 'rejected' | 'canceled'
 export type PolicyMode = 'full' | 'custom'
-export type AdminRoute = 'dashboard' | 'groups' | 'keys' | 'requests'
+export type AdminRoute = 'dashboard' | 'groups' | 'keys' | 'requests' | 'tunnels'
+export type TunnelKind = 'token' | 'quick'
+export type TunnelStatus = 'running' | 'starting' | 'stopped' | 'failed'
 export type UsageBucket = 'hour' | 'day'
 
 export interface KeyRecord {
@@ -211,6 +213,23 @@ export interface CreateDraft {
   unlimitedTokens: boolean
   requestLimit: number
   unlimitedRequests: boolean
+  tunnelEnabled: boolean
+  tunnelTarget: string
+  requestId?: string
+}
+
+export interface CreatedTunnel {
+  id: string
+  name: string
+  status: string
+  publicUrl: string
+  endpoint: string
+  error: string
+}
+
+export interface CreateResult {
+  secrets: string[]
+  tunnel: CreatedTunnel | null
 }
 
 export interface EditDraft {
@@ -240,6 +259,45 @@ export interface BulkPatch {
   unlimitedRequests?: boolean
 }
 
+export interface CloudflaredInfo {
+  found: boolean
+  path: string
+  version: string
+}
+
+export interface Tunnel {
+  id: string
+  name: string
+  kind: TunnelKind
+  targetUrl: string
+  hasToken: boolean
+  tokenHint: string
+  autostart: boolean
+  desired: 'running' | 'stopped'
+  status: TunnelStatus
+  pid: number
+  publicUrl: string
+  lastError: string
+  restarts: number
+  startedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface TunnelDraft {
+  id?: string
+  name: string
+  kind: TunnelKind
+  targetUrl: string
+  token: string
+  autostart: boolean
+}
+
+export interface TunnelList {
+  tunnels: Tunnel[]
+  cloudflared: CloudflaredInfo
+}
+
 export interface AdminService {
   pageSize: number
   authenticate(secret: string): Promise<void>
@@ -252,7 +310,7 @@ export interface AdminService {
   removeGroup(id: string, scenario?: Scenario): Promise<void>
   catalog(scenario?: Scenario): Promise<string[]>
   keys(query: KeysQuery, scenario?: Scenario): Promise<{ keys: KeyRecord[]; total: number }>
-  create(draft: CreateDraft, scenario?: Scenario): Promise<string[]>
+  create(draft: CreateDraft, scenario?: Scenario): Promise<CreateResult>
   update(draft: EditDraft, scenario?: Scenario): Promise<void>
   setEnabled(id: string, enabled: boolean, scenario?: Scenario): Promise<void>
   rotate(id: string, scenario?: Scenario): Promise<string>
@@ -261,4 +319,10 @@ export interface AdminService {
   bulkUpdate(ids: string[], patch: BulkPatch, scenario?: Scenario): Promise<number>
   bulkDelete(ids: string[], scenario?: Scenario): Promise<number>
   requests(query: RequestQuery, scenario?: Scenario): Promise<RequestPage>
+  tunnels(scenario?: Scenario): Promise<TunnelList>
+  saveTunnel(draft: TunnelDraft, scenario?: Scenario): Promise<Tunnel>
+  removeTunnel(id: string, scenario?: Scenario): Promise<void>
+  startTunnel(id: string, scenario?: Scenario): Promise<Tunnel>
+  stopTunnel(id: string, scenario?: Scenario): Promise<Tunnel>
+  tunnelLogs(id: string, lines?: number, scenario?: Scenario): Promise<string[]>
 }

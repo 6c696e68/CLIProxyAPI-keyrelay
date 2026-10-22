@@ -16,6 +16,8 @@ export function defaultCreateDraft(groupId = ''): CreateDraft {
     unlimitedTokens: false,
     requestLimit: 0,
     unlimitedRequests: true,
+    tunnelEnabled: false,
+    tunnelTarget: '',
   }
 }
 

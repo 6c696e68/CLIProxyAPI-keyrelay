@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -105,6 +106,113 @@ func TestBulkCreateReturnsEachSecretAndPersistsTheBatch(t *testing.T) {
 	}
 	if !strings.Contains(string(listedEnv.Result.Body), `"Label":"November-`) {
 		t.Fatal("bulk-created keys were not persisted")
+	}
+}
+
+func TestDuplicateCreateWithSameRequestIDYieldsOneSet(t *testing.T) {
+	svc := testService(t)
+	body := `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"group_id":"all-models","count":2,"label":"Once","request_id":"client-1"}}`
+	first := call(t, svc, "management.handle", body)
+	second := call(t, svc, "management.handle", body)
+	secrets := func(raw []byte) []string {
+		t.Helper()
+		var env struct {
+			Result struct {
+				Body []byte
+			}
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			t.Fatal(err)
+		}
+		var created struct {
+			Keys []struct {
+				Secret string
+			}
+		}
+		if err := json.Unmarshal(env.Result.Body, &created); err != nil {
+			t.Fatal(err)
+		}
+		out := make([]string, 0, len(created.Keys))
+		for _, item := range created.Keys {
+			out = append(out, item.Secret)
+		}
+		return out
+	}
+	a, b := secrets(first), secrets(second)
+	if len(a) != 2 || len(b) != 2 || a[0] != b[0] || a[1] != b[1] {
+		t.Fatalf("duplicate create minted a new set: %v vs %v", a, b)
+	}
+	listed := call(t, svc, "management.handle", `{"Method":"GET","Path":"/plugins/key-shop/keys"}`)
+	var listedEnv struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(listed, &listedEnv); err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Total int
+	}
+	if err := json.Unmarshal(listedEnv.Result.Body, &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 2 {
+		t.Fatalf("expected one batch of two keys, total %d", page.Total)
+	}
+	other := call(t, svc, "management.handle", `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"group_id":"all-models","count":1,"label":"Again","request_id":"client-2"}}`)
+	if secrets(other)[0] == a[0] {
+		t.Fatal("a different request id replayed the first batch")
+	}
+}
+
+func TestOverlappingCreateWithSameRequestIDYieldsOneSet(t *testing.T) {
+	svc := testService(t)
+	body := `{"Method":"POST","Path":"/plugins/key-shop/keys/bulk","Body":{"group_id":"all-models","count":2,"label":"Race","request_id":"race-1"}}`
+	started := make(chan struct{})
+	var wg sync.WaitGroup
+	raw := make([][]byte, 2)
+	for i := range raw {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-started
+			out, err := svc.Call("management.handle", []byte(body))
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			raw[i] = out
+		}(i)
+	}
+	close(started)
+	wg.Wait()
+	ids := map[string]struct{}{}
+	for _, item := range raw {
+		var env struct {
+			Result struct {
+				Body []byte
+			}
+		}
+		if err := json.Unmarshal(item, &env); err != nil {
+			t.Fatal(err)
+		}
+		var created struct {
+			Keys []struct {
+				Key struct {
+					ID string
+				}
+			}
+		}
+		if err := json.Unmarshal(env.Result.Body, &created); err != nil || len(created.Keys) != 2 {
+			t.Fatalf("overlapping create did not return one set: %s", env.Result.Body)
+		}
+		for _, key := range created.Keys {
+			ids[key.Key.ID] = struct{}{}
+		}
+	}
+	if len(ids) != 2 {
+		t.Fatalf("overlapping create minted %d keys, want 2", len(ids))
 	}
 }
 

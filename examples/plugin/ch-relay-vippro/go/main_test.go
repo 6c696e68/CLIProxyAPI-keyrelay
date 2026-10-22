@@ -738,6 +738,37 @@ models:
 	}
 }
 
+func TestExplicitThinkingWithoutLevelsDoesNotInherit(t *testing.T) {
+	setup(t)
+	mustConfigure(t, `
+enabled: true
+models:
+  - name: gpt-6-sol
+    alias: gpt-6-sol
+    max-context-length: 128000
+    input-modalities: [text, image]
+    output-modalities: [text]
+    force-mapping: true
+    thinking:
+      min: 0
+      max: 100
+`)
+	var listed pluginapi.ModelResponse
+	if err := json.Unmarshal(callOK(t, pluginabi.MethodModelStatic, map[string]any{}), &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Models) != 1 {
+		t.Fatalf("models = %+v", listed.Models)
+	}
+	got := listed.Models[0]
+	if got.ContextLength != 128000 || strings.Join(got.SupportedInputModalities, ",") != "text,image" || strings.Join(got.SupportedOutputModalities, ",") != "text" {
+		t.Fatalf("catalog fields = %+v", got)
+	}
+	if got.Thinking == nil || got.Thinking.Min != 0 || got.Thinking.Max != 100 || len(got.Thinking.Levels) != 0 {
+		t.Fatalf("thinking = %+v", got.Thinking)
+	}
+}
+
 func TestUnconfiguredModelInheritsCanonicalThinkingLevels(t *testing.T) {
 	setup(t)
 	mustConfigure(t, `
@@ -808,9 +839,10 @@ models:
 }
 
 func TestAliasPool(t *testing.T) {
-	t.Run("retry switches name then next request starts there", func(t *testing.T) {
+	t.Run("retry stays on the first name then the next request rotates", func(t *testing.T) {
 		f := setup(t)
 		f.codex("1", tokenA, "free", nil)
+		f.codex("2", tokenB, "free", nil)
 		f.scripts = []httpScript{{status: http.StatusInternalServerError}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
 		mustConfigure(t, `
 enabled: true
@@ -826,7 +858,7 @@ models:
 		if err := json.Unmarshal(callOK(t, pluginabi.MethodModelStatic, map[string]any{}), &listed); err != nil {
 			t.Fatal(err)
 		}
-		if len(listed.Models) != 1 || listed.Models[0].ID != "gpt" || listed.Models[0].Name != "alpha" {
+		if len(listed.Models) != 1 || listed.Models[0].ID != "gpt" || listed.Models[0].Name != "gpt" || !strings.Contains(listed.Models[0].Description, "alpha") || !strings.Contains(listed.Models[0].Description, "beta") {
 			t.Fatalf("catalog = %+v", listed.Models)
 		}
 		mustExec(t, "openai", "gpt", []byte(`{"model":"gpt","n":1}`))
@@ -834,7 +866,7 @@ models:
 		if len(calls) != 2 {
 			t.Fatalf("calls = %d", len(calls))
 		}
-		if !strings.Contains(string(calls[0].Body), `"model":"alpha"`) || !strings.Contains(string(calls[1].Body), `"model":"beta"`) {
+		if !strings.Contains(string(calls[0].Body), `"model":"alpha"`) || !strings.Contains(string(calls[1].Body), `"model":"alpha"`) {
 			t.Fatalf("bodies = %s | %s", calls[0].Body, calls[1].Body)
 		}
 		if !strings.Contains(string(calls[0].Body), `"n":1`) {
@@ -844,6 +876,27 @@ models:
 		calls = f.httpCalls(t)
 		if len(calls) != 3 || !strings.Contains(string(calls[2].Body), `"model":"beta"`) {
 			t.Fatalf("next start = %s", calls[len(calls)-1].Body)
+		}
+	})
+
+	t.Run("one account retries the same upstream name", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "free", nil)
+		f.scripts = []httpScript{{status: http.StatusInternalServerError}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, `
+enabled: true
+request-retry: 1
+plus-preference: off
+models:
+  - name: alpha
+    alias: gpt
+  - name: beta
+    alias: gpt
+`)
+		mustExec(t, "openai", "gpt", []byte(`{"model":"gpt"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || requestModel(t, calls[0]) != "alpha" || requestModel(t, calls[1]) != "alpha" {
+			t.Fatalf("bodies = %s | %s", calls[0].Body, calls[len(calls)-1].Body)
 		}
 	})
 
@@ -1055,6 +1108,39 @@ models:
 		}
 	})
 
+	t.Run("a failed first account does not stick", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("1", tokenA, "free", nil)
+		f.codex("2", tokenB, "free", nil)
+		f.scripts = []httpScript{{status: http.StatusBadGateway, body: []byte(`{"error":"down"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, strings.Replace(yml, "request-retry: 0", "request-retry: 1", 1))
+		req := execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		req.Metadata = map[string]any{"execution_session_id": "sess-a"}
+		callOK(t, pluginabi.MethodExecutorExecute, req)
+		callOK(t, pluginabi.MethodExecutorExecute, req)
+		calls := f.httpCalls(t)
+		if len(calls) < 3 || bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[len(calls)-1]) != "Bearer "+tokenB {
+			t.Fatalf("failed account stuck, calls=%d last=%s", len(calls), bearer(t, calls[len(calls)-1]))
+		}
+	})
+
+	t.Run("zero sticky seconds leaves no bind", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("1", tokenA, "free", nil)
+		mustConfigure(t, strings.Replace(yml, "sticky-seconds: 300", "sticky-seconds: 0", 1))
+		req := execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		req.Metadata = map[string]any{"execution_session_id": "sess-a"}
+		callOK(t, pluginabi.MethodExecutorExecute, req)
+		runtimeMu.Lock()
+		binds := len(runtime.sticky)
+		runtimeMu.Unlock()
+		if binds != 0 {
+			t.Fatalf("sticky binds = %d", binds)
+		}
+	})
+
 	t.Run("unavailable sticky account is replaced without sleeping", func(t *testing.T) {
 		f := setup(t)
 		nowFn = func() time.Time { return start }
@@ -1075,6 +1161,18 @@ models:
 			t.Fatalf("replacement bearers = %s %s", bearer(t, calls[0]), bearer(t, calls[1]))
 		}
 	})
+}
+
+func TestClassifyCountsModelCooldown(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	markModelCooldown("1", tokenA, time.Hour, "")
+	kind, plus := classifyEnabled(f.files[0], "cb", now)
+	if kind != kindCooling || plus {
+		t.Fatalf("cooled classify = %v plus=%v", kind, plus)
+	}
 }
 
 func TestPlusPreference(t *testing.T) {
@@ -1098,12 +1196,9 @@ func TestPlusPreference(t *testing.T) {
 		f.codex("2", tokenB, "team", nil)
 		f.scripts = []httpScript{{status: http.StatusTooManyRequests, body: []byte(`{"error":"rate_limit"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
 		mustConfigure(t, "enabled: true\nplus-preference: prefer\nrequest-retry: 1\n"+models)
-		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
-		if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusTooManyRequests {
-			t.Fatalf("prefer 429 = %+v", env.Error)
-		}
+		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
 		calls := f.httpCalls(t)
-		if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenA {
+		if len(calls) != 2 || bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenA {
 			t.Fatalf("prefer stayed on plus = %#v", calls)
 		}
 	})
@@ -1351,6 +1446,94 @@ models:
 	})
 }
 
+func TestHTTP200ModelRefusalDoesNotPin(t *testing.T) {
+	const unsupported = `{"detail":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}`
+	f := setup(t)
+	f.codex("1", tokenA, "free", nil)
+	f.codex("2", tokenB, "free", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusOK, body: []byte(unsupported)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: round-robin
+request-retry: 0
+model-cooldown-minutes: 0
+models:
+  - name: gpt-5.4
+    alias: gpt-5.4
+`)
+	mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 || bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenB {
+		t.Fatalf("next bearer stayed, calls=%d", len(calls))
+	}
+
+	f2 := setup(t)
+	f2.codex("1", tokenA, "free", nil)
+	f2.codex("2", tokenB, "free", nil)
+	f2.scripts = []httpScript{{status: http.StatusOK, body: []byte(unsupported)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: sticky
+sticky-seconds: 300
+request-retry: 0
+model-cooldown-minutes: 0
+models:
+  - name: gpt-5.4
+    alias: gpt-5.4
+`)
+	req := execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	req.Metadata = map[string]any{"execution_session_id": "sess-refuse"}
+	callOK(t, pluginabi.MethodExecutorExecute, req)
+	runtimeMu.Lock()
+	_, bound := runtime.sticky["sess-refuse"]
+	runtimeMu.Unlock()
+	if bound {
+		t.Fatal("refused account was bound sticky")
+	}
+}
+
+func TestPlusFileCacheDoesNotReuseToken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	write := func(token string) {
+		t.Helper()
+		body := []byte(`{"access_token":"` + token + `","plan_type":"plus"}`)
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const first = "tok-account-a"
+	const second = "tok-account-c"
+	write(first)
+	f := setup(t)
+	f.codex("1", second, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Path = path })
+	mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\nmodels:\n  - {name: gpt-5.4, alias: gpt-5.4}\n")
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	write(second)
+	mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+	calls := f.httpCalls(t)
+	gets := 0
+	for _, call := range f.snapshot() {
+		if call.method == pluginabi.MethodHostAuthGet {
+			gets++
+		}
+	}
+	if gets < 1 || len(calls) != 2 || bearer(t, calls[1]) != "Bearer "+second {
+		t.Fatalf("gets=%d second bearer = %s", gets, bearer(t, calls[1]))
+	}
+}
+
 func TestChatGPTModelCooldown(t *testing.T) {
 	f := setup(t)
 	start := time.Date(2026, 10, 10, 0, 0, 0, 0, time.UTC)
@@ -1529,6 +1712,20 @@ models:
 	calls := f2.httpCalls(t)
 	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenB {
 		t.Fatalf("restarted cooldown bearer, calls=%d", len(calls))
+	}
+
+	f3 := setup(t)
+	nowFn = func() time.Time { return start.Add(time.Hour) }
+	f3.codex("1", tokenA, "plus", nil)
+	mustConfigure(t, "enabled: true\nstats-file: \"\"\nmodels:\n  - {name: gpt-6-astra, alias: gpt-6-astra}\n")
+	if cooled("1", tokenA, nowFn()) {
+		t.Fatal("empty stats-file kept the previous cooldown")
+	}
+
+	other := filepath.Join(t.TempDir(), "other-stats.json")
+	mustConfigure(t, "enabled: true\nstats-file: "+strconv.Quote(other)+"\nmodels:\n  - {name: gpt-6-astra, alias: gpt-6-astra}\n")
+	if cooled("1", tokenA, nowFn()) {
+		t.Fatal("missing cooldown sidecar kept the previous cooldown")
 	}
 }
 
@@ -2502,6 +2699,76 @@ models:
 		}
 	})
 
+	t.Run("a missing response id does not start fallback", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(`{"error":"response id does not exist"}`)}}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(primaryBody)))
+		calls := f.httpCalls(t)
+		if env.OK || len(calls) != 1 || requestModel(t, calls[0]) != "primary-model" {
+			t.Fatalf("calls=%d", len(calls))
+		}
+	})
+
+	t.Run("fallback retry walks later names after the first", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusBadRequest, body: []byte(`{"error":{"code":"model_not_found"}}`)},
+			{status: http.StatusBadRequest, body: []byte(`{"error":{"code":"model_not_found"}}`)},
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 3
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model", "third-model"]
+`)
+		mustExec(t, "openai", "primary-model", []byte(primaryBody))
+		calls := f.httpCalls(t)
+		if len(calls) != 3 || requestModel(t, calls[1]) != "other-model" || requestModel(t, calls[2]) != "third-model" {
+			t.Fatalf("calls=%d bodies=%s %s", len(calls), calls[1].Body, calls[len(calls)-1].Body)
+		}
+	})
+
+	t.Run("model does not exist starts fallback", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusBadRequest, body: []byte(`{"error":"model gpt-x does not exist"}`)},
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+		mustExec(t, "openai", "primary-model", []byte(primaryBody))
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || requestModel(t, calls[1]) != "other-model" {
+			t.Fatalf("calls=%d", len(calls))
+		}
+	})
+
 	t.Run("model error switches to fallback after primary accounts", func(t *testing.T) {
 		f := setup(t)
 		f.codex("1", tokenA, "plus", nil)
@@ -2550,7 +2817,7 @@ models:
     alias: primary-model
     fallback: ["other-model"]
 `)
-		markModelCooldown("1", tokenA, time.Hour)
+		markModelCooldown("1", tokenA, time.Hour, "")
 		mustExec(t, "openai", "primary-model", []byte(primaryBody))
 		calls := f.httpCalls(t)
 		if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "other-model" {
@@ -2570,7 +2837,7 @@ models:
     alias: primary-model
     fallback: ["other-model"]
 `)
-		markModelCooldown("1", tokenA, time.Hour)
+		markModelCooldown("1", tokenA, time.Hour, "")
 		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(primaryBody)))
 		if env.OK || env.Error == nil || env.Error.Code != "accounts_cooling" || len(f.httpCalls(t)) != 0 {
 			t.Fatalf("env=%+v", env.Error)

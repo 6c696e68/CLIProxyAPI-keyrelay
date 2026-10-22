@@ -1,10 +1,14 @@
 <script setup lang="ts">
 import { onBeforeUnmount, watch } from 'vue'
 
-const props = defineProps<{ open: boolean; title: string; kicker?: string; wide?: boolean }>()
+const props = defineProps<{ open: boolean; title: string; kicker?: string; wide?: boolean; locked?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
+function requestClose() {
+  if (props.locked) return
+  emit('close')
+}
 function onKey(event: KeyboardEvent) {
-  if (event.key === 'Escape') emit('close')
+  if (event.key === 'Escape') requestClose()
 }
 watch(() => props.open, (value) => {
   document.body.style.overflow = value ? 'hidden' : ''
@@ -18,7 +22,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-if="open" class="modal-scrim" @click.self="emit('close')">
+  <div v-if="open" class="modal-scrim" @click.self="requestClose">
     <div class="modal" :class="{ wide }" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <p v-if="kicker" class="page-kicker">{{ kicker }}</p>
       <h2 id="modal-title" class="section-title" :class="{ 'mt-1': kicker }">{{ title }}</h2>

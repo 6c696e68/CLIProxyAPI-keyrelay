@@ -20,11 +20,13 @@ import RequestCounts from '@/components/ui/RequestCounts.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
 import { useKeysQuery } from '@/composables/useKeysQuery'
 import { useSelection } from '@/composables/useSelection'
-import { notifyKey, refreshKey } from '@/composables/useToast'
+import { useLoadGuard } from '@/composables/useLoadGuard'
+import { useSubmitGuard } from '@/composables/useSubmitGuard'
+import { bindViewBusy, notifyKey, refreshKey } from '@/composables/useToast'
 import { toLocalInput, ttlSecondsFromLocal } from '@/lib/datetime'
 import { defaultCreateDraft, rememberGroup, rememberedGroup } from '@/lib/drafts'
 import { copyText, formatNumber, pageRange, quota, randomLabel, splitWhen } from '@/lib/format'
-import type { AdminService, CreateDraft, EditDraft, KeyRecord, ModelGroup, Scenario } from '@/types'
+import type { AdminService, CreateDraft, CreatedTunnel, EditDraft, KeyRecord, ModelGroup, Scenario } from '@/types'
 
 const props = withDefaults(defineProps<{ service: AdminService; scenario?: Scenario }>(), { scenario: 'ready' })
 const notify = inject(notifyKey, () => {})
@@ -33,7 +35,10 @@ const groups = ref<ModelGroup[]>([])
 const keys = ref<KeyRecord[]>([])
 const total = ref(0)
 const error = ref('')
-const loading = ref(false)
+const { loading, load: runLoad } = useLoadGuard()
+const { pending: acting, guard } = useSubmitGuard()
+bindViewBusy(() => loading.value || acting.value)
+const copying = ref(false)
 const { query, status, group, page } = useKeysQuery(() => { void load() })
 const selection = useSelection()
 const bulkGroup = ref('')
@@ -42,8 +47,10 @@ const editOpen = ref(false)
 const confirming = ref<KeyRecord | null>(null)
 const statusTarget = ref<KeyRecord | null>(null)
 const secrets = ref<string[]>([])
+const createdTunnel = ref<CreatedTunnel | null>(null)
 const secretOpen = ref(false)
 const createDraft = ref<CreateDraft>(defaultCreateDraft())
+const createRequestId = ref('')
 const editDraft = ref<EditDraft | null>(null)
 const expiryOpen = ref(false)
 const limitsOpen = ref(false)
@@ -74,12 +81,12 @@ function reasons(key: KeyRecord) {
   return [key.requestLimitReached ? 'Request limit' : '', key.tokenLimitReached ? 'Token limit' : ''].filter(Boolean).join(' · ')
 }
 
-async function load() {
+function load() {
+  return runLoad(async () => {
   if (props.scenario === 'loading') {
     keys.value = []
     return
   }
-  loading.value = true
   error.value = ''
   try {
     const [list, nextGroups] = await Promise.all([
@@ -92,24 +99,31 @@ async function load() {
     if (!bulkGroup.value) bulkGroup.value = rememberedGroup(nextGroups.map((item) => item.id))
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Request failed'
-  } finally {
-    loading.value = false
   }
+  })
 }
 async function run(action: () => Promise<void>, message: string) {
-  try {
-    await action()
-    await load()
-    notify(message)
-  } catch (err) {
-    notify(err instanceof Error ? err.message : 'Request failed')
-  }
+  let ok = false
+  await guard(async () => {
+    try {
+      await action()
+      await load()
+      notify(message)
+      ok = true
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Request failed')
+    }
+  })
+  return ok
 }
 function openCreate() {
+  if (acting.value) return
   createDraft.value = defaultCreateDraft(rememberedGroup(groups.value.map((item) => item.id)))
+  createRequestId.value = crypto.randomUUID()
   createOpen.value = true
 }
 function openEdit(key: KeyRecord) {
+  if (acting.value) return
   editDraft.value = {
     id: key.id,
     label: key.label,
@@ -125,23 +139,72 @@ function openEdit(key: KeyRecord) {
   }
   editOpen.value = true
 }
+async function copyOnce(text: string, ok: string) {
+  if (copying.value) return
+  copying.value = true
+  try {
+    notify((await copyText(text)) ? ok : 'Unable to copy')
+  } finally {
+    copying.value = false
+  }
+}
+function copyId() {
+  if (!editDraft.value) return
+  void copyOnce(editDraft.value.id, 'Key ID copied')
+}
+function copySecrets() {
+  void copyOnce(shareBlock(), 'Copied')
+}
+async function confirmStatus() {
+  const target = statusTarget.value
+  if (!target) return
+  const ok = await run(() => props.service.setEnabled(target.id, target.status === 'disabled', props.scenario), target.status === 'disabled' ? 'Key enabled' : 'Key disabled')
+  if (ok) statusTarget.value = null
+}
+async function confirmDelete() {
+  const target = confirming.value
+  if (!target) return
+  const ok = await run(() => props.service.remove(target.id, props.scenario), 'Key deleted')
+  if (!ok) return
+  selection.drop([target.id])
+  confirming.value = null
+}
+async function confirmBulkDelete() {
+  const ok = await applyBulk(() => props.service.bulkDelete(selection.selected.value, props.scenario), 'Keys deleted')
+  if (ok) deleteOpen.value = false
+}
+async function confirmExpiry() {
+  const ok = await applyBulk(() => props.service.bulkUpdate(selection.selected.value, expiryNever.value ? { neverExpires: true } : { ttlSeconds: ttlSecondsFromLocal(expiryLocal.value) }, props.scenario), 'Expiry updated')
+  if (ok) expiryOpen.value = false
+}
+function shareBlock() {
+  const endpoint = createdTunnel.value?.endpoint
+  if (!endpoint) return secrets.value.join('\n')
+  return secrets.value.map((secret) => `Endpoint: ${endpoint}\nKey: ${secret}\n`).join('\n')
+}
 async function createKeys() {
+  if (acting.value) return
   if (!createDraft.value.groupId) {
     notify('Choose a model group.')
     return
   }
-  try {
-    secrets.value = await props.service.create(createDraft.value, props.scenario)
-    rememberGroup(createDraft.value.groupId)
-    createOpen.value = false
-    secretOpen.value = true
-    notify(`Created ${secrets.value.length} key${secrets.value.length === 1 ? '' : 's'}`)
-    await load()
-  } catch (err) {
-    notify(err instanceof Error ? err.message : 'Create failed')
-  }
+  await guard(async () => {
+    try {
+      const created = await props.service.create({ ...createDraft.value, requestId: createRequestId.value }, props.scenario)
+      secrets.value = created.secrets
+      createdTunnel.value = created.tunnel
+      rememberGroup(createDraft.value.groupId)
+      createOpen.value = false
+      secretOpen.value = true
+      notify(`Created ${secrets.value.length} key${secrets.value.length === 1 ? '' : 's'}`)
+      await load()
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Create failed')
+    }
+  })
 }
 async function saveEdit() {
+  if (acting.value) return
   if (!editDraft.value) return
   if (!editDraft.value.groupId) {
     notify('Choose a model group.')
@@ -157,7 +220,8 @@ async function saveEdit() {
     editOpen.value = false
   }, 'Changes saved')
 }
-function applyLimits() {
+async function applyLimits() {
+  if (acting.value) return
   const patch: { tokenLimit?: number; unlimitedTokens?: boolean; requestLimit?: number; unlimitedRequests?: boolean } = {}
   if (limitTokens.value) {
     if (unlimitedTokens.value) patch.unlimitedTokens = true
@@ -167,20 +231,21 @@ function applyLimits() {
     if (unlimitedRequests.value) patch.unlimitedRequests = true
     else patch.requestLimit = requestLimit.value
   }
-  void applyBulk(() => props.service.bulkUpdate(selection.selected.value, patch, props.scenario), 'Limits updated').then((started) => { if (started) limitsOpen.value = false })
+  const ok = await applyBulk(() => props.service.bulkUpdate(selection.selected.value, patch, props.scenario), 'Limits updated')
+  if (ok) limitsOpen.value = false
 }
 async function applyBulk(action: () => Promise<number>, message: string) {
+  if (acting.value) return false
   const ids = [...selection.selected.value]
   if (!ids.length) return false
   if (ids.length > 500) {
     notify('Choose 500 keys or fewer.')
     return false
   }
-  await run(async () => {
+  return run(async () => {
     await action()
     selection.clear()
   }, message)
-  return true
 }
 watch(() => props.scenario, () => { void load() }, { immediate: true })
 watch(refreshTick, () => { void load() })
@@ -189,10 +254,10 @@ watch(refreshTick, () => { void load() })
 <template>
   <div>
     <PageHeader kicker="Access" title="Keys" copy="Issue keys into a model group. Secrets appear only after creation or rotation.">
-      <AppButton kind="primary" :disabled="!groups.length" @click="openCreate">Create keys</AppButton>
+      <AppButton kind="primary" :disabled="!groups.length || acting" @click="acting ? undefined : openCreate()">{{ acting ? 'Working...' : 'Create keys' }}</AppButton>
     </PageHeader>
     <p v-if="!loading && !groups.length" class="notice mb-4">Create a model group before issuing keys.</p>
-    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" @click="load">Retry</button></p>
+    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" :disabled="loading" @click="load">{{ loading ? 'Loading...' : 'Retry' }}</button></p>
     <section class="panel">
       <FilterBar>
         <AppTextInput v-model="query" placeholder="Search label, customer, or ID" />
@@ -230,9 +295,9 @@ watch(refreshTick, () => { void load() })
                   <td><template v-if="key.expiresAt"><time class="block text-sm" :datetime="key.expiresAt">{{ splitWhen(key.expiresAt).date }}</time><span class="sub">{{ splitWhen(key.expiresAt).time }}</span></template><template v-else>Never</template></td>
                   <td class="actions">
                     <div class="flex gap-1">
-                      <AppButton small @click="openEdit(key)">Edit</AppButton>
-                      <AppButton small @click="run(async () => { secrets = [await service.rotate(key.id, scenario)]; secretOpen = true }, 'Key rotated')">Rotate</AppButton>
-                      <AppButton small kind="danger" @click="confirming = key">Delete</AppButton>
+                      <AppButton small :disabled="acting" @click="openEdit(key)">Edit</AppButton>
+                      <AppButton small :disabled="acting" @click="run(async () => { secrets = [await service.rotate(key.id, scenario)]; createdTunnel = null; secretOpen = true }, 'Key rotated')">{{ acting ? 'Working...' : 'Rotate' }}</AppButton>
+                      <AppButton small kind="danger" :disabled="acting" @click="acting ? undefined : (confirming = key)">Delete</AppButton>
                     </div>
                   </td>
                 </tr>
@@ -256,20 +321,21 @@ watch(refreshTick, () => { void load() })
               <div class="kv col-span-2"><span>Requests</span><strong class="num">{{ quota(key.requestQuotaUsed, key.requestLimit) }}</strong></div>
             </div>
             <div class="mt-3 flex flex-wrap gap-2">
-              <AppButton small @click="openEdit(key)">Edit</AppButton>
-              <AppButton small @click="run(async () => { secrets = [await service.rotate(key.id, scenario)]; secretOpen = true }, 'Key rotated')">Rotate</AppButton>
-              <AppButton small kind="danger" @click="confirming = key">Delete</AppButton>
+              <AppButton small :disabled="acting" @click="openEdit(key)">Edit</AppButton>
+              <AppButton small :disabled="acting" @click="run(async () => { secrets = [await service.rotate(key.id, scenario)]; createdTunnel = null; secretOpen = true }, 'Key rotated')">{{ acting ? 'Working...' : 'Rotate' }}</AppButton>
+              <AppButton small kind="danger" :disabled="acting" @click="acting ? undefined : (confirming = key)">Delete</AppButton>
             </div>
           </article>
           <p v-if="!keys.length" class="record text-center text-sm text-[var(--ink-soft)]">No matching keys.</p>
         </div>
-        <Pager :note="pageRange(page, keys.length, total, service.pageSize)" :page="page" :has-more="hasMore" :disabled="loading" @prev="page -= 1" @next="page += 1" />
+        <Pager :note="pageRange(page, keys.length, total, service.pageSize)" :page="page" :has-more="hasMore" :disabled="loading || acting" @prev="page -= 1" @next="page += 1" />
         <BulkBar
           v-if="selection.count.value"
           v-model:group-id="bulkGroup"
           :count="selection.count.value"
           :groups="groups"
-          :disabled="loading"
+          :disabled="loading || acting"
+          :pending="acting"
           @apply-group="applyBulk(() => service.bulkUpdate(selection.selected.value, { groupId: bulkGroup }, scenario), 'Group updated')"
           @enable="applyBulk(() => service.bulkUpdate(selection.selected.value, { status: 'active' }, scenario), 'Keys enabled')"
           @disable="applyBulk(() => service.bulkUpdate(selection.selected.value, { status: 'disabled' }, scenario), 'Keys disabled')"
@@ -281,7 +347,7 @@ watch(refreshTick, () => { void load() })
       </template>
     </section>
 
-    <AppSheet :open="createOpen" title="Create keys" @close="createOpen = false">
+    <AppSheet :open="createOpen" title="Create keys" :locked="acting" @close="createOpen = false">
       <p class="section-copy">Create one key or a batch of up to 500. A group is required. The secret is shown once.</p>
       <form class="mt-4 grid gap-3" @submit.prevent="createKeys">
         <AppField label="Label" :hint="createDraft.count > 1 ? 'Batch labels get a short unique suffix.' : 'Saved exactly as typed.'">
@@ -301,15 +367,19 @@ watch(refreshTick, () => { void load() })
         <AppField label="Request limit"><AppNumberInput v-model="createDraft.requestLimit" :disabled="createDraft.unlimitedRequests" /></AppField>
         <AppCheckbox :checked="createDraft.unlimitedRequests" label="Unlimited requests" @toggle="createDraft.unlimitedRequests = !createDraft.unlimitedRequests" />
         <AppField label="Internal note"><AppTextInput v-model="createDraft.note" placeholder="Optional note" /></AppField>
-        <AppButton kind="primary" type="submit" :disabled="!createDraft.groupId">Create {{ createDraft.count || 1 }} key{{ createDraft.count === 1 ? '' : 's' }}</AppButton>
+        <AppSwitch :on="Boolean(createDraft.tunnelEnabled)" text="Create tunnel too" label="Create tunnel too" @toggle="createDraft.tunnelEnabled = !createDraft.tunnelEnabled" />
+        <AppField v-if="createDraft.tunnelEnabled" label="Tunnel target" hint="Leave blank to choose automatically. A quick tunnel URL changes when the tunnel restarts.">
+          <AppTextInput v-model="createDraft.tunnelTarget" placeholder="http://127.0.0.1:8317" />
+        </AppField>
+        <AppButton kind="primary" type="submit" :disabled="acting || !createDraft.groupId">{{ acting ? 'Creating...' : `Create ${createDraft.count || 1} key${createDraft.count === 1 ? '' : 's'}` }}</AppButton>
       </form>
     </AppSheet>
 
-    <AppSheet :open="editOpen" title="Edit key" @close="editOpen = false">
+    <AppSheet :open="editOpen" title="Edit key" :locked="acting" @close="editOpen = false">
       <template v-if="editDraft">
         <div class="rounded-[10px] border border-[var(--line)] bg-[var(--bg-float)] p-3">
           <div class="field-label">Key ID</div>
-          <div class="mt-1 flex items-start justify-between gap-3"><code class="num text-xs">{{ editDraft.id }}</code><AppButton small @click="copyText(editDraft.id).then((ok) => notify(ok ? 'Key ID copied' : 'Unable to copy'))">Copy</AppButton></div>
+          <div class="mt-1 flex items-start justify-between gap-3"><code class="num text-xs">{{ editDraft.id }}</code><AppButton small :disabled="copying" @click="copyId">{{ copying ? 'Copying...' : 'Copy' }}</AppButton></div>
         </div>
         <div class="mt-3 grid gap-3">
           <AppField label="Label"><AppTextInput v-model="editDraft.label" :maxlength="200" /></AppField>
@@ -325,8 +395,8 @@ watch(refreshTick, () => { void load() })
             <AppSegmented class="mt-1.5" :model-value="editDraft.status" label="Key status" :options="[{ value: 'active', label: 'Enabled' }, { value: 'disabled', label: 'Disabled' }]" @update:model-value="editDraft.status = $event as 'active' | 'disabled'" />
           </div>
           <div class="flex flex-wrap gap-2">
-            <AppButton kind="primary" @click="saveEdit">Save</AppButton>
-            <AppButton @click="run(() => service.resetUsage(editDraft!.id, scenario), 'Token usage reset')">Reset usage</AppButton>
+            <AppButton kind="primary" :disabled="acting" @click="saveEdit">{{ acting ? 'Saving...' : 'Save' }}</AppButton>
+            <AppButton :disabled="acting" @click="run(() => service.resetUsage(editDraft!.id, scenario), 'Token usage reset')">{{ acting ? 'Working...' : 'Reset usage' }}</AppButton>
           </div>
         </div>
       </template>
@@ -334,39 +404,41 @@ watch(refreshTick, () => { void load() })
 
     <AppModal :open="secretOpen" title="Copy the secret" @close="secretOpen = false">
       <p class="section-copy">This secret is shown once. Store it before closing.</p>
-      <pre class="secret mt-3">{{ secrets.join('\n') }}</pre>
-      <AppButton class="mt-3" @click="copyText(secrets.join('\n')).then((ok) => notify(ok ? 'Secrets copied' : 'Unable to copy'))">Copy secrets</AppButton>
+      <p v-if="createdTunnel?.error" class="alert mt-3" role="alert">Keys were created, but the tunnel was not. {{ createdTunnel.error }}</p>
+      <pre class="secret mt-3">{{ shareBlock() }}</pre>
+      <p v-if="createdTunnel?.endpoint" class="sub mt-2">A quick tunnel URL changes when the tunnel restarts.</p>
+      <AppButton class="mt-3" :disabled="copying" @click="copySecrets">{{ copying ? 'Copying...' : (createdTunnel?.endpoint ? 'Copy all' : 'Copy secrets') }}</AppButton>
     </AppModal>
-    <AppModal :open="Boolean(statusTarget)" kicker="Confirm" :title="statusTarget?.status === 'disabled' ? 'Enable this key?' : 'Disable this key?'" @close="statusTarget = null">
+    <AppModal :open="Boolean(statusTarget)" kicker="Confirm" :title="statusTarget?.status === 'disabled' ? 'Enable this key?' : 'Disable this key?'" :locked="acting" @close="statusTarget = null">
       <p class="section-copy">“{{ statusTarget?.label }}” will {{ statusTarget?.status === 'disabled' ? 'be allowed to call again' : 'stop accepting calls until you enable it' }}.</p>
       <div class="mt-5 flex justify-end gap-2">
-        <AppButton @click="statusTarget = null">Cancel</AppButton>
-        <AppButton kind="primary" @click="run(() => service.setEnabled(statusTarget!.id, statusTarget!.status === 'disabled', scenario), statusTarget!.status === 'disabled' ? 'Key enabled' : 'Key disabled').then(() => statusTarget = null)">Confirm</AppButton>
+        <AppButton :disabled="acting" @click="statusTarget = null">Cancel</AppButton>
+        <AppButton kind="primary" :disabled="acting" @click="confirmStatus">{{ acting ? 'Working...' : 'Confirm' }}</AppButton>
       </div>
     </AppModal>
-    <AppModal :open="Boolean(confirming)" kicker="Confirm" title="Delete this key?" @close="confirming = null">
+    <AppModal :open="Boolean(confirming)" kicker="Confirm" title="Delete this key?" :locked="acting" @close="confirming = null">
       <p class="section-copy">“{{ confirming?.label }}” will stop working immediately.</p>
       <div class="mt-5 flex justify-end gap-2">
-        <AppButton @click="confirming = null">Cancel</AppButton>
-        <AppButton kind="danger" @click="run(() => service.remove(confirming!.id, scenario), 'Key deleted').then(() => { selection.drop([confirming!.id]); confirming = null })">Delete key</AppButton>
+        <AppButton :disabled="acting" @click="confirming = null">Cancel</AppButton>
+        <AppButton kind="danger" :disabled="acting" @click="confirmDelete">{{ acting ? 'Deleting...' : 'Delete key' }}</AppButton>
       </div>
     </AppModal>
-    <AppModal :open="deleteOpen" kicker="Confirm" :title="`Delete ${selection.count.value} keys?`" @close="deleteOpen = false">
+    <AppModal :open="deleteOpen" kicker="Confirm" :title="`Delete ${selection.count.value} keys?`" :locked="acting" @close="deleteOpen = false">
       <p class="section-copy">{{ selection.count.value }} selected keys will stop working immediately. This cannot be undone.</p>
       <div class="mt-5 flex justify-end gap-2">
-        <AppButton @click="deleteOpen = false">Cancel</AppButton>
-        <AppButton kind="danger" @click="applyBulk(() => service.bulkDelete(selection.selected.value, scenario), 'Keys deleted').then((started) => { if (started) deleteOpen = false })">Delete {{ selection.count.value }} keys</AppButton>
+        <AppButton :disabled="acting" @click="deleteOpen = false">Cancel</AppButton>
+        <AppButton kind="danger" :disabled="acting" @click="confirmBulkDelete">{{ acting ? 'Deleting...' : `Delete ${selection.count.value} keys` }}</AppButton>
       </div>
     </AppModal>
-    <AppModal :open="expiryOpen" title="Set expiry" @close="expiryOpen = false">
+    <AppModal :open="expiryOpen" title="Set expiry" :locked="acting" @close="expiryOpen = false">
       <p class="section-copy">Applies to {{ selection.count.value }} selected keys. Other fields stay unchanged.</p>
       <div class="mt-3 grid gap-3">
         <AppField label="Expires at"><AppDateTime v-model="expiryLocal" :disabled="expiryNever" /></AppField>
         <AppSwitch :on="expiryNever" text="Never expires" label="Never expires" @toggle="expiryNever = !expiryNever" />
-        <AppButton kind="primary" @click="applyBulk(() => service.bulkUpdate(selection.selected.value, expiryNever ? { neverExpires: true } : { ttlSeconds: ttlSecondsFromLocal(expiryLocal) }, scenario), 'Expiry updated').then((started) => { if (started) expiryOpen = false })">Apply expiry</AppButton>
+        <AppButton kind="primary" :disabled="acting" @click="confirmExpiry">{{ acting ? 'Saving...' : 'Apply expiry' }}</AppButton>
       </div>
     </AppModal>
-    <AppModal :open="limitsOpen" title="Set limits" @close="limitsOpen = false">
+    <AppModal :open="limitsOpen" title="Set limits" :locked="acting" @close="limitsOpen = false">
       <p class="section-copy">Only the checked limits are sent for {{ selection.count.value }} keys.</p>
       <div class="mt-3 grid gap-3">
         <AppCheckbox :checked="limitTokens" label="Update token limit" @toggle="limitTokens = !limitTokens" />
@@ -375,7 +447,7 @@ watch(refreshTick, () => { void load() })
         <AppCheckbox :checked="limitRequests" label="Update request limit" @toggle="limitRequests = !limitRequests" />
         <AppNumberInput v-model="requestLimit" :disabled="!limitRequests || unlimitedRequests" />
         <AppCheckbox :checked="unlimitedRequests" label="Unlimited requests" :disabled="!limitRequests" @toggle="unlimitedRequests = !unlimitedRequests" />
-        <AppButton kind="primary" :disabled="!limitTokens && !limitRequests" @click="applyLimits">Apply limits</AppButton>
+        <AppButton kind="primary" :disabled="acting || (!limitTokens && !limitRequests)" @click="applyLimits">{{ acting ? 'Saving...' : 'Apply limits' }}</AppButton>
       </div>
     </AppModal>
   </div>

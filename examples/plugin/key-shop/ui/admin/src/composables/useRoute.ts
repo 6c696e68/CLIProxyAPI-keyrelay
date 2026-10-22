@@ -5,7 +5,7 @@ const route = ref<AdminRoute>(readRoute())
 
 function readRoute(): AdminRoute {
   const hash = window.location.hash.replace(/^#\/?/, '').split(/[?#]/)[0]
-  if (hash === 'groups' || hash === 'keys' || hash === 'requests') return hash
+  if (hash === 'groups' || hash === 'keys' || hash === 'requests' || hash === 'tunnels') return hash
   return 'dashboard'
 }
 

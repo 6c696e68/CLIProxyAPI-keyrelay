@@ -20,6 +20,7 @@ function applyTheme(value: ThemeName) {
   localStorage.setItem('keyshop.admin.theme', value)
 }
 async function submit(value: string, remember: boolean) {
+  if (loading.value) return
   loading.value = true
   error.value = ''
   try {

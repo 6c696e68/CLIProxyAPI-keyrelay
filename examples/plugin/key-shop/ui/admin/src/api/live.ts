@@ -1,8 +1,8 @@
 import { ttlSecondsFromLocal } from '@/lib/datetime'
 import { bulkPayload } from '@/lib/bulk'
-import type { AdminService, BulkPatch, CreateDraft, EditDraft, GroupInput, KeysQuery, Policy, RequestQuery, Scenario, UsageQuery } from '@/types'
+import type { AdminService, BulkPatch, CreateDraft, CreatedTunnel, EditDraft, GroupInput, KeysQuery, Policy, RequestQuery, Scenario, TunnelDraft, UsageQuery } from '@/types'
 import { managementJSON, managementRequest } from './http'
-import { mapDiscoveredModels, mapGroup, mapKey, mapPolicyModels, mapRequest, mapStats, mapSummary, mapUsage } from './map'
+import { mapDiscoveredModels, mapGroup, mapKey, mapPolicyModels, mapRequest, mapStats, mapSummary, mapTunnel, mapUsage } from './map'
 import { asRecord, pickNumber, pickString } from './pick'
 
 const ROOT = '/v0/management/plugins/key-shop'
@@ -10,6 +10,19 @@ const KEYS_PATH = `${ROOT}/keys`
 const POLICY_PATH = '/v8/management/config/plugins/configs/key-shop'
 const ACCESS_KEYS_PATH = '/v8/management/config/access/api-keys'
 const PAGE_SIZE = 25
+
+function mapCreatedTunnel(raw: unknown): CreatedTunnel | null {
+  const row = asRecord(raw)
+  if (!row || (!pickString(row, 'id') && !pickString(row, 'error') && !pickString(row, 'endpoint'))) return null
+  return {
+    id: pickString(row, 'id'),
+    name: pickString(row, 'name'),
+    status: pickString(row, 'status'),
+    publicUrl: pickString(row, 'public_url'),
+    endpoint: pickString(row, 'endpoint'),
+    error: pickString(row, 'error'),
+  }
+}
 
 function queryString(params: Record<string, string | number | undefined>): string {
   const search = new URLSearchParams()
@@ -27,8 +40,8 @@ export function createLiveAdminService(): AdminService {
   let loadedConfig: Record<string, unknown> = {}
   let policyLoaded = false
 
-  async function call(method: string, path: string, body?: unknown) {
-    return managementRequest(secret, method, path, body)
+  async function call(method: string, path: string, body?: unknown, timeoutMs?: number) {
+    return managementRequest(secret, method, path, body, timeoutMs)
   }
 
   function savedAccessKeys(payload: unknown): string[] {
@@ -175,9 +188,9 @@ export function createLiveAdminService(): AdminService {
       const keys = Array.isArray(data.keys) ? data.keys.map(mapKey) : []
       return { keys, total: pickNumber(data, 'total') || keys.length }
     },
-    async create(draft: CreateDraft, _scenario?: Scenario): Promise<string[]> {
+    async create(draft: CreateDraft, _scenario?: Scenario) {
       const count = Math.min(500, Math.max(1, Number(draft.count) || 1))
-      const body = {
+      const body: Record<string, unknown> = {
         label: draft.label,
         customer: draft.customer,
         note: draft.note,
@@ -189,10 +202,16 @@ export function createLiveAdminService(): AdminService {
         never_expires: draft.neverExpires,
         unlimited_tokens: draft.unlimitedTokens,
         unlimited_requests: draft.unlimitedRequests,
+        ...(draft.requestId ? { request_id: draft.requestId } : {}),
       }
-      const data = await call('POST', count === 1 ? KEYS_PATH : `${KEYS_PATH}/bulk`, body)
-      if (typeof data.secret === 'string' && data.secret) return [data.secret]
-      return Array.isArray(data.keys) ? data.keys.map((item) => pickString(asRecord(item), 'Secret', 'secret')).filter(Boolean) : []
+      if (draft.tunnelEnabled) {
+        body.tunnel = { enabled: true, ...(draft.tunnelTarget?.trim() ? { target_url: draft.tunnelTarget.trim() } : {}) }
+      }
+      const data = await call('POST', count === 1 ? KEYS_PATH : `${KEYS_PATH}/bulk`, body, 30000)
+      const secrets = typeof data.secret === 'string' && data.secret
+        ? [data.secret]
+        : Array.isArray(data.keys) ? data.keys.map((item) => pickString(asRecord(item), 'Secret', 'secret')).filter(Boolean) : []
+      return { secrets, tunnel: mapCreatedTunnel(data.tunnel) }
     },
     async update(draft: EditDraft, _scenario?: Scenario) {
       await call('POST', `${KEYS_PATH}/update`, {
@@ -251,6 +270,51 @@ export function createLiveAdminService(): AdminService {
         total: pickNumber(data, 'total'),
         summary: mapSummary(data.summary),
       }
+    },
+    async tunnels(_scenario?: Scenario) {
+      const data = await call('GET', `${ROOT}/tunnels`)
+      const info = asRecord(data.cloudflared)
+      return {
+        tunnels: Array.isArray(data.tunnels) ? data.tunnels.map(mapTunnel) : [],
+        cloudflared: {
+          found: Boolean(info.found),
+          path: pickString(info, 'path'),
+          version: pickString(info, 'version'),
+        },
+      }
+    },
+    async saveTunnel(draft: TunnelDraft, _scenario?: Scenario) {
+      const token = draft.token.trim()
+      if (draft.id) {
+        const body: Record<string, unknown> = {
+          id: draft.id,
+          name: draft.name.trim(),
+          target_url: draft.targetUrl.trim(),
+          autostart: draft.autostart,
+        }
+        if (token) body.token = token
+        return mapTunnel(await call('POST', `${ROOT}/tunnels/update`, body))
+      }
+      return mapTunnel(await call('POST', `${ROOT}/tunnels`, {
+        name: draft.name.trim(),
+        kind: draft.kind,
+        target_url: draft.targetUrl.trim(),
+        token,
+        autostart: draft.autostart,
+      }))
+    },
+    async removeTunnel(id: string, _scenario?: Scenario) {
+      await call('POST', `${ROOT}/tunnels/delete`, { id })
+    },
+    async startTunnel(id: string, _scenario?: Scenario) {
+      return mapTunnel(await call('POST', `${ROOT}/tunnels/start`, { id }))
+    },
+    async stopTunnel(id: string, _scenario?: Scenario) {
+      return mapTunnel(await call('POST', `${ROOT}/tunnels/stop`, { id }))
+    },
+    async tunnelLogs(id: string, lines = 200, _scenario?: Scenario) {
+      const data = await call('GET', `${ROOT}/tunnels/logs${queryString({ id, lines })}`)
+      return Array.isArray(data.lines) ? data.lines.map((line) => String(line)) : []
     },
   }
 }

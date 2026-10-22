@@ -2,7 +2,7 @@ import { ApiError } from '@/lib/api-error'
 import { groupModelProblems } from '@/lib/group-models'
 import { bulkPayload } from '@/lib/bulk'
 import { availableModels, seedGroups, seedKeys, seedPolicyModels, seedRequests } from '@/mock/fixtures'
-import type { AdminService, BulkPatch, CreateDraft, EditDraft, GroupInput, KeyRecord, KeysQuery, ModelEntry, ModelGroup, Policy, RequestPage, RequestQuery, RequestRow, RequestSummary, Scenario, Stats, UsageQuery, UsageRank, UsageReport } from '@/types'
+import type { AdminService, BulkPatch, CreateDraft, EditDraft, GroupInput, KeyRecord, KeysQuery, ModelEntry, ModelGroup, Policy, RequestPage, RequestQuery, RequestRow, RequestSummary, Scenario, Stats, Tunnel, TunnelDraft, UsageQuery, UsageRank, UsageReport } from '@/types'
 
 const PAGE_SIZE = 5
 
@@ -113,6 +113,24 @@ export function createAdminService(): AdminService {
   const keys = clone(seedKeys)
   const requests = stampRecent(clone(seedRequests))
   const groups = clone(seedGroups)
+  const tunnels: Tunnel[] = [{
+    id: 'tn_demo00000001',
+    name: 'edge',
+    kind: 'quick',
+    targetUrl: 'http://127.0.0.1:8319',
+    hasToken: false,
+    tokenHint: '',
+    autostart: false,
+    desired: 'running',
+    status: 'running',
+    pid: 4242,
+    publicUrl: 'https://demo.trycloudflare.com',
+    lastError: '',
+    restarts: 0,
+    startedAt: '2026-10-20T00:00:00Z',
+    createdAt: '2026-10-20T00:00:00Z',
+    updatedAt: '2026-10-20T00:00:00Z',
+  }]
   let policy: Policy = { mode: 'custom', models: clone(seedPolicyModels), loaded: true }
 
   function syncCounts() {
@@ -316,7 +334,10 @@ export function createAdminService(): AdminService {
         secrets.push(secret)
       }
       syncCounts()
-      return secrets
+      const tunnel = draft.tunnelEnabled
+        ? { id: 'tn_mocktunnel01', name: 'key-mock', status: 'running', publicUrl: 'https://demo.trycloudflare.com', endpoint: 'https://demo.trycloudflare.com/v1', error: '' }
+        : null
+      return { secrets, tunnel }
     },
     async update(draft: EditDraft, scenario?: Scenario) {
       assertWritable(scenario)
@@ -414,6 +435,86 @@ export function createAdminService(): AdminService {
         total: matched.length,
         summary: summarize(matched),
       }
+    },
+    async tunnels(scenario?: Scenario) {
+      assertReadable(scenario)
+      if (scenario === 'empty') return { tunnels: [], cloudflared: { found: false, path: '', version: '' } }
+      return { tunnels: clone(tunnels), cloudflared: { found: true, path: '/usr/local/bin/cloudflared', version: '2026.1.0' } }
+    },
+    async saveTunnel(draft: TunnelDraft, scenario?: Scenario) {
+      assertWritable(scenario)
+      const name = draft.name.trim()
+      if (!name || name.length > 64) throw new Error('invalid name')
+      const clash = tunnels.find((item) => item.name.toLowerCase() === name.toLowerCase() && item.id !== draft.id)
+      if (clash) throw new ApiError('duplicate name', 409)
+      if (draft.id) {
+        const row = tunnels.find((item) => item.id === draft.id)
+        if (!row) throw new ApiError('unknown id', 404)
+        row.name = name
+        row.targetUrl = draft.targetUrl.trim()
+        row.autostart = draft.autostart
+        if (draft.token.trim()) {
+          row.hasToken = true
+          row.tokenHint = draft.token.trim().slice(-4)
+        }
+        row.updatedAt = new Date().toISOString()
+        return clone(row)
+      }
+      if (tunnels.length >= 20) throw new ApiError('tunnel limit reached', 409)
+      if (draft.kind === 'token' && draft.token.trim().length < 20) throw new Error('invalid token')
+      if (draft.kind === 'quick' && !draft.targetUrl.trim()) throw new Error('invalid target_url')
+      const row: Tunnel = {
+        id: `tn_${fakeSecret().slice(3, 15)}`,
+        name,
+        kind: draft.kind,
+        targetUrl: draft.targetUrl.trim(),
+        hasToken: draft.kind === 'token',
+        tokenHint: draft.kind === 'token' ? draft.token.trim().slice(-4) : '',
+        autostart: draft.autostart,
+        desired: 'stopped',
+        status: 'stopped',
+        pid: 0,
+        publicUrl: '',
+        lastError: '',
+        restarts: 0,
+        startedAt: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      tunnels.unshift(row)
+      return clone(row)
+    },
+    async removeTunnel(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const index = tunnels.findIndex((item) => item.id === id)
+      if (index < 0) throw new ApiError('unknown id', 404)
+      tunnels.splice(index, 1)
+    },
+    async startTunnel(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const row = tunnels.find((item) => item.id === id)
+      if (!row) throw new ApiError('unknown id', 404)
+      if (row.status === 'running') throw new ApiError('already running', 409)
+      row.status = 'running'
+      row.desired = 'running'
+      row.pid = 4242
+      row.startedAt = new Date().toISOString()
+      if (row.kind === 'quick') row.publicUrl = 'https://demo.trycloudflare.com'
+      return clone(row)
+    },
+    async stopTunnel(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const row = tunnels.find((item) => item.id === id)
+      if (!row) throw new ApiError('unknown id', 404)
+      row.status = 'stopped'
+      row.desired = 'stopped'
+      row.pid = 0
+      return clone(row)
+    },
+    async tunnelLogs(id: string, lines = 200, scenario?: Scenario) {
+      assertReadable(scenario)
+      if (!tunnels.some((item) => item.id === id)) throw new ApiError('unknown id', 404)
+      return ['cloudflared mock ready', 'https://demo.trycloudflare.com'].slice(0, lines)
     },
   }
 }

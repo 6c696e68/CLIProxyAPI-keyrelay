@@ -7,7 +7,9 @@ import AppField from '@/components/ui/AppField.vue'
 import AppModal from '@/components/ui/AppModal.vue'
 import AppSheet from '@/components/ui/AppSheet.vue'
 import AppTextInput from '@/components/ui/AppTextInput.vue'
-import { notifyKey, refreshKey } from '@/composables/useToast'
+import { useLoadGuard } from '@/composables/useLoadGuard'
+import { useSubmitGuard } from '@/composables/useSubmitGuard'
+import { bindViewBusy, notifyKey, refreshKey } from '@/composables/useToast'
 import { ApiError } from '@/lib/api-error'
 import { formatNumber } from '@/lib/format'
 import { groupModelProblems } from '@/lib/group-models'
@@ -20,13 +22,16 @@ const groups = ref<ModelGroup[]>([])
 const policy = ref<Policy | null>(null)
 const catalog = ref<string[]>([])
 const error = ref('')
-const loading = ref(false)
+const { loading, load: runLoad } = useLoadGuard()
+const opening = ref(false)
 const editorOpen = ref(false)
 const editing = ref<ModelGroup | null>(null)
 const name = ref('')
 const description = ref('')
 const models = ref<ModelEntry[]>([])
-const saving = ref(false)
+const { pending: saving, guard: guardSave } = useSubmitGuard()
+const { pending: deleting, guard: guardDelete } = useSubmitGuard()
+bindViewBusy(() => loading.value || saving.value || deleting.value)
 const pendingDelete = ref<ModelGroup | null>(null)
 const deleteError = ref('')
 
@@ -34,12 +39,12 @@ const customPolicy = computed(() => policy.value?.loaded && policy.value.mode ==
 const aliasProblems = computed(() => groupModelProblems(models.value))
 const aliasInvalid = computed(() => Object.keys(aliasProblems.value).length > 0)
 
-async function load() {
+function load() {
+  return runLoad(async () => {
   if (props.scenario === 'loading') {
     groups.value = []
     return
   }
-  loading.value = true
   error.value = ''
   try {
     const [nextGroups, nextPolicy] = await Promise.all([
@@ -50,30 +55,35 @@ async function load() {
     policy.value = nextPolicy
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Request failed'
-  } finally {
-    loading.value = false
   }
+  })
 }
 
 async function openCreate() {
+  if (opening.value) return
+  opening.value = true
   editing.value = null
   name.value = ''
   description.value = ''
   models.value = []
   editorOpen.value = true
   catalog.value = await props.service.catalog(props.scenario).catch(() => [])
+  opening.value = false
 }
 async function openEdit(group: ModelGroup) {
-  if (group.isSystem) return
+  if (group.isSystem || opening.value) return
+  opening.value = true
   editing.value = group
   name.value = group.name
   description.value = group.description
   models.value = group.models.map((item) => ({ name: item.name, alias: item.alias }))
   editorOpen.value = true
   catalog.value = await props.service.catalog(props.scenario).catch(() => [])
+  opening.value = false
 }
 async function save() {
-  saving.value = true
+  if (saving.value || deleting.value) return
+  await guardSave(async () => {
   try {
     await props.service.saveGroup({
       id: editing.value?.id,
@@ -87,28 +97,30 @@ async function save() {
     await load()
   } catch (err) {
     notify(err instanceof Error ? err.message : 'Group could not be saved')
-  } finally {
-    saving.value = false
   }
+  })
 }
 async function remove() {
-  if (!pendingDelete.value) return
+  const target = pendingDelete.value
+  if (!target || saving.value) return
   deleteError.value = ''
-  try {
-    await props.service.removeGroup(pendingDelete.value.id, props.scenario)
-    notify('Group deleted')
-    pendingDelete.value = null
-    await load()
-  } catch (err) {
-    if (err instanceof ApiError && err.status === 409) {
-      const count = err.keyCount
-      deleteError.value = count == null
-        ? err.message
-        : `This group is used by ${count} key${count === 1 ? '' : 's'} and cannot be deleted.`
-      return
+  await guardDelete(async () => {
+    try {
+      await props.service.removeGroup(target.id, props.scenario)
+      notify('Group deleted')
+      pendingDelete.value = null
+      await load()
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        const count = err.keyCount
+        deleteError.value = count == null
+          ? err.message
+          : `This group is used by ${count} key${count === 1 ? '' : 's'} and cannot be deleted.`
+        return
+      }
+      deleteError.value = err instanceof Error ? err.message : 'Group could not be deleted'
     }
-    deleteError.value = err instanceof Error ? err.message : 'Group could not be deleted'
-  }
+  })
 }
 watch(() => props.scenario, () => { void load() }, { immediate: true })
 watch(refreshTick, () => { void load() })
@@ -117,10 +129,10 @@ watch(refreshTick, () => { void load() })
 <template>
   <div>
     <PageHeader kicker="Access" title="Model groups" copy="Each new key must belong to one group. A selected model can have a client alias.">
-      <AppButton kind="primary" @click="openCreate">New group</AppButton>
+      <AppButton kind="primary" :disabled="opening" @click="openCreate">{{ opening ? 'Loading...' : 'New group' }}</AppButton>
     </PageHeader>
     <p v-if="customPolicy" class="notice mb-4" role="status">Global model policy is custom. A key can call a model only when both this group and the global policy allow it.</p>
-    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" @click="load">Retry</button></p>
+    <p v-if="error" class="alert mb-4" role="alert">{{ error }} <button class="btn btn-sm btn-danger ml-2" type="button" :disabled="loading" @click="load">{{ loading ? 'Loading...' : 'Retry' }}</button></p>
     <section class="panel">
       <p v-if="loading && !groups.length" role="status">Loading groups…</p>
       <template v-else>
@@ -139,8 +151,8 @@ watch(refreshTick, () => { void load() })
                   <td class="num text-right">{{ formatNumber(group.keyCount) }}</td>
                   <td class="actions">
                     <div class="flex gap-1">
-                      <AppButton small :disabled="group.isSystem" @click="openEdit(group)">Edit</AppButton>
-                      <AppButton small kind="danger" :disabled="group.isSystem" @click="pendingDelete = group; deleteError = ''">Delete</AppButton>
+                      <AppButton small :disabled="group.isSystem || opening" @click="openEdit(group)">{{ opening ? 'Loading...' : 'Edit' }}</AppButton>
+                      <AppButton small kind="danger" :disabled="group.isSystem || deleting || saving" @click="(deleting || saving) ? undefined : (pendingDelete = group, deleteError = '')">Delete</AppButton>
                     </div>
                   </td>
                 </tr>
@@ -158,8 +170,8 @@ watch(refreshTick, () => { void load() })
               <div class="kv"><span>Keys</span><strong class="num">{{ formatNumber(group.keyCount) }}</strong></div>
             </div>
             <div class="mt-3 flex gap-2">
-              <AppButton small :disabled="group.isSystem" @click="openEdit(group)">Edit</AppButton>
-              <AppButton small kind="danger" :disabled="group.isSystem" @click="pendingDelete = group; deleteError = ''">Delete</AppButton>
+              <AppButton small :disabled="group.isSystem || opening" @click="openEdit(group)">{{ opening ? 'Loading...' : 'Edit' }}</AppButton>
+              <AppButton small kind="danger" :disabled="group.isSystem || deleting || saving" @click="(deleting || saving) ? undefined : (pendingDelete = group, deleteError = '')">Delete</AppButton>
             </div>
           </article>
           <p v-if="!groups.length" class="record text-center text-sm text-[var(--ink-soft)]">No model groups yet.</p>
@@ -167,23 +179,23 @@ watch(refreshTick, () => { void load() })
       </template>
     </section>
 
-    <AppSheet wide :open="editorOpen" :title="editing ? 'Edit group' : 'New group'" @close="editorOpen = false">
+    <AppSheet wide :open="editorOpen" :title="editing ? 'Edit group' : 'New group'" :locked="saving || deleting" @close="editorOpen = false">
       <form class="grid gap-3" @submit.prevent="save">
         <AppField label="Name" hint="1–80 characters. The built-in All models group cannot be edited.">
           <AppTextInput v-model="name" :maxlength="80" placeholder="vippro" />
         </AppField>
         <AppField label="Description"><AppTextInput v-model="description" placeholder="Optional" /></AppField>
         <ModelPicker v-model="models" :catalog="catalog" :problems="aliasProblems" />
-        <AppButton kind="primary" type="submit" :disabled="saving || !name.trim() || !models.length || aliasInvalid">{{ editing ? 'Save group' : 'Create group' }}</AppButton>
+        <AppButton kind="primary" type="submit" :disabled="saving || deleting || !name.trim() || !models.length || aliasInvalid">{{ saving ? 'Saving...' : (editing ? 'Save group' : 'Create group') }}</AppButton>
       </form>
     </AppSheet>
 
-    <AppModal :open="Boolean(pendingDelete)" kicker="Confirm" title="Delete this group?" @close="pendingDelete = null">
+    <AppModal :open="Boolean(pendingDelete)" kicker="Confirm" title="Delete this group?" :locked="deleting" @close="pendingDelete = null">
       <p class="section-copy">“{{ pendingDelete?.name }}” will be removed. Keys that still use it block the delete.</p>
       <p v-if="deleteError" class="alert mt-3" role="alert">{{ deleteError }}</p>
       <div class="mt-5 flex justify-end gap-2">
-        <AppButton @click="pendingDelete = null">Cancel</AppButton>
-        <AppButton kind="danger" @click="remove">Delete group</AppButton>
+        <AppButton :disabled="deleting" @click="pendingDelete = null">Cancel</AppButton>
+        <AppButton kind="danger" :disabled="deleting" @click="remove">{{ deleting ? 'Deleting...' : 'Delete group' }}</AppButton>
       </div>
     </AppModal>
   </div>

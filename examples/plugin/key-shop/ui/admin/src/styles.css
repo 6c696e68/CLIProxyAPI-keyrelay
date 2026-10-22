@@ -508,8 +508,16 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .drawer-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr)); gap: 12px; }
 .model-row { display: flex; width: 100%; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-radius: 8px; background: transparent; padding: 8px; text-align: left; }
 .model-row:hover { background: var(--bg-muted); }
-.model-selected { min-width: 0; }
-.model-alias { width: 9.5rem; min-width: 0; flex: 0 1 9.5rem; }
+.model-selected { min-width: 0; border-top: 1px solid var(--line); }
+.model-selected:first-child { border-top: 0; }
+.model-selected-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px 8px; padding: 8px; border-radius: 8px; }
+.model-selected-row:hover { background: var(--bg-muted); }
+.model-selected-row:focus-within { box-shadow: inset 0 0 0 2px var(--ink); }
+.model-selected-name { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.35; }
+.model-alias { width: 100%; min-width: 0; }
+.control.model-alias, .model-remove { height: 32px; min-height: 32px; }
+.control.model-alias { padding-block: 4px; }
+.model-remove { padding-inline: 8px; }
 .model-alias-error { margin: 0 8px 6px; color: var(--bad); font-size: 12px; }
 .check-col { width: 44px; }
 .check-icon-only { position: relative; display: inline-flex; }
@@ -518,3 +526,34 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .text-link-card { color: inherit; text-decoration: none; }
 .data-table tr.clickable:focus-visible td { box-shadow: inset 0 0 0 2px var(--ink); }
 .workspace, .content { overflow-x: clip; }
+
+/* Mobile menu floats bottom-left so it does not cover the host top toolbar. */
+@media (max-width: 767px) {
+  .topbar.only-mobile {
+    position: fixed;
+    top: auto;
+    left: max(16px, env(safe-area-inset-left));
+    bottom: max(16px, env(safe-area-inset-bottom));
+    z-index: 35;
+    width: max-content;
+    max-width: 56px;
+    margin: 0;
+    padding: 0;
+  }
+  .topbar.only-mobile .icon-btn { width: 44px; min-width: 44px; min-height: 44px; }
+  .content { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
+}
+
+/* Sheet Close floats bottom-right on mobile so the host top toolbar cannot cover it. */
+@media (max-width: 767px) {
+  .sheet-close {
+    position: fixed;
+    right: max(16px, env(safe-area-inset-right));
+    bottom: max(16px, env(safe-area-inset-bottom));
+    z-index: 65;
+    min-width: 72px;
+    min-height: 44px;
+    box-shadow: var(--float-shadow);
+  }
+  .sheet { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
+}

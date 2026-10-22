@@ -12,13 +12,23 @@ import (
 )
 
 type Service struct {
-	store *Store
-	admin []byte
-	dash  []byte
+	store   *Store
+	admin   []byte
+	dash    []byte
+	tunnels *TunnelManager
+	replay  createReplay
 }
 
 func NewService(store *Store, admin, dash []byte) *Service {
 	return &Service{store: store, admin: admin, dash: dash}
+}
+
+// SetTunnelManager attaches the process manager used by tunnel routes.
+func (s *Service) SetTunnelManager(m *TunnelManager) {
+	if s == nil {
+		return
+	}
+	s.tunnels = m
 }
 
 func (s *Service) Call(method string, request []byte) ([]byte, error) {
@@ -41,6 +51,9 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 					{"Name": "deleted_retention_days", "Type": "integer", "Default": 90, "Description": "How long deleted key metadata is kept"},
 					{"Name": "model_access_mode", "Type": "enum", "EnumValues": []string{"full", "custom"}, "Default": "full", "Description": "Models available to ck_ customer keys"},
 					{"Name": "models", "Type": "array", "Description": "Custom model entries with name and optional client alias"},
+					{"Name": "cloudflared_path", "Type": "string", "Description": "Path to cloudflared. Empty looks up cloudflared in PATH"},
+					{"Name": "tunnels_enabled", "Type": "bool", "Default": true, "Description": "When false, tunnel routes return 404 and no child is spawned"},
+					{"Name": "tunnel_target_url", "Type": "string", "Description": "Default quick-tunnel target when creating a key with a tunnel"},
 				},
 			},
 			"capabilities": map[string]any{
@@ -458,6 +471,13 @@ func (s *Service) routes() map[string]any {
 			{"Method": "POST", "Path": "/plugins/key-shop/groups"},
 			{"Method": "POST", "Path": "/plugins/key-shop/groups/update"},
 			{"Method": "POST", "Path": "/plugins/key-shop/groups/delete"},
+			{"Method": "GET", "Path": "/plugins/key-shop/tunnels"},
+			{"Method": "POST", "Path": "/plugins/key-shop/tunnels"},
+			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/update"},
+			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/delete"},
+			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/start"},
+			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/stop"},
+			{"Method": "GET", "Path": "/plugins/key-shop/tunnels/logs"},
 		},
 		"resources": []map[string]string{
 			{"Path": "/admin", "Menu": "API Keys", "Description": "Create and manage client API keys"},
@@ -486,9 +506,9 @@ func (s *Service) manage(payload []byte) map[string]any {
 	case strings.HasSuffix(path, "/api/session"):
 		return s.session(req.Headers, req.Query)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodPost:
-		return s.create(body)
+		return s.create(body, req.Headers)
 	case strings.HasSuffix(path, "/keys/bulk") && req.Method == http.MethodPost:
-		return s.createBulk(body)
+		return s.createBulk(body, req.Headers)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodGet:
 		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryOne(req.Query, "group"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
 	case strings.HasSuffix(path, "/keys/bulk-update"):
@@ -503,6 +523,20 @@ func (s *Service) manage(payload []byte) map[string]any {
 		return s.updateGroup(body)
 	case strings.HasSuffix(path, "/groups/delete"):
 		return s.deleteGroup(body)
+	case strings.HasSuffix(path, "/tunnels/logs") && req.Method == http.MethodGet:
+		return s.tunnelLogs(queryOne(req.Query, "id"), queryInt(req.Query, "lines", 200))
+	case strings.HasSuffix(path, "/tunnels") && req.Method == http.MethodGet:
+		return s.listTunnels()
+	case strings.HasSuffix(path, "/tunnels") && req.Method == http.MethodPost:
+		return s.createTunnel(body)
+	case strings.HasSuffix(path, "/tunnels/update") && req.Method == http.MethodPost:
+		return s.updateTunnel(body)
+	case strings.HasSuffix(path, "/tunnels/delete") && req.Method == http.MethodPost:
+		return s.deleteTunnel(body)
+	case strings.HasSuffix(path, "/tunnels/start") && req.Method == http.MethodPost:
+		return s.startTunnel(body)
+	case strings.HasSuffix(path, "/tunnels/stop") && req.Method == http.MethodPost:
+		return s.stopTunnel(body)
 	case strings.HasSuffix(path, "/keys/update"):
 		return s.update(body)
 	case strings.HasSuffix(path, "/keys/rotate"):
@@ -522,16 +556,39 @@ func (s *Service) manage(payload []byte) map[string]any {
 	}
 }
 
-func (s *Service) create(body []byte) map[string]any {
+func (s *Service) create(body []byte, headers map[string][]string) map[string]any {
+	return s.once(clientRequestID(body), func() map[string]any {
+		return s.createFresh(body, headers)
+	})
+}
+
+func (s *Service) once(id string, create func() map[string]any) map[string]any {
+	for {
+		cached, wait, owner := s.replay.begin(id)
+		if cached != nil {
+			return cached
+		}
+		if !owner {
+			<-wait
+			continue
+		}
+		resp := create()
+		s.replay.finish(id, resp)
+		return resp
+	}
+}
+
+func (s *Service) createFresh(body []byte, headers map[string][]string) map[string]any {
 	var in struct {
 		Label, Customer, Note string
-		TTLSeconds            int64  `json:"ttl_seconds"`
-		NeverExpires          bool   `json:"never_expires"`
-		TokenLimit            int64  `json:"token_limit"`
-		UnlimitedTokens       bool   `json:"unlimited_tokens"`
-		RequestLimit          int64  `json:"request_limit"`
-		UnlimitedRequests     bool   `json:"unlimited_requests"`
-		GroupID               string `json:"group_id"`
+		TTLSeconds            int64      `json:"ttl_seconds"`
+		NeverExpires          bool       `json:"never_expires"`
+		TokenLimit            int64      `json:"token_limit"`
+		UnlimitedTokens       bool       `json:"unlimited_tokens"`
+		RequestLimit          int64      `json:"request_limit"`
+		UnlimitedRequests     bool       `json:"unlimited_requests"`
+		GroupID               string     `json:"group_id"`
+		Tunnel                *tunnelOpt `json:"tunnel"`
 	}
 	if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, &in) != nil {
 		return textResponse(http.StatusBadRequest, "bad json")
@@ -556,20 +613,31 @@ func (s *Service) create(body []byte) map[string]any {
 		}
 		return textResponse(http.StatusInternalServerError, "create failed")
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"key": key, "secret": secret})
+	payload := map[string]any{"key": key, "secret": secret}
+	if in.Tunnel != nil && in.Tunnel.Enabled {
+		payload["tunnel"] = s.attachKeyTunnel(key.Label, key.ID, in.Tunnel.TargetURL, headers)
+	}
+	return jsonResponse(http.StatusOK, payload)
 }
 
-func (s *Service) createBulk(body []byte) map[string]any {
+func (s *Service) createBulk(body []byte, headers map[string][]string) map[string]any {
+	return s.once(clientRequestID(body), func() map[string]any {
+		return s.createBulkFresh(body, headers)
+	})
+}
+
+func (s *Service) createBulkFresh(body []byte, headers map[string][]string) map[string]any {
 	var in struct {
 		Label, Customer, Note, LabelTemplate string
-		Count                                int    `json:"count"`
-		TTLSeconds                           int64  `json:"ttl_seconds"`
-		NeverExpires                         bool   `json:"never_expires"`
-		TokenLimit                           int64  `json:"token_limit"`
-		UnlimitedTokens                      bool   `json:"unlimited_tokens"`
-		RequestLimit                         int64  `json:"request_limit"`
-		UnlimitedRequests                    bool   `json:"unlimited_requests"`
-		GroupID                              string `json:"group_id"`
+		Count                                int        `json:"count"`
+		TTLSeconds                           int64      `json:"ttl_seconds"`
+		NeverExpires                         bool       `json:"never_expires"`
+		TokenLimit                           int64      `json:"token_limit"`
+		UnlimitedTokens                      bool       `json:"unlimited_tokens"`
+		RequestLimit                         int64      `json:"request_limit"`
+		UnlimitedRequests                    bool       `json:"unlimited_requests"`
+		GroupID                              string     `json:"group_id"`
+		Tunnel                               *tunnelOpt `json:"tunnel"`
 	}
 	if json.Unmarshal(body, &in) != nil || in.Count < 1 || in.Count > 500 {
 		return textResponse(http.StatusBadRequest, "count must be between 1 and 500")
@@ -594,7 +662,11 @@ func (s *Service) createBulk(body []byte) map[string]any {
 		}
 		return textResponse(http.StatusBadRequest, err.Error())
 	}
-	return jsonResponse(http.StatusOK, map[string]any{"keys": created})
+	payload := map[string]any{"keys": created}
+	if in.Tunnel != nil && in.Tunnel.Enabled && len(created) > 0 {
+		payload["tunnel"] = s.attachKeyTunnel(created[0].Key.Label, created[0].Key.ID, in.Tunnel.TargetURL, headers)
+	}
+	return jsonResponse(http.StatusOK, payload)
 }
 
 func (s *Service) list(q, status, group string, page, pageSize int) map[string]any {

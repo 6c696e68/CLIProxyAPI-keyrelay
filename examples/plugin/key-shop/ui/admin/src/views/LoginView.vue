@@ -13,7 +13,7 @@ const remember = ref(true)
 
 <template>
   <main class="gate">
-    <form class="gate-card panel" @submit.prevent="emit('submit', value, remember)">
+    <form class="gate-card panel" @submit.prevent="props.loading ? undefined : emit('submit', value, remember)">
       <p class="page-kicker">CLI Proxy API</p>
       <h1 class="page-title">API keys</h1>
       <p class="page-copy">Use your panel management key to issue and manage customer API keys.</p>

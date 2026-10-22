@@ -35,6 +35,7 @@ var (
 	runtimeMu sync.Mutex
 	service   *keyshop.Service
 	store     *keyshop.Store
+	tunnels   *keyshop.TunnelManager
 	sweepStop context.CancelFunc
 	sweepDone chan struct{}
 )
@@ -132,6 +133,9 @@ func configure(request []byte) error {
 			DeletedRetentionDays int                        `yaml:"deleted_retention_days"`
 			ModelAccessMode      string                     `yaml:"model_access_mode"`
 			Models               []keyshop.ModelAccessModel `yaml:"models"`
+			CloudflaredPath      string                     `yaml:"cloudflared_path"`
+			TunnelsEnabled       *bool                      `yaml:"tunnels_enabled"`
+			TunnelTargetURL      string                     `yaml:"tunnel_target_url"`
 		}
 		if err := yaml.Unmarshal(parsed.ConfigYAML, &doc); err == nil {
 			cfg.DataFile = doc.DataFile
@@ -142,6 +146,9 @@ func configure(request []byte) error {
 			cfg.DeletedRetentionDays = doc.DeletedRetentionDays
 			cfg.ModelAccessMode = doc.ModelAccessMode
 			cfg.Models = doc.Models
+			cfg.CloudflaredPath = doc.CloudflaredPath
+			cfg.TunnelsEnabled = doc.TunnelsEnabled
+			cfg.TunnelTargetURL = doc.TunnelTargetURL
 			if doc.DefaultTTL != "" {
 				if parsedTTL, err := time.ParseDuration(doc.DefaultTTL); err == nil {
 					cfg.DefaultTTL = parsedTTL
@@ -175,7 +182,16 @@ func configure(request []byte) error {
 		_ = store.Close()
 	}
 	store = opened
-	service = keyshop.NewService(opened, admin, dash)
+	svc := keyshop.NewService(opened, admin, dash)
+	mgr := keyshop.NewTunnelManager(opened, keyshop.TunnelManagerConfig{
+		CloudflaredPath: cfg.CloudflaredPath,
+		Enabled:         cfg.TunnelsEnabled,
+		DataDir:         opened.DataDir(),
+		TargetURL:       cfg.TunnelTargetURL,
+	})
+	svc.SetTunnelManager(mgr)
+	tunnels = mgr
+	service = svc
 	sweepCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	sweepStop = cancel
@@ -184,6 +200,7 @@ func configure(request []byte) error {
 		defer close(done)
 		opened.RunSweeper(sweepCtx)
 	}()
+	mgr.Reconcile()
 	return nil
 }
 
@@ -205,6 +222,10 @@ func adminPage() ([]byte, error) {
 }
 
 func stopSweeperLocked() {
+	if tunnels != nil {
+		tunnels.Shutdown()
+		tunnels = nil
+	}
 	if sweepStop != nil {
 		sweepStop()
 		sweepStop = nil
