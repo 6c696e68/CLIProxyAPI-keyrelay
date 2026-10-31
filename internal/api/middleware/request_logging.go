@@ -472,10 +472,14 @@ func decodeCapturedZstdRequestBodyWithLimit(raw []byte, limit int64) ([]byte, bo
 }
 
 // shouldLogRequest determines whether the request should be logged.
-// It skips management endpoints to avoid leaking secrets but allows
-// all other routes, including module-provided ones, to honor request-log.
+// It skips management and partner endpoints so secrets never reach a log:
+// management bodies carry credentials, and partner mint bodies carry ck_
+// secrets in plaintext. All other routes honor request-log.
 func shouldLogRequest(path string) bool {
 	if strings.HasPrefix(path, "/v0/management") || strings.HasPrefix(path, "/v8/management") || strings.HasPrefix(path, "/management") {
+		return false
+	}
+	if strings.HasPrefix(path, "/keyshop/partner/") {
 		return false
 	}
 

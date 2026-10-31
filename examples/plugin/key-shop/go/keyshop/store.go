@@ -17,6 +17,16 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// DefaultTunnelWatchInterval is how often a managed tunnel is checked for a
+// dead child and a new quick-tunnel URL. It is exported so the plugin config
+// metadata reports the same value the manager uses.
+const DefaultTunnelWatchInterval = 2 * time.Second
+
+// DefaultTunnelLogMaxKB is the default cloudflared.log cap in KiB (1 MiB). It
+// is exported so the plugin config metadata reports the same value the manager
+// uses.
+const DefaultTunnelLogMaxKB = bytesPerKB
+
 type Config struct {
 	DataFile             string
 	DefaultTTL           time.Duration
@@ -32,6 +42,21 @@ type Config struct {
 	TunnelsEnabled       *bool
 	TunnelTargetURL      string
 	Now                  func() time.Time
+
+	// Partner API settings. Open fills the defaults for empty values; a non-nil
+	// PartnerDailyKeyCap of 0 means unlimited, and nil makes Open set the
+	// default. Validation of configured values belongs to the plugin reconfigure
+	// path.
+	PartnerAPIEnabled          bool
+	PublicBaseURL              string
+	PublicDashboardPath        string
+	PartnerMaxQuantity         int64
+	PartnerDailyKeyCap         *int64
+	PartnerMaxBodyKB           int64
+	PartnerUnconfirmedAlertMin int64
+	PartnerLogRetentionDays    int64
+	PartnerKeyLabelTemplate    string
+	PartnerKeyNoteTemplate     string
 }
 
 type ModelAccessModel struct {
@@ -68,10 +93,13 @@ type Key struct {
 	RequestQuotaRemaining int64
 	LastUsedAt            *time.Time
 	GroupID               string
+	PartnerID             string `json:"partner_id"`
+	PartnerRef            string `json:"partner_ref"`
 }
 
 type CreateInput struct {
 	Label, Customer, Note string
+	PartnerID, PartnerRef string
 	TTLSeconds            int64
 	NeverExpires          bool
 	TokenLimit            int64
@@ -115,7 +143,7 @@ type Admission struct {
 type FinalizeInput struct {
 	RequestID, Model, RequestedModel, Transport, Protocol, Outcome string
 	HTTPStatus                                                     int
-	Input, Output, Reasoning, Cached                               int64
+	Input, Output, Reasoning, Cached, Total                        int64
 	Latency, TTFT                                                  time.Duration
 	RequestedAt                                                    time.Time
 }
@@ -123,6 +151,7 @@ type FinalizeInput struct {
 type UsageNote struct {
 	RequestID                        string
 	Input, Output, Reasoning, Cached int64
+	Total                            int64
 	Failed                           bool
 	TTFT, Latency                    time.Duration
 	Provider, AuthID, AuthIndex      string
@@ -203,6 +232,31 @@ func Open(cfg Config) (*Store, error) {
 	}
 	if cfg.DeletedRetentionDays == 0 {
 		cfg.DeletedRetentionDays = 90
+	}
+	if cfg.PartnerMaxQuantity == 0 {
+		cfg.PartnerMaxQuantity = 50
+	}
+	if cfg.PartnerDailyKeyCap == nil {
+		cap := int64(300)
+		cfg.PartnerDailyKeyCap = &cap
+	}
+	if cfg.PartnerMaxBodyKB == 0 {
+		cfg.PartnerMaxBodyKB = 64
+	}
+	if cfg.PartnerUnconfirmedAlertMin == 0 {
+		cfg.PartnerUnconfirmedAlertMin = 10
+	}
+	if cfg.PartnerLogRetentionDays == 0 {
+		cfg.PartnerLogRetentionDays = 30
+	}
+	if strings.TrimSpace(cfg.PublicDashboardPath) == "" {
+		cfg.PublicDashboardPath = "/client"
+	}
+	if strings.TrimSpace(cfg.PartnerKeyLabelTemplate) == "" {
+		cfg.PartnerKeyLabelTemplate = "{plan}-{ref}-{i}"
+	}
+	if strings.TrimSpace(cfg.PartnerKeyNoteTemplate) == "" {
+		cfg.PartnerKeyNoteTemplate = "partner:{partner} ref:{ref}"
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -300,6 +354,7 @@ CREATE TABLE IF NOT EXISTS usage_notes (
   output_tokens INTEGER NOT NULL DEFAULT 0,
   reasoning_tokens INTEGER NOT NULL DEFAULT 0,
   cached_tokens INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
   failed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS model_groups (
@@ -326,6 +381,65 @@ CREATE TABLE IF NOT EXISTS tunnels (
   last_error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plans (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  description TEXT NOT NULL DEFAULT '',
+  group_id TEXT NOT NULL,
+  ttl_seconds INTEGER NOT NULL DEFAULT 0,
+  never_expires INTEGER NOT NULL DEFAULT 0,
+  token_limit INTEGER NOT NULL DEFAULT 0,
+  unlimited_tokens INTEGER NOT NULL DEFAULT 0,
+  request_limit INTEGER NOT NULL DEFAULT 0,
+  unlimited_requests INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS partners (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL COLLATE NOCASE,
+  secret_hash BLOB NOT NULL UNIQUE,
+  secret_prefix TEXT NOT NULL,
+  secret_last4 TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  allowed_plans_json TEXT NOT NULL DEFAULT '[]',
+  daily_key_cap INTEGER,
+  max_quantity INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_used_at TEXT,
+  deleted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS partner_orders (
+  partner_id TEXT NOT NULL,
+  ref TEXT NOT NULL,
+  plan_id TEXT NOT NULL DEFAULT '',
+  plan_revision INTEGER NOT NULL DEFAULT 0,
+  quantity INTEGER NOT NULL DEFAULT 0,
+  fingerprint TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  order_id TEXT NOT NULL DEFAULT '',
+  buyer TEXT NOT NULL DEFAULT '',
+  customer TEXT NOT NULL DEFAULT '',
+  void_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  confirmed_at TEXT,
+  voided_at TEXT,
+  PRIMARY KEY (partner_id, ref)
+);
+CREATE TABLE IF NOT EXISTS partner_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  partner_id TEXT NOT NULL DEFAULT '',
+  at TEXT NOT NULL,
+  op TEXT NOT NULL,
+  http_status INTEGER NOT NULL,
+  code TEXT NOT NULL DEFAULT '',
+  ref TEXT NOT NULL DEFAULT '',
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  client_ip TEXT NOT NULL DEFAULT ''
 );`)
 	if err != nil {
 		return err
@@ -344,7 +458,12 @@ CREATE INDEX IF NOT EXISTS idx_requests_time ON requests(requested_at DESC, requ
 CREATE INDEX IF NOT EXISTS idx_requests_status_time ON requests(status, requested_at DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_rejection ON requests(key_id, rejection_code, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_model_time ON requests(model, requested_at DESC);
-CREATE INDEX IF NOT EXISTS idx_keys_group ON keys(group_id);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_keys_group ON keys(group_id);
+CREATE INDEX IF NOT EXISTS idx_keys_partner ON keys(partner_id, partner_ref);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_partners_name_live ON partners(name) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_partner_orders_created ON partner_orders(partner_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_partner_orders_state ON partner_orders(state, created_at);
+CREATE INDEX IF NOT EXISTS idx_partner_calls_at ON partner_calls(partner_id, at DESC);`); err != nil {
 		return err
 	}
 	if err = s.seedSystemGroup(); err != nil {
@@ -362,10 +481,13 @@ func (s *Store) ensureColumns() error {
 		"request_canceled_count": "INTEGER NOT NULL DEFAULT 0",
 		"request_rejected_count": "INTEGER NOT NULL DEFAULT 0",
 		"group_id":               "TEXT NOT NULL DEFAULT ''",
+		"partner_id":             "TEXT NOT NULL DEFAULT ''",
+		"partner_ref":            "TEXT NOT NULL DEFAULT ''",
 	}); err != nil {
 		return err
 	}
 	if err := addColumns(s.db, "usage_notes", map[string]string{
+		"total_tokens": "INTEGER NOT NULL DEFAULT 0",
 		"ttft_ms":      "INTEGER NOT NULL DEFAULT 0",
 		"latency_ms":   "INTEGER NOT NULL DEFAULT 0",
 		"provider":     "TEXT NOT NULL DEFAULT ''",
@@ -480,6 +602,13 @@ func (s *Store) Create(in CreateInput) (Key, string, error) {
 }
 
 func (s *Store) insertKey(in CreateInput, hash []byte, prefix, last4 string) (Key, error) {
+	return s.insertKeyOn(s.db, in, hash, prefix, last4)
+}
+
+// insertKeyOn runs the key insert on a caller-owned handle so a mint can share
+// one immediate transaction with its order row. Every current key invariant
+// still applies here.
+func (s *Store) insertKeyOn(q execQuery, in CreateInput, hash []byte, prefix, last4 string) (Key, error) {
 	id, err := newID()
 	if err != nil {
 		return Key{}, err
@@ -492,15 +621,15 @@ func (s *Store) insertKey(in CreateInput, hash []byte, prefix, last4 string) (Ke
 	if err != nil {
 		return Key{}, err
 	}
-	if err = s.requireGroupOn(s.db, in.GroupID); err != nil {
+	if err = s.requireGroupOn(q, in.GroupID); err != nil {
 		return Key{}, err
 	}
-	_, err = s.db.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit, request_limit, group_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, hash, prefix, last4, label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit, requestLimit, in.GroupID)
+	_, err = q.Exec(`INSERT INTO keys (id, secret_hash, display_prefix, display_last4, label, customer, note, status, created_at, expires_at, token_limit, request_limit, group_id, partner_id, partner_ref) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, hash, prefix, last4, label, in.Customer, in.Note, "active", now.Format(time.RFC3339Nano), formatTime(expires), limit, requestLimit, in.GroupID, in.PartnerID, in.PartnerRef)
 	if err != nil {
 		return Key{}, err
 	}
-	return s.keyByID(id)
+	return s.keyByIDOn(q, id)
 }
 
 func defaultLabel(label, id string) string {
@@ -566,6 +695,11 @@ func (s *Store) ListPageFiltered(query, status string, page, pageSize int) ([]Ke
 
 // ListPageGroup is ListPageFiltered limited to one model group. "none" selects legacy keys without a group.
 func (s *Store) ListPageGroup(query, status, group string, page, pageSize int) ([]Key, int, error) {
+	return s.ListPagePartner(query, status, group, "", "", page, pageSize)
+}
+
+// ListPagePartner is ListPageGroup limited to one partner and/or one partner ref.
+func (s *Store) ListPagePartner(query, status, group, partner, ref string, page, pageSize int) ([]Key, int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if page < 1 {
@@ -583,6 +717,14 @@ func (s *Store) ListPageGroup(query, status, group string, page, pageSize int) (
 	default:
 		where += ` AND keys.group_id=?`
 		args = append(args, group)
+	}
+	if partner = strings.TrimSpace(partner); partner != "" {
+		where += ` AND keys.partner_id=?`
+		args = append(args, partner)
+	}
+	if ref = strings.TrimSpace(ref); ref != "" {
+		where += ` AND keys.partner_ref=?`
+		args = append(args, ref)
 	}
 	from, reserved := listSource(status)
 	if err := s.db.QueryRow(`SELECT COUNT(1) FROM `+from+` WHERE `+where, args...).Scan(&total); err != nil {
@@ -627,7 +769,7 @@ func keyListWhere(query, status string, now time.Time) (string, []any) {
 	return where, args
 }
 
-const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at, keys.request_limit, keys.request_quota_used, keys.request_success_count, keys.request_failure_count, keys.request_canceled_count, keys.request_rejected_count, keys.group_id`
+const keyColumns = `keys.id, keys.display_prefix, keys.display_last4, keys.label, keys.customer, keys.note, keys.status, keys.created_at, keys.expires_at, keys.token_limit, keys.tokens_used, keys.request_count, keys.last_used_at, keys.request_limit, keys.request_quota_used, keys.request_success_count, keys.request_failure_count, keys.request_canceled_count, keys.request_rejected_count, keys.group_id, keys.partner_id, keys.partner_ref`
 
 const requestColumns = `request_id, key_id, model, transport, protocol, status, http_status, latency_ms, ttft_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at, completed_at, rejection_code`
 
@@ -943,10 +1085,10 @@ func (s *Store) NoteUsage(note UsageNote) error {
 	if note.Failed {
 		failed = 1
 	}
-	_, err = s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(request_id) DO UPDATE SET input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, reasoning_tokens=excluded.reasoning_tokens, cached_tokens=excluded.cached_tokens, failed=excluded.failed,
+	_, err = s.db.Exec(`INSERT INTO usage_notes (request_id, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(request_id) DO UPDATE SET input_tokens=excluded.input_tokens, output_tokens=excluded.output_tokens, reasoning_tokens=excluded.reasoning_tokens, cached_tokens=excluded.cached_tokens, total_tokens=excluded.total_tokens, failed=excluded.failed,
   ttft_ms=excluded.ttft_ms, latency_ms=excluded.latency_ms, provider=excluded.provider, auth_id=excluded.auth_id, auth_index=excluded.auth_index, auth_type=excluded.auth_type, effort=excluded.effort, service_tier=excluded.service_tier`,
-		note.RequestID, note.Input, note.Output, note.Reasoning, note.Cached, failed, note.TTFT.Milliseconds(), note.Latency.Milliseconds(), note.Provider, note.AuthID, note.AuthIndex, note.AuthType, note.Effort, note.ServiceTier)
+		note.RequestID, note.Input, note.Output, note.Reasoning, note.Cached, note.Total, failed, note.TTFT.Milliseconds(), note.Latency.Milliseconds(), note.Provider, note.AuthID, note.AuthIndex, note.AuthType, note.Effort, note.ServiceTier)
 	return err
 }
 
@@ -976,10 +1118,10 @@ func (s *Store) applyLateUsage(note UsageNote) error {
 	_ = s.db.QueryRow(`SELECT reasoning_tokens, cached_tokens FROM requests WHERE request_id=?`, note.RequestID).Scan(&reasoning, &cached)
 	nextReasoning, nextCached = reasoning, cached
 	addBilled := int64(0)
-	if input+output == 0 && note.Input+note.Output > 0 {
+	if input+output == 0 && (note.Input+note.Output > 0 || note.Total > 0) {
 		nextInput, nextOutput, nextReasoning, nextCached = note.Input, note.Output, note.Reasoning, note.Cached
 		if status == "succeeded" && billed == 0 {
-			addBilled = BilledTokens(note.Input, note.Output)
+			addBilled = BilledTokens(note.Input, note.Output, note.Total)
 		}
 	}
 	if _, err = s.db.Exec(`UPDATE requests SET input_tokens=?, output_tokens=?, reasoning_tokens=?, cached_tokens=?, billed_tokens=billed_tokens+?, latency_ms=?, ttft_ms=?,
@@ -1038,7 +1180,7 @@ func (s *Store) finalizeLegacy(tx *sql.Tx, in FinalizeInput) error {
 }
 
 func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, legacy bool) error {
-	input, output, reasoning, cached, failed, meta, err := usageSnapshot(tx, in)
+	input, output, reasoning, cached, total, failed, meta, err := usageSnapshot(tx, in)
 	if err != nil {
 		return err
 	}
@@ -1051,7 +1193,7 @@ func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, lega
 	status, column, bill := requestOutcome(in.Outcome, failed)
 	billed := int64(0)
 	if bill {
-		billed = BilledTokens(input, output)
+		billed = BilledTokens(input, output, total)
 	}
 	now := s.cfg.Now().UTC()
 	requested := in.RequestedAt
@@ -1099,19 +1241,19 @@ type usageMeta struct {
 	AuthType, Effort, ServiceTier string
 }
 
-func usageSnapshot(tx *sql.Tx, in FinalizeInput) (int64, int64, int64, int64, bool, usageMeta, error) {
-	input, output, reasoning, cached := in.Input, in.Output, in.Reasoning, in.Cached
+func usageSnapshot(tx *sql.Tx, in FinalizeInput) (int64, int64, int64, int64, int64, bool, usageMeta, error) {
+	input, output, reasoning, cached, total := in.Input, in.Output, in.Reasoning, in.Cached, in.Total
 	var failed bool
 	var meta usageMeta
-	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier FROM usage_notes WHERE request_id=?`, in.RequestID).
-		Scan(&input, &output, &reasoning, &cached, &failed, &meta.TTFTMs, &meta.LatencyMs, &meta.Provider, &meta.AuthID, &meta.AuthIndex, &meta.AuthType, &meta.Effort, &meta.ServiceTier)
+	err := tx.QueryRow(`SELECT input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, failed, ttft_ms, latency_ms, provider, auth_id, auth_index, auth_type, effort, service_tier FROM usage_notes WHERE request_id=?`, in.RequestID).
+		Scan(&input, &output, &reasoning, &cached, &total, &failed, &meta.TTFTMs, &meta.LatencyMs, &meta.Provider, &meta.AuthID, &meta.AuthIndex, &meta.AuthType, &meta.Effort, &meta.ServiceTier)
 	if err == sql.ErrNoRows {
-		return input, output, reasoning, cached, false, usageMeta{}, nil
+		return input, output, reasoning, cached, total, false, usageMeta{}, nil
 	}
 	if err != nil {
-		return 0, 0, 0, 0, false, usageMeta{}, err
+		return 0, 0, 0, 0, 0, false, usageMeta{}, err
 	}
-	return input, output, reasoning, cached, failed, meta, nil
+	return input, output, reasoning, cached, total, failed, meta, nil
 }
 
 func requestOutcome(outcome string, usageFailed bool) (string, string, bool) {
@@ -1431,6 +1573,10 @@ func (s *Store) sweepBatch() (int, error) {
 	if err := deleteN(`DELETE FROM keys WHERE id IN (SELECT id FROM keys WHERE deleted_at IS NOT NULL AND deleted_at < ? LIMIT 500)`, deletedCutoff); err != nil {
 		return total, err
 	}
+	partnerCutoff := partnerTime(now.AddDate(0, 0, -int(s.cfg.PartnerLogRetentionDays)))
+	if err := deleteN(`DELETE FROM partner_calls WHERE id IN (SELECT id FROM partner_calls WHERE at < ? LIMIT 500)`, partnerCutoff); err != nil {
+		return total, err
+	}
 	if total > 0 {
 		return total, nil
 	}
@@ -1485,10 +1631,23 @@ type keyRow struct {
 	canceled, rejected                               int64
 	deleted                                          bool
 	group                                            string
+	partnerID, partnerRef                            string
 }
 
 type rowQuery interface {
 	QueryRow(query string, args ...any) *sql.Row
+}
+
+// execQuery is the subset shared by *sql.DB and *sql.Tx.
+type execQuery interface {
+	rowQuery
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// querySource adds row iteration for reads inside or outside a transaction.
+type querySource interface {
+	execQuery
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 func (s *Store) lookup(hash []byte) (keyRow, error) {
@@ -1511,8 +1670,11 @@ func (s *Store) lookupOn(q rowQuery, hash []byte) (keyRow, error) {
 }
 
 func (s *Store) keyByID(id string) (Key, error) {
-	row := s.db.QueryRow(`SELECT `+keyColumns+`, `+reservedByKey+` FROM keys WHERE keys.id=? AND keys.deleted_at IS NULL`, id)
-	return s.scanKey(row)
+	return s.keyByIDOn(s.db, id)
+}
+
+func (s *Store) keyByIDOn(q rowQuery, id string) (Key, error) {
+	return s.scanKey(q.QueryRow(`SELECT `+keyColumns+`, `+reservedByKey+` FROM keys WHERE keys.id=? AND keys.deleted_at IS NULL`, id))
 }
 
 type rowScanner interface {
@@ -1523,7 +1685,7 @@ func (s *Store) scanKey(sc rowScanner) (Key, error) {
 	var row keyRow
 	var created, expires, lastUsed sql.NullString
 	var reserved int64
-	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &row.requestLimit, &row.quotaUsed, &row.success, &row.failure, &row.canceled, &row.rejected, &row.group, &reserved); err != nil {
+	if err := sc.Scan(&row.id, &row.prefix, &row.last4, &row.label, &row.customer, &row.note, &row.status, &created, &expires, &row.limit, &row.used, &row.count, &lastUsed, &row.requestLimit, &row.quotaUsed, &row.success, &row.failure, &row.canceled, &row.rejected, &row.group, &row.partnerID, &row.partnerRef, &reserved); err != nil {
 		return Key{}, err
 	}
 	row.created = parseTime(created.String)
@@ -1544,7 +1706,7 @@ func (s *Store) scanKey(sc rowScanner) (Key, error) {
 		TokensUsed: row.used, RequestCount: row.count, RequestLimit: row.requestLimit, RequestQuotaUsed: row.quotaUsed,
 		RequestSuccessCount: row.success, RequestFailureCount: row.failure, RequestCanceledCount: row.canceled,
 		RequestRejectedCount: row.rejected, RequestLimitReached: requestReached, TokenLimitReached: tokenReached,
-		RequestQuotaRemaining: remaining, LastUsedAt: row.lastUsed, GroupID: row.group,
+		RequestQuotaRemaining: remaining, LastUsedAt: row.lastUsed, GroupID: row.group, PartnerID: row.partnerID, PartnerRef: row.partnerRef,
 	}, nil
 }
 
@@ -1618,6 +1780,15 @@ func countPath(path string) bool {
 
 func like(q string) string {
 	return "%" + q + "%"
+}
+
+// partnerTimeFormat keeps partner timestamps fixed width, so text ordering on
+// partner_orders and partner_calls is chronological.
+const partnerTimeFormat = "2006-01-02T15:04:05.000000000Z07:00"
+
+// partnerTime formats a partner-owned timestamp in UTC with a fixed width.
+func partnerTime(t time.Time) string {
+	return t.UTC().Format(partnerTimeFormat)
 }
 
 func formatTime(t *time.Time) any {

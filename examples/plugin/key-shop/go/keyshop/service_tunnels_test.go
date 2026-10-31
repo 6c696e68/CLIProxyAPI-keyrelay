@@ -42,12 +42,8 @@ func TestTunnelHandlers(t *testing.T) {
 		t.Fatalf("list %d %s", status, body)
 	}
 
-	status, body = manage(t, svc, http.MethodPost, "/tunnels/start", map[string]any{"id": created.ID})
-	if status != 200 {
-		t.Fatalf("start %d %s", status, body)
-	}
+	// A created tunnel starts right away, so an explicit start is a conflict.
 	waitStatus(t, m, created.ID, "running")
-
 	status, body = manage(t, svc, http.MethodPost, "/tunnels/start", map[string]any{"id": created.ID})
 	if status != http.StatusConflict {
 		t.Fatalf("already %d %s", status, body)
@@ -100,6 +96,112 @@ func TestTunnelHandlers(t *testing.T) {
 	if status != http.StatusConflict || !strings.Contains(string(body), "cloudflared not found") {
 		t.Fatalf("missing bin %d %s", status, body)
 	}
+}
+
+func TestTunnelCreateStartsAndUsesHostBaseURL(t *testing.T) {
+	store := testTunnelStore(t)
+	m := newTestManager(t, store, writeFakeCloudflared(t, fakeStay))
+	m.cfg.HostBaseURL = "http://127.0.0.1:8330"
+	svc := NewService(store, nil, nil)
+	svc.SetTunnelManager(m)
+
+	status, body := manage(t, svc, http.MethodPost, "/tunnels", map[string]any{"name": "vps", "kind": "quick"})
+	if status != http.StatusCreated {
+		t.Fatalf("create %d %s", status, body)
+	}
+	var created TunnelView
+	if json.Unmarshal(body, &created) != nil || created.ID == "" {
+		t.Fatalf("created %s", body)
+	}
+	if created.TargetURL != "http://127.0.0.1:8330" {
+		t.Fatalf("target %q body %s", created.TargetURL, body)
+	}
+	if strings.Contains(string(body), "start_error") {
+		t.Fatalf("unexpected start error %s", body)
+	}
+	waitStatus(t, m, created.ID, "running")
+
+	status, body = manage(t, svc, http.MethodGet, "/tunnels", nil)
+	if status != 200 || !strings.Contains(string(body), `"default_target_url":"http://127.0.0.1:8330"`) {
+		t.Fatalf("list %d %s", status, body)
+	}
+}
+
+func TestTunnelCreateMissingBinaryKeepsRow(t *testing.T) {
+	store := testTunnelStore(t)
+	m := NewTunnelManager(store, TunnelManagerConfig{CloudflaredPath: filepath.Join(t.TempDir(), "missing"), DataDir: store.DataDir()})
+	svc := NewService(store, nil, nil)
+	svc.SetTunnelManager(m)
+
+	status, body := manage(t, svc, http.MethodPost, "/tunnels", map[string]any{
+		"name": "nobin", "kind": "token", "token": strings.Repeat("q", 24),
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create %d %s", status, body)
+	}
+	if !strings.Contains(string(body), `"start_error":"cloudflared not found"`) || !strings.Contains(string(body), `"name":"nobin"`) {
+		t.Fatalf("start error missing %s", body)
+	}
+	rows, err := store.ListTunnels()
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %+v %v", rows, err)
+	}
+}
+
+func TestTunnelUpdateFallsBackToDefaultTarget(t *testing.T) {
+	store := testTunnelStore(t)
+	m := newTestManager(t, store, writeFakeCloudflared(t, fakeStay))
+	m.cfg.HostBaseURL = "http://127.0.0.1:8330"
+	svc := NewService(store, nil, nil)
+	svc.SetTunnelManager(m)
+
+	status, body := manage(t, svc, http.MethodPost, "/tunnels", map[string]any{
+		"name": "retarget", "kind": "quick", "target_url": "http://127.0.0.1:9",
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create %d %s", status, body)
+	}
+	var created TunnelView
+	if json.Unmarshal(body, &created) != nil || created.ID == "" {
+		t.Fatalf("created %s", body)
+	}
+	status, body = manage(t, svc, http.MethodPost, "/tunnels/update", map[string]any{"id": created.ID, "target_url": ""})
+	if status != 200 {
+		t.Fatalf("update %d %s", status, body)
+	}
+	row, err := store.GetTunnel(created.ID)
+	if err != nil || row.TargetURL != "http://127.0.0.1:8330" {
+		t.Fatalf("target %+v %v", row, err)
+	}
+}
+
+func TestKeyTunnelTargetPrecedence(t *testing.T) {
+	store := testTunnelStore(t)
+	m := newTestManager(t, store, writeFakeCloudflared(t, fakeStay))
+	m.cfg.TargetURL = "http://127.0.0.1:9001"
+	m.cfg.HostBaseURL = "http://127.0.0.1:8330"
+	svc := NewService(store, nil, nil)
+	svc.SetTunnelManager(m)
+	headers := map[string][]string{"Host": {"example.test:18444"}}
+
+	check := func(name, requested, want string) {
+		t.Helper()
+		res := svc.attachKeyTunnel(name, "key-"+name, requested, headers)
+		if res.Error != "" || res.ID == "" {
+			t.Fatalf("%s: %+v", name, res)
+		}
+		row, err := store.GetTunnel(res.ID)
+		if err != nil || row.TargetURL != want {
+			t.Fatalf("%s: target %+v %v, want %q", name, row, err, want)
+		}
+	}
+
+	check("yaml", "", "http://127.0.0.1:9001")
+	m.cfg.TargetURL = ""
+	check("host", "", "http://127.0.0.1:8330")
+	m.cfg.HostBaseURL = ""
+	check("header", "", "http://127.0.0.1:18444")
+	check("requested", "http://127.0.0.1:8081", "http://127.0.0.1:8081")
 }
 
 func TestQuickCreateRequiresTarget(t *testing.T) {

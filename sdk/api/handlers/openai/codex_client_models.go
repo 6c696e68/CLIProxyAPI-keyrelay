@@ -6,10 +6,25 @@ import (
 	responsesclaude "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/claude/openai/responses"
 )
 
-func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) map[string]any {
+// codexClientModelsResponse builds the Codex client model list. The caller may
+// pass the already-filtered models, and the no-arg form keeps the full registry
+// list. Both a string client version and a model slice are accepted so callers
+// that only vary the version stay valid.
+func (h *OpenAIAPIHandler) codexClientModelsResponse(args ...any) map[string]any {
 	version := ""
-	if len(clientVersion) > 0 {
-		version = clientVersion[0]
+	var models []map[string]any
+	hasModels := false
+	for _, arg := range args {
+		switch value := arg.(type) {
+		case string:
+			version = value
+		case []map[string]any:
+			models = value
+			hasModels = true
+		}
+	}
+	if !hasModels {
+		models = h.Models()
 	}
 	optimizeMultiAgentV2 := false
 	var applyPatchCapabilityForModel codexmodels.ApplyPatchCapabilityForModelFunc
@@ -26,7 +41,7 @@ func (h *OpenAIAPIHandler) codexClientModelsResponse(clientVersion ...string) ma
 		toolSearchCapabilityForModel = h.SupportsNativeToolSearchModel
 	}
 	modelRegistry := registry.GetGlobalRegistry()
-	return codexmodels.BuildResponseForClientWithToolCapabilities(h.Models(), modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
+	return codexmodels.BuildResponseForClientWithToolCapabilities(models, modelRegistry.GetModelProviders, modelRegistry.GetResponsesWebSearchCapability, applyPatchCapabilityForModel, toolSearchCapabilityForModel, optimizeMultiAgentV2, version)
 }
 
 // CodexClientModelsResponse builds a Codex client model response.

@@ -167,7 +167,7 @@ func TestRegisterRPCPluginRegistersWebSocketResponseObserver(t *testing.T) {
 		},
 	})
 
-	registered, errRegister := registerRPCPlugin(context.Background(), nil, "rpc-observer", lookup, pluginabi.MethodPluginRegister, nil)
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "rpc-observer", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}

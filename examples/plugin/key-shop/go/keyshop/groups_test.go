@@ -663,3 +663,65 @@ func aliasMapOf(models []GroupModel) map[string]string {
 	}
 	return out
 }
+
+func TestGroupResolveKeepsSuffixAndRequiresVisibleName(t *testing.T) {
+	g := Group{Models: []GroupModel{
+		{Name: "vippro/gpt-6-sol", Alias: "gpt-6-sol"},
+		{Name: "vippro/gpt-6-luna"},
+	}}
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"gpt-6-sol", "vippro/gpt-6-sol", true},
+		{"GPT-6-SOL", "vippro/gpt-6-sol", true},
+		{"gpt-6-sol(high)", "vippro/gpt-6-sol(high)", true},
+		{"vippro/gpt-6-sol", "", false}, // aliased entry hides its upstream name
+		{"vippro/gpt-6-luna", "vippro/gpt-6-luna", true},
+		{"vippro/gpt-6-luna(low)", "vippro/gpt-6-luna(low)", true},
+		{"", "", false},
+		{"(high)", "", false},
+		{"other", "", false},
+	}
+	for _, tc := range cases {
+		got, ok := g.Resolve(tc.in)
+		if got != tc.want || ok != tc.ok {
+			t.Fatalf("Resolve(%q) = %q,%v want %q,%v", tc.in, got, ok, tc.want, tc.ok)
+		}
+	}
+	// Allows also admits the upstream name, because the host may have rewritten the alias already.
+	if !g.Allows("vippro/gpt-6-sol(high)") || !g.Allows("gpt-6-sol") || g.Allows("other") {
+		t.Fatal("Allows mismatch")
+	}
+	if got, ok := (Group{AllModels: true}).Resolve("anything(x)"); !ok || got != "anything(x)" {
+		t.Fatalf("all-models Resolve = %q,%v", got, ok)
+	}
+}
+
+func TestGroupPolicyOmitsKeyCountAndFailsClosed(t *testing.T) {
+	s := testStore(t, groupsNow)
+	g := mustGroup(t, s, "pol", "vippro/a")
+	if _, _, err := s.Create(CreateInput{Label: "k", GroupID: g.ID}); err != nil {
+		t.Fatal(err)
+	}
+	full, err := s.Group(g.ID)
+	if err != nil || full.KeyCount != 1 {
+		t.Fatalf("Group key count = %+v err=%v", full, err)
+	}
+	policy, err := s.GroupPolicy(g.ID)
+	if err != nil || policy.KeyCount != 0 || !policy.Allows("vippro/a") {
+		t.Fatalf("GroupPolicy = %+v err=%v", policy, err)
+	}
+	if _, err = s.GroupPolicy("missing"); !errors.Is(err, ErrGroupNotFound) {
+		t.Fatalf("missing group err=%v", err)
+	}
+}
+
+func TestGroupAliasRejectsParentheses(t *testing.T) {
+	s := testStore(t, groupsNow)
+	_, err := s.CreateGroup(GroupInput{Name: "bad", Models: []GroupModel{{Name: "vippro/a", Alias: "a(high)"}}})
+	if !errors.Is(err, ErrGroupInvalid) || !strings.Contains(err.Error(), "parentheses") {
+		t.Fatalf("err=%v", err)
+	}
+}

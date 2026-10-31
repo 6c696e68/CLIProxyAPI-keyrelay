@@ -195,7 +195,7 @@ func TestRegisterRPCPluginSendsHostSchemaVersion(t *testing.T) {
 		registerResult: validTestPlugin("schema"),
 	})
 
-	registered, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test"))
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "schema", lookup, pluginabi.MethodPluginRegister, []byte("mode: test"), "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
@@ -216,7 +216,7 @@ func TestRegisterRPCPluginRejectsFutureSchemaVersion(t *testing.T) {
 	})
 	lookup.schemaVersion = pluginabi.SchemaVersion + 1
 
-	_, errRegister := registerRPCPlugin(context.Background(), nil, "future-schema", lookup, pluginabi.MethodPluginRegister, nil)
+	_, errRegister := registerRPCPlugin(context.Background(), nil, "future-schema", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister == nil || !strings.Contains(errRegister.Error(), "schema version") {
 		t.Fatalf("registerRPCPlugin() error = %v, want unsupported schema version", errRegister)
 	}
@@ -230,7 +230,7 @@ func TestRegisterRPCPluginAcceptsModelRouterOnSchema1(t *testing.T) {
 	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
 	lookup.schemaVersion = 1
 
-	registered, errRegister := registerRPCPlugin(context.Background(), nil, "router-schema1", lookup, pluginabi.MethodPluginRegister, nil)
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "router-schema1", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v, want model_router on schema 1", errRegister)
 	}
@@ -268,7 +268,7 @@ func TestRPCModelRouteUsesAdapter(t *testing.T) {
 		},
 	})
 
-	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "router", lookup, pluginabi.MethodPluginRegister, nil)
+	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "router", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
@@ -336,7 +336,7 @@ func TestRPCSchedulerPickUsesAdapter(t *testing.T) {
 		},
 	})
 
-	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "scheduler", lookup, pluginabi.MethodPluginRegister, nil)
+	plugin, errRegister := registerRPCPlugin(context.Background(), nil, "scheduler", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}

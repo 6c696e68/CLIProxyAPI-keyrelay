@@ -3,7 +3,7 @@ export type ThemeName = 'light' | 'dark'
 export type KeyStatus = 'active' | 'disabled' | 'expired' | 'exhausted'
 export type RequestStatus = 'succeeded' | 'failed' | 'pending' | 'rejected' | 'canceled'
 export type PolicyMode = 'full' | 'custom'
-export type AdminRoute = 'dashboard' | 'groups' | 'keys' | 'requests' | 'tunnels'
+export type AdminRoute = 'dashboard' | 'groups' | 'keys' | 'requests' | 'tunnels' | 'plans' | 'partners'
 export type TunnelKind = 'token' | 'quick'
 export type TunnelStatus = 'running' | 'starting' | 'stopped' | 'failed'
 export type UsageBucket = 'hour' | 'day'
@@ -30,6 +30,8 @@ export interface KeyRecord {
   expiresAt: string | null
   lastUsedAt: string | null
   note: string
+  partnerId?: string
+  partnerRef?: string
 }
 
 export interface RequestRow {
@@ -111,6 +113,8 @@ export interface KeysQuery {
   group: string
   page: number
   pageSize: number
+  partner?: string
+  ref?: string
 }
 
 export interface ModelEntry {
@@ -282,6 +286,7 @@ export interface Tunnel {
   startedAt: string | null
   createdAt: string
   updatedAt: string
+  startError?: string
 }
 
 export interface TunnelDraft {
@@ -296,6 +301,7 @@ export interface TunnelDraft {
 export interface TunnelList {
   tunnels: Tunnel[]
   cloudflared: CloudflaredInfo
+  defaultTargetUrl: string
 }
 
 export interface AdminService {
@@ -325,4 +331,152 @@ export interface AdminService {
   startTunnel(id: string, scenario?: Scenario): Promise<Tunnel>
   stopTunnel(id: string, scenario?: Scenario): Promise<Tunnel>
   tunnelLogs(id: string, lines?: number, scenario?: Scenario): Promise<string[]>
+  plans(scenario?: Scenario): Promise<Plan[]>
+  savePlan(input: PlanInput, scenario?: Scenario): Promise<Plan>
+  removePlan(id: string, scenario?: Scenario): Promise<void>
+  partners(scenario?: Scenario): Promise<Partner[]>
+  createPartner(input: PartnerInput, scenario?: Scenario): Promise<{ partner: Partner; secret: string }>
+  updatePartner(input: PartnerInput, scenario?: Scenario): Promise<Partner>
+  rotatePartner(id: string, scenario?: Scenario): Promise<{ partner: Partner; secret: string }>
+  removePartner(id: string, scenario?: Scenario): Promise<void>
+  partnerCalls(query: PartnerCallQuery, scenario?: Scenario): Promise<{ calls: PartnerCall[]; nextCursor: string }>
+  partnerOrders(query: PartnerOrderQuery, scenario?: Scenario): Promise<{ orders: PartnerOrder[]; nextCursor: string }>
+  partnerSettings(scenario?: Scenario): Promise<PartnerSettings>
+  savePartnerSettings(next: PartnerSettings, scenario?: Scenario): Promise<void>
+}
+
+export type PartnerStatus = 'active' | 'disabled'
+export type PartnerOrderState = 'minted' | 'confirmed' | 'voided'
+
+export interface PlanGroup {
+  id: string
+  name: string
+  allModels: boolean
+  models: string[]
+}
+
+export interface Plan {
+  id: string
+  name: string
+  description: string
+  revision: number
+  active: boolean
+  group: PlanGroup
+  ttlSeconds: number
+  neverExpires: boolean
+  tokenLimit: number
+  unlimitedTokens: boolean
+  requestLimit: number
+  unlimitedRequests: boolean
+}
+
+export interface PlanInput {
+  id?: string
+  name: string
+  description: string
+  groupId: string
+  ttlSeconds: number
+  neverExpires: boolean
+  tokenLimit: number
+  unlimitedTokens: boolean
+  requestLimit: number
+  unlimitedRequests: boolean
+  active: boolean
+}
+
+export interface PartnerStats {
+  callsOk: number
+  callsClientError: number
+  callsServerError: number
+  minted: number
+  confirmed: number
+  voided: number
+  unconfirmedOverdue: number
+  dailyUsed: number
+  dailyCap: number
+}
+
+export interface Partner {
+  id: string
+  name: string
+  secretPrefix: string
+  secretLast4: string
+  status: PartnerStatus
+  allowedPlanIds: string[]
+  dailyKeyCap: number | null
+  maxQuantity: number | null
+  createdAt: string
+  updatedAt: string
+  lastUsedAt: string | null
+  stats?: PartnerStats
+}
+
+export interface PartnerInput {
+  id?: string
+  name: string
+  status?: PartnerStatus
+  allowedPlanIds: string[]
+  dailyKeyCap: number | null
+  maxQuantity: number | null
+}
+
+export interface PartnerCall {
+  id: number
+  partnerId: string
+  at: string
+  op: string
+  httpStatus: number
+  code: string
+  ref: string
+  latencyMs: number
+  clientIp: string
+}
+
+export interface PartnerOrder {
+  partnerId: string
+  ref: string
+  planId: string
+  planRevision: number
+  quantity: number
+  state: PartnerOrderState
+  orderId: string
+  buyer: string
+  customer: string
+  voidReason: string
+  createdAt: string
+  confirmedAt: string | null
+  voidedAt: string | null
+}
+
+export interface PartnerCallQuery {
+  partner: string
+  op: string
+  status: string
+  from: string
+  to: string
+  limit: number
+  cursor: string
+}
+
+export interface PartnerOrderQuery {
+  partner: string
+  state: string
+  ref: string
+  from: string
+  to: string
+  limit: number
+  cursor: string
+}
+
+export interface PartnerSettings {
+  apiEnabled: boolean
+  publicBaseUrl: string
+  publicDashboardPath: string
+  maxQuantity: number | null
+  dailyKeyCap: number | null
+  maxBodyKb: number | null
+  alertMin: number | null
+  logRetentionDays: number | null
+  labelTemplate: string
+  noteTemplate: string
 }

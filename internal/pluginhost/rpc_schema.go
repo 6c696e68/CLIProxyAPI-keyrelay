@@ -10,6 +10,9 @@ import (
 type rpcLifecycleRequest struct {
 	ConfigYAML    []byte `json:"config_yaml"`
 	SchemaVersion uint32 `json:"schema_version"`
+	// HostBaseURL is the base URL the host itself listens on. Plugins use it as
+	// the default local target when they need to reach the proxy.
+	HostBaseURL string `json:"host_base_url,omitempty"`
 }
 
 type rpcRegistration struct {

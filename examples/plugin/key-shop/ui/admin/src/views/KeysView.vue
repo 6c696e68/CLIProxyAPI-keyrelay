@@ -26,12 +26,14 @@ import { bindViewBusy, notifyKey, refreshKey } from '@/composables/useToast'
 import { toLocalInput, ttlSecondsFromLocal } from '@/lib/datetime'
 import { defaultCreateDraft, rememberGroup, rememberedGroup } from '@/lib/drafts'
 import { copyText, formatNumber, pageRange, quota, randomLabel, splitWhen } from '@/lib/format'
-import type { AdminService, CreateDraft, CreatedTunnel, EditDraft, KeyRecord, ModelGroup, Scenario } from '@/types'
+import type { AdminService, CreateDraft, CreatedTunnel, EditDraft, KeyRecord, ModelGroup, Partner, Scenario } from '@/types'
 
 const props = withDefaults(defineProps<{ service: AdminService; scenario?: Scenario }>(), { scenario: 'ready' })
 const notify = inject(notifyKey, () => {})
 const refreshTick = inject(refreshKey, ref(0))
 const groups = ref<ModelGroup[]>([])
+const partners = ref<Partner[]>([])
+const partner = ref('')
 const keys = ref<KeyRecord[]>([])
 const total = ref(0)
 const error = ref('')
@@ -73,6 +75,14 @@ const statusOptions = [
   { value: 'expired', label: 'Expired' },
   { value: 'exhausted', label: 'Exhausted' },
 ]
+const partnerOptions = computed(() => [
+  { value: '', label: 'All partners' },
+  ...partners.value.map((item) => ({ value: item.id, label: item.name })),
+])
+function partnerLabel(id: string | undefined) {
+  if (!id) return '—'
+  return partners.value.find((item) => item.id === id)?.name || id
+}
 function groupLabel(id: string) {
   if (!id) return 'No group'
   return groups.value.find((item) => item.id === id)?.name || id
@@ -89,13 +99,15 @@ function load() {
   }
   error.value = ''
   try {
-    const [list, nextGroups] = await Promise.all([
-      props.service.keys({ q: query.value, status: status.value, group: group.value, page: page.value, pageSize: props.service.pageSize }, props.scenario),
+    const [list, nextGroups, nextPartners] = await Promise.all([
+      props.service.keys({ q: query.value, status: status.value, group: group.value, partner: partner.value, page: page.value, pageSize: props.service.pageSize }, props.scenario),
       props.service.groups(props.scenario),
+      props.service.partners(props.scenario).catch(() => [] as Partner[]),
     ])
     keys.value = list.keys
     total.value = list.total
     groups.value = nextGroups
+    partners.value = nextPartners
     if (!bulkGroup.value) bulkGroup.value = rememberedGroup(nextGroups.map((item) => item.id))
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Request failed'
@@ -249,6 +261,10 @@ async function applyBulk(action: () => Promise<number>, message: string) {
 }
 watch(() => props.scenario, () => { void load() }, { immediate: true })
 watch(refreshTick, () => { void load() })
+watch(partner, () => {
+  if (page.value !== 1) page.value = 1
+  else void load()
+})
 </script>
 
 <template>
@@ -263,6 +279,7 @@ watch(refreshTick, () => { void load() })
         <AppTextInput v-model="query" placeholder="Search label, customer, or ID" />
         <AppSelect v-model="status" :options="statusOptions" label="Filter by status" />
         <GroupSelect v-model="group" :groups="groups" include-all include-none label="Filter by group" />
+        <AppSelect v-model="partner" :options="partnerOptions" label="Filter by partner" />
       </FilterBar>
       <p v-if="loading && !keys.length" role="status">Loading keys…</p>
       <template v-else>
@@ -275,7 +292,7 @@ watch(refreshTick, () => { void load() })
                   <th class="check-col">
                     <span class="check-icon-only"><AppCheckbox :checked="selection.pageChecked(pageIds)" label="Select this page" @toggle="selection.togglePage(pageIds)" /></span>
                   </th>
-                  <th>Key</th><th>Customer</th><th>Group</th><th>Status</th><th class="text-right">Requests</th><th>Usage</th><th>Expires</th><th class="actions">Actions</th>
+                  <th>Key</th><th>Customer</th><th>Group</th><th>Partner</th><th>Status</th><th class="text-right">Requests</th><th>Usage</th><th>Expires</th><th class="actions">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -286,6 +303,13 @@ watch(refreshTick, () => { void load() })
                   <td><strong class="num clip block max-w-44 text-[13px] font-medium">{{ key.label }}</strong><div class="sub num">{{ key.display }}</div></td>
                   <td>{{ key.customer || '—' }}</td>
                   <td>{{ groupLabel(key.groupId) }}</td>
+                  <td>
+                    <template v-if="key.partnerId || key.partnerRef">
+                      <span>{{ partnerLabel(key.partnerId) }}</span>
+                      <div v-if="key.partnerRef" class="sub num">{{ key.partnerRef }}</div>
+                    </template>
+                    <span v-else>—</span>
+                  </td>
                   <td><StatusChip interactive :value="key.status" @select="statusTarget = key" /><div v-if="reasons(key)" class="sub text-[var(--warn)]">{{ reasons(key) }}</div></td>
                   <td class="num text-right text-xs">{{ quota(key.requestQuotaUsed, key.requestLimit) }}<div class="sub"><RequestCounts :succeeded="key.requestSuccessCount" :failed="key.requestFailureCount" :canceled="key.requestCanceledCount" :rejected="key.requestRejectedCount" /></div></td>
                   <td class="num usage-cell text-xs">
@@ -301,7 +325,7 @@ watch(refreshTick, () => { void load() })
                     </div>
                   </td>
                 </tr>
-                <tr v-if="!keys.length"><td colspan="9" class="py-10 text-center text-[var(--ink-soft)]">No matching keys.</td></tr>
+                <tr v-if="!keys.length"><td colspan="10" class="py-10 text-center text-[var(--ink-soft)]">No matching keys.</td></tr>
               </tbody>
             </table>
           </div>
@@ -318,6 +342,7 @@ watch(refreshTick, () => { void load() })
             <div class="mt-3 grid grid-cols-2 gap-3">
               <div class="kv"><span>Customer</span><strong>{{ key.customer || '—' }}</strong></div>
               <div class="kv"><span>Group</span><strong>{{ groupLabel(key.groupId) }}</strong></div>
+              <div v-if="key.partnerId || key.partnerRef" class="kv col-span-2"><span>Partner</span><strong>{{ partnerLabel(key.partnerId) }}<span v-if="key.partnerRef" class="sub num"> · {{ key.partnerRef }}</span></strong></div>
               <div class="kv col-span-2"><span>Requests</span><strong class="num">{{ quota(key.requestQuotaUsed, key.requestLimit) }}</strong></div>
             </div>
             <div class="mt-3 flex flex-wrap gap-2">
@@ -369,7 +394,7 @@ watch(refreshTick, () => { void load() })
         <AppField label="Internal note"><AppTextInput v-model="createDraft.note" placeholder="Optional note" /></AppField>
         <AppSwitch :on="Boolean(createDraft.tunnelEnabled)" text="Create tunnel too" label="Create tunnel too" @toggle="createDraft.tunnelEnabled = !createDraft.tunnelEnabled" />
         <AppField v-if="createDraft.tunnelEnabled" label="Tunnel target" hint="Leave blank to choose automatically. A quick tunnel URL changes when the tunnel restarts.">
-          <AppTextInput v-model="createDraft.tunnelTarget" placeholder="http://127.0.0.1:8317" />
+          <AppTextInput v-model="createDraft.tunnelTarget" placeholder="Blank = this CPA address" />
         </AppField>
         <AppButton kind="primary" type="submit" :disabled="acting || !createDraft.groupId">{{ acting ? 'Creating...' : `Create ${createDraft.count || 1} key${createDraft.count === 1 ? '' : 's'}` }}</AppButton>
       </form>

@@ -6,6 +6,8 @@ import { notifyKey, refreshKey, viewBusyKey, useToast } from '@/composables/useT
 import DashboardView from '@/views/DashboardView.vue'
 import GroupsView from '@/views/GroupsView.vue'
 import KeysView from '@/views/KeysView.vue'
+import PartnersView from '@/views/PartnersView.vue'
+import PlansView from '@/views/PlansView.vue'
 import RequestsView from '@/views/RequestsView.vue'
 import TunnelsView from '@/views/TunnelsView.vue'
 import type { AdminService, Scenario, ThemeName } from '@/types'
@@ -27,6 +29,8 @@ provide(viewBusyKey, viewBusy)
       <DashboardView v-if="route === 'dashboard'" :service="service" :scenario="props.scenario" />
       <GroupsView v-else-if="route === 'groups'" :service="service" :scenario="props.scenario" />
       <KeysView v-else-if="route === 'keys'" :service="service" :scenario="props.scenario" />
+      <PlansView v-else-if="route === 'plans'" :service="service" :scenario="props.scenario" />
+      <PartnersView v-else-if="route === 'partners'" :service="service" :scenario="props.scenario" />
       <RequestsView v-else-if="route === 'requests'" :service="service" :scenario="props.scenario" />
       <TunnelsView v-else-if="route === 'tunnels'" :service="service" :scenario="props.scenario" />
     </main>

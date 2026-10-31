@@ -1,6 +1,7 @@
 import type { ModelEntry } from '@/types'
 
-// groupModelProblems flags aliases that collide with another name or alias.
+// groupModelProblems flags aliases the server would reject: a collision with
+// another name or alias, or parentheses (they start a thinking suffix).
 // An alias equal to its own upstream name is treated as unset.
 export function groupModelProblems(models: ModelEntry[]): Record<string, string> {
   const problems: Record<string, string> = {}
@@ -11,6 +12,10 @@ export function groupModelProblems(models: ModelEntry[]): Record<string, string>
     const own = item.name.trim().toLowerCase()
     if (!alias || alias.toLowerCase() === own) continue
     const key = alias.toLowerCase()
+    if (/[()]/.test(alias)) {
+      problems[item.name] = 'Alias must not contain parentheses'
+      continue
+    }
     if (names.has(key)) {
       problems[item.name] = 'Alias matches another model name'
       continue

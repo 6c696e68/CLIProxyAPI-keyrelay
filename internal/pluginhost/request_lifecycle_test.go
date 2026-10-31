@@ -145,7 +145,7 @@ func TestRPCCapabilitiesAndAdapterIncludeRequestLifecycle(t *testing.T) {
 	}
 
 	lookup := newTestSymbolLookup(&testPlugin{registerResult: plugin})
-	registered, errRegister := registerRPCPlugin(context.Background(), nil, "request-lifecycle", lookup, pluginabi.MethodPluginRegister, nil)
+	registered, errRegister := registerRPCPlugin(context.Background(), nil, "request-lifecycle", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}

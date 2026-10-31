@@ -61,7 +61,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -128,6 +127,7 @@ type pluginConfig struct {
 	FallbackRetry        *int              `yaml:"fallback-retry"`
 	RotationMode         string            `yaml:"rotation-mode"`
 	PlusPreference       string            `yaml:"plus-preference"`
+	FreeModels           []string          `yaml:"free-models"`
 	StickySeconds        *int              `yaml:"sticky-seconds"`
 	ModelCooldownMinutes *int              `yaml:"model-cooldown-minutes"`
 	StatsFile            string            `yaml:"stats-file"`
@@ -220,17 +220,26 @@ type stickyBind struct {
 	until     time.Time
 }
 
+// penalty is a soft, in-memory demotion. set is when it was last recorded, so a
+// success that started earlier cannot clear it.
+type penalty struct {
+	until time.Time
+	set   time.Time
+}
+
 type runtimeState struct {
 	cfg           pluginConfig
 	configured    bool
-	accountCursor int
 	pinnedIndex   string
 	pinFailed     bool
 	stickyCursor  int
 	nameCursor    map[string]int
 	sticky        map[string]stickyBind
-	cooldownIndex map[string]time.Time
-	cooldownToken map[string]time.Time
+	lastUsed      map[string]time.Time
+	cooldownIndex map[string]time.Time // key: auth index + "\x00" + base model
+	cooldownToken map[string]time.Time // key: token hash + "\x00" + base model
+	penaltyIndex  map[string]penalty
+	penaltyToken  map[string]penalty
 }
 
 type hostHTTPRequest struct {
@@ -339,6 +348,7 @@ type preparedCall struct {
 type cooldownRecord struct {
 	AuthIndex string    `json:"auth_index,omitempty"`
 	TokenHash string    `json:"token_hash,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	Until     time.Time `json:"until"`
 	Reason    string    `json:"reason,omitempty"`
 }
@@ -362,8 +372,11 @@ func resetRuntime() {
 		cfg:           defaultPluginConfig(),
 		nameCursor:    map[string]int{},
 		sticky:        map[string]stickyBind{},
+		lastUsed:      map[string]time.Time{},
 		cooldownIndex: map[string]time.Time{},
 		cooldownToken: map[string]time.Time{},
+		penaltyIndex:  map[string]penalty{},
+		penaltyToken:  map[string]penalty{},
 	}
 	nowFn = time.Now
 	hostCallOverride = nil
@@ -554,6 +567,7 @@ func normalizeConfig(cfg pluginConfig) (pluginConfig, error) {
 		return pluginConfig{}, fmt.Errorf("invalid plus-preference %q", cfg.PlusPreference)
 	}
 	cfg.PlusPreference = plus
+	cfg.FreeModels = normalizeFreeModels(cfg.FreeModels)
 
 	cfg.RequestRetry = clampInt(cfg.RequestRetry, defaultRetry, 0, maxExtraRetries)
 	cfg.FallbackRetry = clampInt(cfg.FallbackRetry, 0, 0, maxFallbackRetries)
@@ -684,6 +698,32 @@ func normalizeModels(models []modelSpec) ([]modelSpec, error) {
 	return out, nil
 }
 
+// normalizeFreeModels trims names, drops empty entries, and dedupes case-insensitively
+// while keeping the first-seen order.
+func normalizeFreeModels(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for _, item := range raw {
+		name := strings.TrimSpace(item)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // normalizeFallback trims names, drops duplicates, and drops the row's own name.
 func normalizeFallback(self string, raw []string) []string {
 	if len(raw) == 0 {
@@ -779,8 +819,9 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "fallback-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts with the model fallback names after every primary attempt failed because the upstream refused the model. Only the request model changes; response bytes are not touched. 0 disables fallback. Maximum 3."},
 		{Name: "rotation-mode", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"round-robin", "fill-first", "least-recent", "sticky"}, Description: "Codex account rotation. round-robin keeps a successful access token and moves to the next account after one upstream error."},
 		{Name: "plus-preference", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"off", "prefer", "only"}, Description: "plus is the ChatGPT plan inside the account token. A stale plan_type of plus is ignored when the token says free. prefer stays on Plus while any enabled Plus account exists. ignore is stored as off."},
+		{Name: "free-models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model names, not aliases, that may also use free and other non-Plus Codex accounts. Other models keep plus-preference. No effect when plus-preference is off."},
 		{Name: "sticky-seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Sticky session lifetime in seconds. Default 300."},
-		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token after the upstream says the model is not supported for a ChatGPT account. 0 disables. Default 1440. Maximum 10080. The skip is saved beside stats-file and survives restart."},
+		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token for one model after the upstream says that model is not supported for a ChatGPT account. Other models stay available. 0 disables. Default 1440. Maximum 10080. The skip is saved beside stats-file and survives restart."},
 		{Name: "stats-file", Type: pluginapi.ConfigFieldTypeString, Description: "JSON file for hourly request and token buckets kept for 90 days. Empty disables persistence."},
 		{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model name plus optional client alias. The same alias with different names is one pool. An exact duplicate name and alias is skipped. fallback lists upstream names tried in order when fallback-retry is above 0."},
 	}
@@ -852,7 +893,11 @@ func modelList(cfg pluginConfig) pluginapi.ModelResponse {
 				SupportedInputModalities:  append([]string(nil), pool.inputModalities...),
 				SupportedOutputModalities: append([]string(nil), pool.outputModalities...),
 				UserDefined:               true,
-				Thinking:                  pool.thinking(),
+				// The relay forwards service_tier to the Codex backend, so the
+				// host keeps the template speed tiers (Fast, Ultrafast) in the
+				// Codex client catalog for these models.
+				SupportedParameters: []string{"service_tier"},
+				Thinking:            pool.thinking(),
 			})
 		}
 	}
@@ -940,7 +985,8 @@ func intFromMap(value any) (int, bool) {
 }
 
 func thinkingFromCanonical(name string) *pluginapi.ThinkingSupport {
-	info := registry.LookupStaticModelInfo(strings.TrimSpace(name))
+	name = strings.TrimSpace(name)
+	info := registry.LookupStaticModelInfo(name)
 	if info == nil || info.Thinking == nil || len(info.Thinking.Levels) == 0 {
 		return nil
 	}
@@ -949,8 +995,65 @@ func thinkingFromCanonical(name string) *pluginapi.ThinkingSupport {
 		Max:            info.Thinking.Max,
 		ZeroAllowed:    info.Thinking.ZeroAllowed,
 		DynamicAllowed: info.Thinking.DynamicAllowed,
-		Levels:         append([]string(nil), info.Thinking.Levels...),
+		Levels:         unionLevels(info.Thinking.Levels, codexClientLevels(name)),
 	}
+}
+
+// unionLevels appends the levels in extra that base lacks, keeping base order.
+func unionLevels(base, extra []string) []string {
+	out := append([]string(nil), base...)
+	seen := make(map[string]struct{}, len(base))
+	for _, level := range base {
+		seen[strings.ToLower(strings.TrimSpace(level))] = struct{}{}
+	}
+	for _, level := range extra {
+		key := strings.ToLower(strings.TrimSpace(level))
+		if key == "" {
+			continue
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, strings.TrimSpace(level))
+	}
+	return out
+}
+
+var (
+	codexClientLevelsOnce sync.Once
+	codexClientLevelsByID map[string][]string
+)
+
+// codexClientLevels returns the reasoning efforts the embedded Codex client
+// catalog lists for a model slug. The static models.json stops at "max" while
+// the Codex catalog also carries "ultra"; the relay accepts whatever the Codex
+// backend accepts, so the advertised levels follow the Codex catalog.
+func codexClientLevels(slug string) []string {
+	codexClientLevelsOnce.Do(func() {
+		codexClientLevelsByID = map[string][]string{}
+		var payload struct {
+			Models []struct {
+				Slug   string `json:"slug"`
+				Levels []struct {
+					Effort string `json:"effort"`
+				} `json:"supported_reasoning_levels"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &payload); err != nil {
+			return
+		}
+		for _, model := range payload.Models {
+			levels := make([]string, 0, len(model.Levels))
+			for _, level := range model.Levels {
+				if effort := strings.TrimSpace(level.Effort); effort != "" {
+					levels = append(levels, effort)
+				}
+			}
+			codexClientLevelsByID[strings.ToLower(strings.TrimSpace(model.Slug))] = levels
+		}
+	})
+	return codexClientLevelsByID[strings.ToLower(strings.TrimSpace(slug))]
 }
 
 func routeModel(raw []byte) ([]byte, error) {
@@ -1028,24 +1131,49 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		return errorEnvelope("unsupported_format", errPath.Error(), http.StatusBadRequest), nil
 	}
 	now := nowFn()
-	accounts, errAccounts := loadEligible(req.HostCallbackID, now, cfg.PlusPreference)
-	if errors.Is(errAccounts, errNoEligiblePlus) {
-		return errorEnvelope("no_plus_account", "no eligible plus codex account is available", http.StatusServiceUnavailable), nil
-	}
+	accounts, hasEnabledPlus, errAccounts := loadEligible(req.HostCallbackID, now)
 	if errAccounts != nil {
 		return errorEnvelope("auth_unavailable", "codex auth list failed", http.StatusBadGateway), nil
 	}
-	accounts = highestPriority(accounts)
-	if cfg.PlusPreference == "only" {
-		accounts = onlyPlusBearers(accounts)
-		if len(accounts) == 0 {
-			return errorEnvelope("no_plus_account", "no plus codex account is available", http.StatusServiceUnavailable), nil
+	allAccounts := accounts
+	session := sessionID(req.Metadata, req.Headers)
+	primaryNames := []string(nil)
+	primaryModel := ""
+	planPrimary := func() {
+		runtimeMu.Lock()
+		planned := planNamesLocked(alias, names, explicit)
+		runtimeMu.Unlock()
+		if len(planned) > 1 {
+			planned = planned[:1]
 		}
+		primaryNames = planned
+		if len(planned) > 0 {
+			primaryModel = planned[0]
+		}
+	}
+	planCfg := cfg
+	freePrimary := false
+	plannedPrimary := false
+	if len(cfg.FreeModels) > 0 && cfg.PlusPreference != "off" {
+		planPrimary()
+		plannedPrimary = true
+		freePrimary = cfg.freeModel(primaryModel)
+	}
+	if freePrimary {
+		// A listed primary name may use every eligible account, as plus-preference off would.
+		planCfg.PlusPreference = "off"
+	}
+	accounts, errCode, errMessage := restrictAccounts(cfg, freePrimary, accounts, hasEnabledPlus)
+	if errCode != "" {
+		return errorEnvelope(errCode, errMessage, http.StatusServiceUnavailable), nil
 	}
 	if len(accounts) == 0 {
 		return errorEnvelope("no_account", "no eligible codex account is available", http.StatusServiceUnavailable), nil
 	}
-	ready, cooling := splitCooldown(accounts, now)
+	if !plannedPrimary {
+		planPrimary()
+	}
+	ready, cooling := splitCooldown(accounts, primaryModel, now)
 	fallbackNames := fallbackModels(names, fallbacks)
 	canFallback := cfg.fallbackRetry() > 0 && len(fallbackNames) > 0
 	if len(ready) == 0 && !canFallback {
@@ -1054,21 +1182,46 @@ func execute(raw []byte, stream bool) ([]byte, error) {
 		}
 		return errorEnvelope("no_account", "no eligible codex account is available", http.StatusServiceUnavailable), nil
 	}
-	session := sessionID(req.Metadata, req.Headers)
 	runtimeMu.Lock()
-	ordered := planAccountsLocked(cfg, ready, session, now)
-	plannedNames := planNamesLocked(alias, names, explicit)
+	healthy, penalized := splitPenaltyLocked(ready, now)
+	healthy = highestPriority(healthy)
+	ordered := planAccountsLocked(planCfg, healthy, priorityAtLeast(penalized, healthy), session, now)
 	runtimeMu.Unlock()
-	primaryNames := plannedNames
-	if len(primaryNames) > 1 {
-		primaryNames = primaryNames[:1]
-	}
-	attempts := buildAttempts(ordered, primaryNames, 1+cfg.retry(), suffix)
+	attempts := buildAttempts(ordered, primaryNames, 1+cfg.retry(), suffix, func(item account, name string) bool {
+		return planCfg.allowsAccount(item, name, hasEnabledPlus)
+	})
 	var fallbackAttempts []attempt
 	if canFallback {
 		// Cooldown only means the primary model was refused, so cooled accounts may still serve a fallback name.
-		pool := append(append([]account(nil), ordered...), sortAccounts(cooling, false)...)
-		fallbackAttempts = buildAttempts(pool, fallbackNames, cfg.fallbackRetry(), suffix)
+		basePool := append(append([]account(nil), ordered...), sortAccounts(priorityAtLeast(cooling, ordered), false)...)
+		pool := basePool
+		inBase := make(map[string]struct{}, len(basePool))
+		for _, item := range basePool {
+			inBase[item.index] = struct{}{}
+		}
+		if cfg.PlusPreference != "off" {
+			for _, name := range fallbackNames {
+				if !cfg.freeModel(name) {
+					continue
+				}
+				// A listed fallback name may use accounts that the primary pool dropped.
+				extra := make([]account, 0, len(allAccounts))
+				for _, item := range allAccounts {
+					if _, ok := inBase[item.index]; ok {
+						continue
+					}
+					extra = append(extra, item)
+				}
+				pool = append(pool, sortAccounts(extra, false)...)
+				break
+			}
+		}
+		fallbackAttempts = buildAttempts(pool, fallbackNames, cfg.fallbackRetry(), suffix, func(item account, name string) bool {
+			if _, ok := inBase[item.index]; !ok && !cfg.freeModel(name) {
+				return false
+			}
+			return cfg.allowsAccount(item, name, hasEnabledPlus)
+		})
 		for i := range fallbackAttempts {
 			fallbackAttempts[i].fallback = true
 		}
@@ -1114,6 +1267,7 @@ type attemptResult struct {
 	body         []byte
 	tokens       []string
 	index        string
+	model        string
 	email        string
 	noted        bool
 	modelMissing bool
@@ -1136,7 +1290,8 @@ func postModel(cfg pluginConfig, prepared preparedCall, token, model string, str
 // every primary attempt failed with a model error. A non-2xx reply has not reached
 // the client yet, so only the request model changes; response bytes stay as-is.
 func runAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attemptResult {
-	result := performAttempts(cfg, prepared, stream)
+	spent := spentAttempts{}
+	result := performAttempts(cfg, prepared, stream, spent)
 	if result.success || result.rewrite != nil || len(prepared.fallbacks) == 0 {
 		return result
 	}
@@ -1145,7 +1300,7 @@ func runAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attemptRe
 	}
 	next := prepared
 	next.attempts = prepared.fallbacks
-	fallback := performAttempts(cfg, next, stream)
+	fallback := performAttempts(cfg, next, stream, spent)
 	if fallback.rewrite != nil || len(fallback.tokens) == 0 {
 		return result
 	}
@@ -1154,21 +1309,73 @@ func runAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attemptRe
 	return fallback
 }
 
+// spentAttempts remembers what one request already burned: whole accounts after a
+// 429/401/402/403, and (account, model) pairs after a model refusal.
+type spentAttempts map[string]struct{}
+
+func (s spentAttempts) skip(at attempt) bool {
+	for _, key := range spentKeys(at, true) {
+		if _, ok := s[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (s spentAttempts) markAccount(at attempt) {
+	for _, key := range spentKeys(at, false) {
+		s[key] = struct{}{}
+	}
+}
+
+func (s spentAttempts) markModel(at attempt) {
+	base, _ := splitSuffix(at.model)
+	s["m\x00"+at.index+"\x00"+base] = struct{}{}
+}
+
+func spentKeys(at attempt, withModel bool) []string {
+	keys := []string{"a\x00" + at.index}
+	if hash := tokenKey(at.token); hash != "" {
+		keys = append(keys, "t\x00"+hash)
+	}
+	if withModel {
+		base, _ := splitSuffix(at.model)
+		keys = append(keys, "m\x00"+at.index+"\x00"+base)
+	}
+	return keys
+}
+
+// clientRejected reports a 4xx that blames the request, so another account cannot help.
+func clientRejected(status int, body []byte) bool {
+	switch status {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusRequestEntityTooLarge, http.StatusUnsupportedMediaType, http.StatusUnprocessableEntity:
+		return !modelUnavailable(body)
+	}
+	return false
+}
+
 // performAttempts sends the configured upstream model with the selected access token.
-// A 2xx response is returned unchanged. A non-2xx response tries the next account.
-// The ChatGPT model-not-supported error cools that account and access token.
-func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attemptResult {
+// A 2xx response is returned unchanged. A non-2xx response tries the next account,
+// except client errors, which return at once. The ChatGPT model-not-supported error
+// cools that account and access token for that model only. 429, 401, 402 and 403
+// demote the account softly and are never retried on it within the request.
+func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent spentAttempts) attemptResult {
 	tokens := make([]string, 0, len(prepared.attempts))
 	lastStatus := http.StatusBadGateway
 	var lastBody []byte
 	var lastResp hostHTTPResult
 	modelMissing := false
 	for _, at := range prepared.attempts {
-		if !at.fallback && cooled(at.index, at.token, nowFn()) {
+		if spent.skip(at) {
+			continue
+		}
+		if cooled(at.index, at.token, at.model, nowFn()) {
 			modelMissing = true
 			continue
 		}
 		tokens = append(tokens, at.token)
+		started := nowFn()
+		markUsed(at.index, started)
 		resp, status, body, errPost := postModel(cfg, prepared, at.token, at.model, stream)
 		if errPost != nil {
 			return attemptResult{rewrite: errPost}
@@ -1176,7 +1383,8 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 		if status >= 200 && status < 300 {
 			refused := chatgptModelUnsupported(body)
 			if refused {
-				markModelCooldown(at.index, at.token, cfg.modelCooldown(), cfg.StatsFile)
+				markModelCooldown(at.index, at.token, at.model, cfg.modelCooldown(), cfg.StatsFile)
+				spent.markModel(at)
 			}
 			if stream && resp.streamID() == "" {
 				lastStatus = http.StatusBadGateway
@@ -1185,10 +1393,14 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 				noteRequest(false, 0, 0, 0, at.email)
 				continue
 			}
-			if cfg.RotationMode == "sticky" && !refused {
+			demoted := false
+			if !refused {
+				demoted = settlePenalty(at.index, at.token, started)
+			}
+			if cfg.RotationMode == "sticky" && !refused && !demoted {
 				bindSticky(prepared.session, at.index, cfg.stickySeconds())
 			}
-			if cfg.RotationMode == "round-robin" {
+			if cfg.RotationMode == "round-robin" && !demoted {
 				pinRoundRobin(at.index, refused)
 			}
 			return attemptResult{
@@ -1198,6 +1410,7 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 				body:    body,
 				tokens:  append([]string(nil), tokens...),
 				index:   at.index,
+				model:   at.model,
 				email:   at.email,
 			}
 		}
@@ -1216,14 +1429,18 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 		lastResp = resp
 		lastBody = body
 		noteRequest(false, 0, 0, 0, at.email)
-		if clientAborted(status, body) {
+		if clientAborted(status, body) || clientRejected(status, body) {
 			return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, email: at.email, noted: true}
 		}
 		if chatgptModelUnsupported(body) {
-			markModelCooldown(at.index, at.token, cfg.modelCooldown(), cfg.StatsFile)
+			markModelCooldown(at.index, at.token, at.model, cfg.modelCooldown(), cfg.StatsFile)
 		}
 		if modelUnavailable(body) {
 			modelMissing = true
+			spent.markModel(at)
+		}
+		if penalizeAttempt(at, status, resp.headers(), body, nowFn()) {
+			spent.markAccount(at)
 		}
 		if cfg.RotationMode == "round-robin" {
 			pinRoundRobin(at.index, true)
@@ -1232,17 +1449,30 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool) attem
 	return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, noted: len(tokens) > 0, modelMissing: modelMissing}
 }
 
+// stickRoundRobinLocked stays on the pinned account while it succeeds and moves to
+// its successor after a failure. A pinned account that left the pool (cooled,
+// demoted, unavailable) hands over to the first account sorting after it.
 func stickRoundRobinLocked(primary []account) []account {
 	if len(primary) == 0 {
 		return nil
 	}
 	start := 0
-	if i := accountIndex(primary, runtime.pinnedIndex); i >= 0 {
-		start = i
-		if runtime.pinFailed {
+	if runtime.pinnedIndex != "" {
+		i := accountIndex(primary, runtime.pinnedIndex)
+		switch {
+		case i >= 0 && !runtime.pinFailed:
+			start = i
+		case i >= 0:
 			start = (i + 1) % len(primary)
 			runtime.pinFailed = false
 			runtime.pinnedIndex = primary[start].index
+		default:
+			for j, item := range primary {
+				if item.index > runtime.pinnedIndex {
+					start = j
+					break
+				}
+			}
 		}
 	}
 	return rotateAccounts(primary, start)
@@ -1300,9 +1530,25 @@ func readStreamBody(callbackID, streamID string) []byte {
 	return body
 }
 
-func splitCooldown(accounts []account, now time.Time) (ready, cooling []account) {
+const (
+	defaultPenalty = 10 * time.Minute
+	minPenalty     = 30 * time.Second
+	maxPenalty     = 7 * 24 * time.Hour
+)
+
+// baseModel drops the thinking suffix so a cooldown covers every effort level.
+func baseModel(model string) string {
+	base, _ := splitSuffix(model)
+	return base
+}
+
+func cooldownKey(owner, model string) string {
+	return owner + "\x00" + baseModel(model)
+}
+
+func splitCooldown(accounts []account, model string, now time.Time) (ready, cooling []account) {
 	for _, item := range accounts {
-		if cooled(item.index, item.token, now) {
+		if cooled(item.index, item.token, model, now) {
 			cooling = append(cooling, item)
 			continue
 		}
@@ -1311,17 +1557,40 @@ func splitCooldown(accounts []account, now time.Time) (ready, cooling []account)
 	return ready, cooling
 }
 
-func cooled(index, token string, now time.Time) bool {
+// cooled reports a model refusal still in force for this account or token and model.
+func cooled(index, token, model string, now time.Time) bool {
+	if baseModel(model) == "" {
+		return false
+	}
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
-	if until, ok := runtime.cooldownIndex[index]; ok && index != "" && now.Before(until) {
+	if until, ok := runtime.cooldownIndex[cooldownKey(index, model)]; ok && index != "" && now.Before(until) {
 		return true
 	}
 	key := tokenKey(token)
-	if until, ok := runtime.cooldownToken[key]; ok && key != "" && now.Before(until) {
+	if until, ok := runtime.cooldownToken[cooldownKey(key, model)]; ok && key != "" && now.Before(until) {
 		return true
 	}
 	return false
+}
+
+// cooledAny reports a model refusal in force for any model.
+func cooledAny(index, token string, now time.Time) bool {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	anyCooled := func(m map[string]time.Time, owner string) bool {
+		if owner == "" {
+			return false
+		}
+		prefix := owner + "\x00"
+		for key, until := range m {
+			if strings.HasPrefix(key, prefix) && now.Before(until) {
+				return true
+			}
+		}
+		return false
+	}
+	return anyCooled(runtime.cooldownIndex, index) || anyCooled(runtime.cooldownToken, tokenKey(token))
 }
 
 func tokenKey(token string) string {
@@ -1332,19 +1601,21 @@ func tokenKey(token string) string {
 	return fmt.Sprintf("%x", sum[:])
 }
 
-func markModelCooldown(index, token string, d time.Duration, statsFile string) {
-	if d <= 0 || (index == "" && token == "") {
+func markModelCooldown(index, token, model string, d time.Duration, statsFile string) {
+	if d <= 0 || (index == "" && token == "") || baseModel(model) == "" {
 		return
 	}
 	until := nowFn().Add(d)
 	runtimeMu.Lock()
 	ensureCooldownMapsLocked()
 	if index != "" {
-		if prev, ok := runtime.cooldownIndex[index]; !ok || until.After(prev) {
-			runtime.cooldownIndex[index] = until
+		key := cooldownKey(index, model)
+		if prev, ok := runtime.cooldownIndex[key]; !ok || until.After(prev) {
+			runtime.cooldownIndex[key] = until
 		}
 	}
-	if key := tokenKey(token); key != "" {
+	if hash := tokenKey(token); hash != "" {
+		key := cooldownKey(hash, model)
 		if prev, ok := runtime.cooldownToken[key]; !ok || until.After(prev) {
 			runtime.cooldownToken[key] = until
 		}
@@ -1360,6 +1631,169 @@ func ensureCooldownMapsLocked() {
 	if runtime.cooldownToken == nil {
 		runtime.cooldownToken = map[string]time.Time{}
 	}
+}
+
+// penalizeAttempt records a soft penalty for a failed attempt and reports whether
+// the account must not be sent to again in this request.
+func penalizeAttempt(at attempt, status int, header http.Header, body []byte, now time.Time) bool {
+	var d time.Duration
+	byToken := false
+	switch status {
+	case http.StatusTooManyRequests:
+		d = rateLimitDelay(header, body, now)
+	case http.StatusUnauthorized:
+		d, byToken = defaultPenalty, true
+	case http.StatusPaymentRequired, http.StatusForbidden:
+		d = defaultPenalty
+	default:
+		return false
+	}
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	pruneExpiredLocked(now)
+	until := now.Add(d)
+	if byToken {
+		if hash := tokenKey(at.token); hash != "" {
+			runtime.penaltyToken[hash] = widenPenalty(runtime.penaltyToken[hash], until, now)
+		}
+		return true
+	}
+	if at.index != "" {
+		runtime.penaltyIndex[at.index] = widenPenalty(runtime.penaltyIndex[at.index], until, now)
+	}
+	return true
+}
+
+func widenPenalty(prev penalty, until, now time.Time) penalty {
+	if prev.until.After(until) {
+		until = prev.until
+	}
+	return penalty{until: until, set: now}
+}
+
+func pruneExpiredLocked(now time.Time) {
+	if runtime.penaltyIndex == nil {
+		runtime.penaltyIndex = map[string]penalty{}
+	}
+	if runtime.penaltyToken == nil {
+		runtime.penaltyToken = map[string]penalty{}
+	}
+	for key, p := range runtime.penaltyIndex {
+		if !now.Before(p.until) {
+			delete(runtime.penaltyIndex, key)
+		}
+	}
+	for key, p := range runtime.penaltyToken {
+		if !now.Before(p.until) {
+			delete(runtime.penaltyToken, key)
+		}
+	}
+}
+
+// rateLimitDelay reads how long a 429 asks to wait: body resets_in_seconds, then
+// body resets_at (unix seconds), then Retry-After, then a default.
+func rateLimitDelay(header http.Header, body []byte, now time.Time) time.Duration {
+	var parsed struct {
+		Error struct {
+			ResetsIn float64 `json:"resets_in_seconds"`
+			ResetsAt float64 `json:"resets_at"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(body, &parsed)
+	d := defaultPenalty
+	switch {
+	case parsed.Error.ResetsIn > 0:
+		d = time.Duration(parsed.Error.ResetsIn * float64(time.Second))
+	case parsed.Error.ResetsAt > 0:
+		d = time.Unix(int64(parsed.Error.ResetsAt), 0).Sub(now)
+	default:
+		for name, values := range header {
+			if !strings.EqualFold(name, "Retry-After") || len(values) == 0 {
+				continue
+			}
+			value := strings.TrimSpace(values[0])
+			if seconds, errParse := strconv.Atoi(value); errParse == nil && seconds > 0 {
+				d = time.Duration(seconds) * time.Second
+			} else if at, errTime := http.ParseTime(value); errTime == nil {
+				d = at.Sub(now)
+			}
+			break
+		}
+	}
+	return min(max(d, minPenalty), maxPenalty)
+}
+
+// penaltyUntilLocked returns when the account's penalty ends, or the zero time.
+func penaltyUntilLocked(item account, now time.Time) time.Time {
+	var until time.Time
+	if p, ok := runtime.penaltyIndex[item.index]; ok && now.Before(p.until) {
+		until = p.until
+	}
+	if hash := tokenKey(item.token); hash != "" {
+		if p, ok := runtime.penaltyToken[hash]; ok && now.Before(p.until) && p.until.After(until) {
+			until = p.until
+		}
+	}
+	return until
+}
+
+// splitPenaltyLocked puts healthy accounts first and returns penalized ones
+// sorted by penalty expiry, soonest first.
+func splitPenaltyLocked(accounts []account, now time.Time) (healthy, penalized []account) {
+	expiry := map[string]time.Time{}
+	for _, item := range accounts {
+		if until := penaltyUntilLocked(item, now); !until.IsZero() {
+			expiry[item.index] = until
+			penalized = append(penalized, item)
+			continue
+		}
+		healthy = append(healthy, item)
+	}
+	sort.SliceStable(penalized, func(i, j int) bool {
+		ei, ej := expiry[penalized[i].index], expiry[penalized[j].index]
+		if !ei.Equal(ej) {
+			return ei.Before(ej)
+		}
+		return penalized[i].index < penalized[j].index
+	})
+	return healthy, penalized
+}
+
+// settlePenalty clears penalties recorded before started, after a success. It
+// reports whether a penalty recorded during the attempt still stands.
+func settlePenalty(index, token string, started time.Time) bool {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	demoted := false
+	if p, ok := runtime.penaltyIndex[index]; ok {
+		if p.set.After(started) {
+			demoted = true
+		} else {
+			delete(runtime.penaltyIndex, index)
+		}
+	}
+	if hash := tokenKey(token); hash != "" {
+		if p, ok := runtime.penaltyToken[hash]; ok {
+			if p.set.After(started) {
+				demoted = true
+			} else {
+				delete(runtime.penaltyToken, hash)
+			}
+		}
+	}
+	return demoted
+}
+
+func markUsed(index string, now time.Time) {
+	if index == "" {
+		return
+	}
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	if runtime.lastUsed == nil {
+		runtime.lastUsed = map[string]time.Time{}
+	}
+	runtime.lastUsed[index] = now
 }
 
 func cooldownFilePath(statsFile string) string {
@@ -1397,17 +1831,20 @@ func loadCooldowns(path string) {
 	runtime.cooldownIndex = map[string]time.Time{}
 	runtime.cooldownToken = map[string]time.Time{}
 	for _, record := range records {
-		if !now.Before(record.Until) {
+		// Records from before per-model cooldowns carry no model and are dropped.
+		if !now.Before(record.Until) || baseModel(record.Model) == "" {
 			continue
 		}
 		if record.AuthIndex != "" {
-			if prev, ok := runtime.cooldownIndex[record.AuthIndex]; !ok || record.Until.After(prev) {
-				runtime.cooldownIndex[record.AuthIndex] = record.Until
+			key := cooldownKey(record.AuthIndex, record.Model)
+			if prev, ok := runtime.cooldownIndex[key]; !ok || record.Until.After(prev) {
+				runtime.cooldownIndex[key] = record.Until
 			}
 		}
 		if record.TokenHash != "" {
-			if prev, ok := runtime.cooldownToken[record.TokenHash]; !ok || record.Until.After(prev) {
-				runtime.cooldownToken[record.TokenHash] = record.Until
+			key := cooldownKey(record.TokenHash, record.Model)
+			if prev, ok := runtime.cooldownToken[key]; !ok || record.Until.After(prev) {
+				runtime.cooldownToken[key] = record.Until
 			}
 		}
 	}
@@ -1431,25 +1868,30 @@ func persistCooldowns(path string) {
 func cooldownRecordsLocked(now time.Time) []cooldownRecord {
 	ensureCooldownMapsLocked()
 	out := make([]cooldownRecord, 0, len(runtime.cooldownIndex)+len(runtime.cooldownToken))
-	for index, until := range runtime.cooldownIndex {
+	for key, until := range runtime.cooldownIndex {
+		index, model, _ := strings.Cut(key, "\x00")
 		if index == "" || !now.Before(until) {
-			delete(runtime.cooldownIndex, index)
+			delete(runtime.cooldownIndex, key)
 			continue
 		}
-		out = append(out, cooldownRecord{AuthIndex: index, Until: until, Reason: cooldownReasonUnsupported})
+		out = append(out, cooldownRecord{AuthIndex: index, Model: model, Until: until, Reason: cooldownReasonUnsupported})
 	}
-	for hash, until := range runtime.cooldownToken {
+	for key, until := range runtime.cooldownToken {
+		hash, model, _ := strings.Cut(key, "\x00")
 		if hash == "" || !now.Before(until) {
-			delete(runtime.cooldownToken, hash)
+			delete(runtime.cooldownToken, key)
 			continue
 		}
-		out = append(out, cooldownRecord{TokenHash: hash, Until: until, Reason: cooldownReasonUnsupported})
+		out = append(out, cooldownRecord{TokenHash: hash, Model: model, Until: until, Reason: cooldownReasonUnsupported})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].AuthIndex != out[j].AuthIndex {
 			return out[i].AuthIndex < out[j].AuthIndex
 		}
-		return out[i].TokenHash < out[j].TokenHash
+		if out[i].TokenHash != out[j].TokenHash {
+			return out[i].TokenHash < out[j].TokenHash
+		}
+		return out[i].Model < out[j].Model
 	})
 	return out
 }
@@ -1506,12 +1948,18 @@ func bindSticky(session, index string, seconds int) {
 	if runtime.sticky == nil {
 		runtime.sticky = map[string]stickyBind{}
 	}
-	if current, ok := runtime.sticky[session]; ok && current.authIndex == index && nowFn().Before(current.until) {
+	now := nowFn()
+	for key, bind := range runtime.sticky {
+		if !now.Before(bind.until) {
+			delete(runtime.sticky, key)
+		}
+	}
+	if current, ok := runtime.sticky[session]; ok && current.authIndex == index {
 		return
 	}
 	runtime.sticky[session] = stickyBind{
 		authIndex: index,
-		until:     nowFn().Add(time.Duration(seconds) * time.Second),
+		until:     now.Add(time.Duration(seconds) * time.Second),
 	}
 }
 
@@ -1584,7 +2032,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 		if len(used) > 0 {
 			token = used[len(used)-1]
 		}
-		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, cfg.modelCooldown(), cfg.StatsFile, cfg.RotationMode)
+		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, result.model, cfg.modelCooldown(), cfg.StatsFile, cfg.RotationMode)
 		return okEnvelope(map[string]any{
 			"headers": responseHeaders(result.resp, "text/event-stream"),
 		})
@@ -1595,7 +2043,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 	return errorEnvelope("upstream_error", failureMessage(result.status, result.body, result.tokens), result.status), nil
 }
 
-func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email, index, token string, cooldown time.Duration, statsFile, rotation string) {
+func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, tokens []string, email, index, token, model string, cooldown time.Duration, statsFile, rotation string) {
 	var buffer helps.StreamUsageBuffer
 	failed := false
 	errText := ""
@@ -1631,7 +2079,7 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 		}
 		if chatgptModelUnsupported(scan) {
 			cooledStream = true
-			markModelCooldown(index, token, cooldown, statsFile)
+			markModelCooldown(index, token, model, cooldown, statsFile)
 			if rotation == "round-robin" {
 				pinRoundRobin(index, true)
 			}
@@ -1668,6 +2116,25 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 		}
 		return true
 	}
+	// Upstream may keep the Responses stream open after the terminal event
+	// and only send keep-alive comments. Codex drops the connection as soon
+	// as response.completed arrives, which the host then records as a client
+	// cancel. Close the stream ourselves once the terminal frame is complete.
+	terminalSeen := false
+	var carry []byte
+	noteTerminal := func(part []byte) {
+		if terminalSeen || protocol != "openai-response" || len(part) == 0 {
+			return
+		}
+		joined := append(append([]byte(nil), carry...), part...)
+		if responsesTerminalEvent(joined) {
+			terminalSeen = true
+		}
+		if len(part) > terminalCarryBytes {
+			part = part[len(part)-terminalCarryBytes:]
+		}
+		carry = append(carry[:0], part...)
+	}
 	for {
 		chunk, errRead := readHostStream(callbackID, httpStreamID)
 		if errRead != nil {
@@ -1690,7 +2157,45 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 			finish(errText)
 			return
 		}
+		noteTerminal(chunk.payload())
+		if terminalSeen && sseFrameBoundary(chunk.payload()) {
+			finish(errText)
+			return
+		}
 	}
+}
+
+// terminalCarryBytes is how much of the previous chunk is kept so a terminal
+// marker split across two reads is still recognised.
+const terminalCarryBytes = 128
+
+// responsesTerminalEvent reports whether an SSE buffer contains a Responses
+// terminal event at the start of a line. Only line starts count so the same
+// text inside a JSON string of another event is ignored.
+func responsesTerminalEvent(buf []byte) bool {
+	for _, line := range bytes.Split(buf, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		for _, marker := range responsesTerminalMarkers {
+			if bytes.HasPrefix(line, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var responsesTerminalMarkers = [][]byte{
+	[]byte("event: response.completed"),
+	[]byte("event: response.failed"),
+	[]byte("event: response.incomplete"),
+	[]byte(`data: {"type":"response.completed"`),
+	[]byte(`data: {"type":"response.failed"`),
+	[]byte(`data: {"type":"response.incomplete"`),
+}
+
+// sseFrameBoundary reports whether a chunk ends exactly on an SSE frame end.
+func sseFrameBoundary(part []byte) bool {
+	return bytes.HasSuffix(part, []byte("\n\n")) || bytes.HasSuffix(part, []byte("\r\n\r\n"))
 }
 
 // chatStreamKeepAlive is a valid chat chunk with no text and no finish.
@@ -1802,20 +2307,22 @@ func metaString(meta map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-var errNoEligiblePlus = errors.New("no eligible plus codex account")
-
 var plusFileCache sync.Map
 
-func loadEligible(callbackID string, now time.Time, preference string) ([]account, error) {
+// loadEligible returns every enabled Codex account that can serve a request now,
+// and whether at least one enabled Plus account exists. Plus-preference is applied
+// later per upstream model name. hasEnabledPlus counts cooling and unavailable
+// Plus accounts, matching the preference rules.
+func loadEligible(callbackID string, now time.Time) ([]account, bool, error) {
 	raw, errList := callHost(pluginabi.MethodHostAuthList, map[string]string{"host_callback_id": callbackID})
 	if errList != nil {
-		return nil, errList
+		return nil, false, errList
 	}
 	var listed struct {
 		Files []pluginapi.HostAuthFileEntry `json:"files"`
 	}
 	if errUnmarshal := json.Unmarshal(raw, &listed); errUnmarshal != nil {
-		return nil, errUnmarshal
+		return nil, false, errUnmarshal
 	}
 	type candidate struct {
 		file  pluginapi.HostAuthFileEntry
@@ -1834,16 +2341,8 @@ func loadEligible(callbackID string, now time.Time, preference string) ([]accoun
 		}
 		candidates = append(candidates, candidate{file: file, plus: plus, token: token})
 	}
-	// prefer/only stay on Plus while any enabled Plus account exists, including ones that are cooling.
-	if preference == "only" && !hasEnabledPlus {
-		return nil, errNoEligiblePlus
-	}
-	restrictPlus := (preference == "prefer" || preference == "only") && hasEnabledPlus
 	out := make([]account, 0, len(candidates))
 	for _, item := range candidates {
-		if restrictPlus && !item.plus {
-			continue
-		}
 		file := item.file
 		if file.Unavailable {
 			continue
@@ -1869,10 +2368,7 @@ func loadEligible(callbackID string, now time.Time, preference string) ([]accoun
 			email:    strings.TrimSpace(file.Email),
 		})
 	}
-	if restrictPlus && len(out) == 0 {
-		return nil, errNoEligiblePlus
-	}
-	return out, nil
+	return out, hasEnabledPlus, nil
 }
 
 func accountPlan(callbackID string, file pluginapi.HostAuthFileEntry) (bool, string) {
@@ -2035,11 +2531,16 @@ func jwtChatGPTPlan(token string) string {
 func onlyPlusBearers(accounts []account) []account {
 	out := make([]account, 0, len(accounts))
 	for _, item := range accounts {
-		if strings.EqualFold(jwtChatGPTPlan(item.token), "plus") || (!looksLikeJWT(item.token) && item.plus) {
+		if plusBearer(item) {
 			out = append(out, item)
 		}
 	}
 	return out
+}
+
+// plusBearer reports whether the access token that will be sent is a Plus bearer.
+func plusBearer(item account) bool {
+	return strings.EqualFold(jwtChatGPTPlan(item.token), "plus") || (!looksLikeJWT(item.token) && item.plus)
 }
 
 func anyPlus(accounts []account) bool {
@@ -2049,6 +2550,89 @@ func anyPlus(accounts []account) bool {
 		}
 	}
 	return false
+}
+
+// freeModel reports whether the upstream model name may use accounts that
+// plus-preference would skip. Matching is case-insensitive and exact.
+func (c pluginConfig) freeModel(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	for _, item := range c.FreeModels {
+		if strings.EqualFold(item, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowsAccount reports whether the account may serve the upstream model name
+// under plus-preference. A listed free model allows every eligible account.
+func (c pluginConfig) allowsAccount(item account, name string, hasEnabledPlus bool) bool {
+	if c.PlusPreference == "off" || c.freeModel(name) {
+		return true
+	}
+	if c.PlusPreference == "only" {
+		return plusBearer(item)
+	}
+	if !hasEnabledPlus {
+		return true
+	}
+	return item.plus
+}
+
+// restrictAccounts applies plus-preference to the eligible pool for one primary
+// upstream name. freePrimary keeps every eligible account, like preference off.
+// It returns an error code and message when no account is allowed.
+func restrictAccounts(cfg pluginConfig, freePrimary bool, accounts []account, hasEnabledPlus bool) ([]account, string, string) {
+	if freePrimary || cfg.PlusPreference == "off" {
+		return accounts, "", ""
+	}
+	if cfg.PlusPreference == "only" && !hasEnabledPlus {
+		return nil, "no_plus_account", "no eligible plus codex account is available"
+	}
+	if hasEnabledPlus {
+		plusAccounts := make([]account, 0, len(accounts))
+		for _, item := range accounts {
+			if item.plus {
+				plusAccounts = append(plusAccounts, item)
+			}
+		}
+		accounts = plusAccounts
+		if len(accounts) == 0 {
+			return nil, "no_plus_account", "no eligible plus codex account is available"
+		}
+	}
+	if cfg.PlusPreference == "only" {
+		accounts = onlyPlusBearers(accounts)
+		if len(accounts) == 0 {
+			return nil, "no_plus_account", "no plus codex account is available"
+		}
+	}
+	return accounts, "", ""
+}
+
+// priorityAtLeast keeps the accounts at or above the best priority in anchor, so a
+// tail never reaches below the tier already in use. An empty anchor falls back to
+// the accounts' own highest tier.
+func priorityAtLeast(accounts, anchor []account) []account {
+	if len(anchor) == 0 {
+		return highestPriority(accounts)
+	}
+	best := anchor[0].priority
+	for _, item := range anchor[1:] {
+		if item.priority > best {
+			best = item.priority
+		}
+	}
+	var out []account
+	for _, item := range accounts {
+		if item.priority >= best {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func highestPriority(accounts []account) []account {
@@ -2070,12 +2654,15 @@ func highestPriority(accounts []account) []account {
 	return out
 }
 
-func planAccountsLocked(cfg pluginConfig, eligible []account, session string, now time.Time) []account {
+// planAccountsLocked orders healthy accounts by the rotation mode. Penalized
+// accounts follow as a tail, already sorted by penalty expiry, so they are still
+// tried when nothing healthy is left.
+func planAccountsLocked(cfg pluginConfig, eligible, tail []account, session string, now time.Time) []account {
 	if len(eligible) == 0 {
-		return nil
+		return tail
 	}
 	plus, rest := splitPlus(sortAccounts(eligible, false))
-	var primary, tail []account
+	var primary []account
 	switch cfg.PlusPreference {
 	case "only":
 		primary = plus
@@ -2089,15 +2676,13 @@ func planAccountsLocked(cfg pluginConfig, eligible []account, session string, no
 		primary = sortAccounts(eligible, false)
 	}
 	if len(primary) == 0 {
-		return nil
-	}
-	if cfg.RotationMode == "least-recent" {
-		primary = sortAccounts(primary, true)
-		if len(tail) > 0 {
-			tail = sortAccounts(tail, true)
-		}
+		return tail
 	}
 	switch cfg.RotationMode {
+	case "least-recent":
+		primary = leastRecentLocked(primary)
+		// Stamp the first pick now so concurrent requests spread before any attempt is sent.
+		runtime.lastUsed[primary[0].index] = now
 	case "round-robin":
 		primary = stickRoundRobinLocked(primary)
 	case "sticky":
@@ -2107,6 +2692,24 @@ func planAccountsLocked(cfg pluginConfig, eligible []account, session string, no
 		return primary
 	}
 	return append(primary, tail...)
+}
+
+// leastRecentLocked orders never-used accounts first, then by last use, oldest
+// first. Ties fall back to UpdatedAt, then index.
+func leastRecentLocked(in []account) []account {
+	if runtime.lastUsed == nil {
+		runtime.lastUsed = map[string]time.Time{}
+	}
+	out := sortAccounts(in, true)
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, usedI := runtime.lastUsed[out[i].index]
+		tj, usedJ := runtime.lastUsed[out[j].index]
+		if usedI != usedJ {
+			return !usedI
+		}
+		return usedI && ti.Before(tj)
+	})
+	return out
 }
 
 func splitPlus(in []account) (plus, rest []account) {
@@ -2238,7 +2841,8 @@ func rotateStrings(in []string, start int) []string {
 
 // buildAttempts walks account and name pairs together, then fills unused pairs.
 // The caller caps the slice at its retry budget. Each account/name pair is used once.
-func buildAttempts(accounts []account, names []string, budget int, suffix string) []attempt {
+// allowed filters the pairs when a fallback name may use a different account set.
+func buildAttempts(accounts []account, names []string, budget int, suffix string, allowed func(account, string) bool) []attempt {
 	accountCount := len(accounts)
 	nameCount := len(names)
 	if accountCount == 0 || nameCount == 0 || budget < 1 {
@@ -2251,6 +2855,9 @@ func buildAttempts(accounts []account, names []string, budget int, suffix string
 			return
 		}
 		name := names[nameIndex]
+		if allowed != nil && !allowed(item, name) {
+			return
+		}
 		key := item.index + "\x00" + name
 		if !repeat {
 			if _, ok := used[key]; ok {
@@ -2266,8 +2873,16 @@ func buildAttempts(accounts []account, names []string, budget int, suffix string
 		add(accounts[step], 0, false)
 	}
 	if nameCount == 1 {
-		for len(out) < budget {
-			add(accounts[len(out)%accountCount], 0, true)
+		// Stop after a full cycle without a new attempt, so a filtered pool ends.
+		misses := 0
+		for cursor := 0; len(out) < budget && misses < accountCount; cursor++ {
+			before := len(out)
+			add(accounts[cursor%accountCount], 0, true)
+			if len(out) == before {
+				misses++
+			} else {
+				misses = 0
+			}
 		}
 	}
 	for nameIndex := 1; nameIndex < nameCount && len(out) < budget; nameIndex++ {

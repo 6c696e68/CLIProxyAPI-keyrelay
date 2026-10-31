@@ -785,9 +785,27 @@ models:
 		t.Fatalf("gpt-6-sol thinking capability = %+v", listed.Models)
 	}
 	got := listed.Models[0].Thinking.Levels
-	want := []string{"low", "medium", "high", "xhigh", "max"}
+	// Static models.json levels first, then the extra "ultra" level the Codex
+	// client catalog lists for gpt-6-sol.
+	want := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("thinking levels = %#v, want %#v", got, want)
+	}
+	if params := listed.Models[0].SupportedParameters; len(params) != 1 || params[0] != "service_tier" {
+		t.Fatalf("supported parameters = %#v, want [service_tier]", params)
+	}
+}
+
+func TestUnionLevelsKeepsOrderAndSkipsDuplicates(t *testing.T) {
+	got := unionLevels([]string{"low", "high"}, []string{"High", "", "ultra", "low", "ultra"})
+	if strings.Join(got, ",") != "low,high,ultra" {
+		t.Fatalf("unionLevels = %#v", got)
+	}
+	if levels := codexClientLevels("gpt-6-astra"); len(levels) == 0 || levels[len(levels)-1] != "ultra" {
+		t.Fatalf("codexClientLevels(gpt-6-astra) = %#v, want ultra last", levels)
+	}
+	if levels := codexClientLevels("no-such-model"); levels != nil {
+		t.Fatalf("codexClientLevels(unknown) = %#v, want nil", levels)
 	}
 }
 
@@ -985,7 +1003,7 @@ func TestPickerFiltersPriorityRotation(t *testing.T) {
 		f.codex("1", tokenA, "free", nil)
 		f.codex("2", tokenB, "free", nil)
 		f.scripts = []httpScript{
-			{status: http.StatusBadRequest, body: []byte(`{"error":"bad"}`)},
+			{status: http.StatusBadGateway, body: []byte(`{"error":"bad"}`)},
 			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
 			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
 		}
@@ -1168,7 +1186,7 @@ func TestClassifyCountsModelCooldown(t *testing.T) {
 	now := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
 	nowFn = func() time.Time { return now }
 	f.codex("1", tokenA, "plus", nil)
-	markModelCooldown("1", tokenA, time.Hour, "")
+	markModelCooldown("1", tokenA, "gpt-5.4", time.Hour, "")
 	kind, plus := classifyEnabled(f.files[0], "cb", now)
 	if kind != kindCooling || plus {
 		t.Fatalf("cooled classify = %v plus=%v", kind, plus)
@@ -1194,7 +1212,7 @@ func TestPlusPreference(t *testing.T) {
 		f := setup(t)
 		f.codex("1", tokenA, "plus", nil)
 		f.codex("2", tokenB, "team", nil)
-		f.scripts = []httpScript{{status: http.StatusTooManyRequests, body: []byte(`{"error":"rate_limit"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		f.scripts = []httpScript{{status: http.StatusBadGateway, body: []byte(`{"error":"upstream"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
 		mustConfigure(t, "enabled: true\nplus-preference: prefer\nrequest-retry: 1\n"+models)
 		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
 		calls := f.httpCalls(t)
@@ -1301,6 +1319,174 @@ func TestPlusPreference(t *testing.T) {
 		}
 		f.assertNoHTTP(t)
 	})
+}
+
+func TestFreeModelsOnlyListedUsesFreeAccount(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenB, "free", nil)
+	mustConfigure(t, `
+enabled: true
+plus-preference: only
+request-retry: 0
+free-models: [gpt-6-luna]
+models:
+  - {name: gpt-6-luna, alias: luna}
+`)
+	mustExec(t, "openai", "luna", []byte(`{"model":"luna"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenB || requestModel(t, calls[0]) != "gpt-6-luna" {
+		t.Fatalf("listed free model calls = %#v", calls)
+	}
+}
+
+func TestFreeModelsOnlyUnlistedStaysPlusOnly(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "free", nil)
+	mustConfigure(t, `
+enabled: true
+plus-preference: only
+request-retry: 0
+free-models: [gpt-6-luna]
+models:
+  - {name: gpt-6-sol, alias: sol}
+  - {name: gpt-6-luna, alias: luna}
+`)
+	mustExec(t, "openai", "sol", []byte(`{"model":"sol"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "gpt-6-sol" {
+		t.Fatalf("unlisted model calls = %#v", calls)
+	}
+	f.files[0].Unavailable = true
+	env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "sol", []byte(`{"model":"sol"}`)))
+	if env.OK || env.Error == nil || env.Error.Code != "no_plus_account" {
+		t.Fatalf("unlisted model without plus = %+v", env.Error)
+	}
+	if calls := f.httpCalls(t); len(calls) != 1 {
+		t.Fatalf("unlisted model called http again: %d", len(calls))
+	}
+}
+
+func TestFreeModelsPreferCoolingPlusListedUsesFree(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.NextRetryAfter = now.Add(time.Hour) })
+	f.codex("2", tokenB, "free", nil)
+	mustConfigure(t, `
+enabled: true
+plus-preference: prefer
+request-retry: 0
+free-models: [gpt-6-luna]
+models:
+  - {name: gpt-6-luna, alias: luna}
+`)
+	mustExec(t, "openai", "luna", []byte(`{"model":"luna"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenB || requestModel(t, calls[0]) != "gpt-6-luna" {
+		t.Fatalf("cooling plus listed calls = %#v", calls)
+	}
+}
+
+func TestFreeModelsPreferCoolingPlusUnlistedFails(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.NextRetryAfter = now.Add(time.Hour) })
+	f.codex("2", tokenB, "free", nil)
+	mustConfigure(t, `
+enabled: true
+plus-preference: prefer
+request-retry: 0
+free-models: [gpt-6-luna]
+models:
+  - {name: gpt-6-sol, alias: sol}
+  - {name: gpt-6-luna, alias: luna}
+`)
+	env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "sol", []byte(`{"model":"sol"}`)))
+	if env.OK || env.Error == nil || env.Error.Code != "no_plus_account" {
+		t.Fatalf("cooling plus unlisted = %+v", env.Error)
+	}
+	f.assertNoHTTP(t)
+}
+
+func TestFreeModelsListedFallbackUsesFreeAccount(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "free", nil)
+	refusal := `{"detail":"The 'requested-model' MODEL IS NOT SUPPORTED when using Codex with a ChatGPT account."}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: prefer
+request-retry: 0
+fallback-retry: 2
+free-models: [gpt-6-luna]
+models:
+  - {name: gpt-6-sol, alias: sol, fallback: [gpt-6-luna]}
+`)
+	mustExec(t, "openai", "sol", []byte(`{"model":"sol"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 3 {
+		t.Fatalf("fallback calls = %d", len(calls))
+	}
+	if bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "gpt-6-sol" {
+		t.Fatalf("primary attempt = %s %s", bearer(t, calls[0]), requestModel(t, calls[0]))
+	}
+	if bearer(t, calls[1]) != "Bearer "+tokenA || requestModel(t, calls[1]) != "gpt-6-luna" {
+		t.Fatalf("plus fallback attempt = %s %s", bearer(t, calls[1]), requestModel(t, calls[1]))
+	}
+	if bearer(t, calls[2]) != "Bearer "+tokenB || requestModel(t, calls[2]) != "gpt-6-luna" {
+		t.Fatalf("free fallback attempt = %s %s", bearer(t, calls[2]), requestModel(t, calls[2]))
+	}
+}
+
+func TestFreeModelsNormalize(t *testing.T) {
+	cfg, errDecode := decodeConfig([]byte("free-models: [\" gpt-6-luna \", \"\", \"GPT-6-LUNA\", \"gpt-6-sol\", \"  \"]\n"))
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if got := strings.Join(cfg.FreeModels, ","); got != "gpt-6-luna,gpt-6-sol" {
+		t.Fatalf("normalized free-models = %q", got)
+	}
+	cfg, errDecode = decodeConfig(nil)
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if cfg.FreeModels != nil {
+		t.Fatalf("default free-models = %#v", cfg.FreeModels)
+	}
+	cfg, errDecode = decodeConfig([]byte("enabled: true\nmodels:\n  - {name: gpt-6-luna, alias: luna}\n"))
+	if errDecode != nil {
+		t.Fatal(errDecode)
+	}
+	if cfg.FreeModels != nil || len(cfg.Models) != 1 {
+		t.Fatalf("old config changed: free=%#v models=%d", cfg.FreeModels, len(cfg.Models))
+	}
+}
+
+func TestFreeModelsMatchesUpstreamNameNotAlias(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenB, "free", nil)
+	const models = "models:\n  - {name: gpt-6-luna, alias: luna}\n"
+	mustConfigure(t, "enabled: true\nplus-preference: only\nrequest-retry: 0\nfree-models: [luna]\n"+models)
+	env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "luna", []byte(`{"model":"luna"}`)))
+	if env.OK || env.Error == nil || env.Error.Code != "no_plus_account" {
+		t.Fatalf("alias listed = %+v", env.Error)
+	}
+	f.assertNoHTTP(t)
+	mustConfigure(t, "enabled: true\nplus-preference: only\nrequest-retry: 0\nfree-models: [GPT-6-LUNA]\n"+models)
+	mustExec(t, "openai", "luna", []byte(`{"model":"luna"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenB || requestModel(t, calls[0]) != "gpt-6-luna" {
+		t.Fatalf("upstream name listed = %#v", calls)
+	}
 }
 
 func TestHTTPHeadersRetryAndURLs(t *testing.T) {
@@ -1718,13 +1904,13 @@ models:
 	nowFn = func() time.Time { return start.Add(time.Hour) }
 	f3.codex("1", tokenA, "plus", nil)
 	mustConfigure(t, "enabled: true\nstats-file: \"\"\nmodels:\n  - {name: gpt-6-astra, alias: gpt-6-astra}\n")
-	if cooled("1", tokenA, nowFn()) {
+	if cooled("1", tokenA, "gpt-6-astra", nowFn()) {
 		t.Fatal("empty stats-file kept the previous cooldown")
 	}
 
 	other := filepath.Join(t.TempDir(), "other-stats.json")
 	mustConfigure(t, "enabled: true\nstats-file: "+strconv.Quote(other)+"\nmodels:\n  - {name: gpt-6-astra, alias: gpt-6-astra}\n")
-	if cooled("1", tokenA, nowFn()) {
+	if cooled("1", tokenA, "gpt-6-astra", nowFn()) {
 		t.Fatal("missing cooldown sidecar kept the previous cooldown")
 	}
 }
@@ -2065,7 +2251,7 @@ func TestEmailUsageReport(t *testing.T) {
 	f.codex("2", tokenB, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Email = "b@gmail.com" })
 	f.scripts = []httpScript{
 		{status: http.StatusOK, body: []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`)},
-		{status: http.StatusBadRequest, body: []byte(`{"error":"bad"}`)},
+		{status: http.StatusBadGateway, body: []byte(`{"error":"bad"}`)},
 		{status: http.StatusOK, body: []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`)},
 		{status: http.StatusOK, body: []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`)},
 	}
@@ -2817,7 +3003,7 @@ models:
     alias: primary-model
     fallback: ["other-model"]
 `)
-		markModelCooldown("1", tokenA, time.Hour, "")
+		markModelCooldown("1", tokenA, "primary-model", time.Hour, "")
 		mustExec(t, "openai", "primary-model", []byte(primaryBody))
 		calls := f.httpCalls(t)
 		if len(calls) != 1 || bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "other-model" {
@@ -2837,7 +3023,7 @@ models:
     alias: primary-model
     fallback: ["other-model"]
 `)
-		markModelCooldown("1", tokenA, time.Hour, "")
+		markModelCooldown("1", tokenA, "primary-model", time.Hour, "")
 		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(primaryBody)))
 		if env.OK || env.Error == nil || env.Error.Code != "accounts_cooling" || len(f.httpCalls(t)) != 0 {
 			t.Fatalf("env=%+v", env.Error)
@@ -2898,6 +3084,671 @@ models:
 		models := currentConfig().Models
 		if len(models) != 1 || len(models[0].Fallback) != 1 || models[0].Fallback[0] != "kept-model" {
 			t.Fatalf("models = %+v", models)
+		}
+	})
+}
+
+func TestForwardStreamClosesAfterResponsesTerminalEvent(t *testing.T) {
+	f := setup(t)
+	streamClosed := make(chan struct{}, 1)
+	previousHost := hostCallOverride
+	hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+		raw, errCall := previousHost(method, payload)
+		if method == pluginabi.MethodHostStreamClose {
+			streamClosed <- struct{}{}
+		}
+		return raw, errCall
+	}
+	f.codex("1", tokenA, "plus", nil)
+	completed := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"total_tokens\":5}}}\n\n"
+	f.scripts = []httpScript{{status: http.StatusOK, streamID: "http-terminal", chunks: []readChunk{
+		{payload: []byte("event: response.created\ndata: {\"type\":\"response.created\"}\n\n")},
+		// Terminal frame split across two reads: the marker alone must not close.
+		{payload: []byte(completed[:40])},
+		{payload: []byte(completed[40:])},
+		// Upstream keeps the socket open with comments; these must never be read.
+		{payload: []byte(": keep-alive\n\n")},
+		{payload: []byte(": keep-alive\n\n"), done: true},
+	}}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	req := execReq("openai-response", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	req.StreamID = "exec-terminal"
+	callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+	waitCh(t, streamClosed, "stream close after response.completed")
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	reads, emits := 0, 0
+	closeErr := "unset"
+	for _, call := range f.calls {
+		switch call.method {
+		case pluginabi.MethodHostHTTPStreamRead:
+			reads++
+		case pluginabi.MethodHostStreamEmit:
+			emits++
+		case pluginabi.MethodHostStreamClose:
+			var payload struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(call.payload, &payload)
+			closeErr = payload.Error
+		}
+	}
+	if reads != 3 {
+		t.Fatalf("http stream reads = %d, want 3 (stop after the terminal frame)", reads)
+	}
+	if emits != 3 {
+		t.Fatalf("stream emits = %d, want 3", emits)
+	}
+	if closeErr != "" {
+		t.Fatalf("stream close error = %q, want empty", closeErr)
+	}
+}
+
+func TestResponsesTerminalEventMarkers(t *testing.T) {
+	cases := map[string]bool{
+		"event: response.completed\n":                                true,
+		"data: {\"type\":\"response.failed\",\"x\":1}\n":             true,
+		"data: {\"type\":\"response.incomplete\"}\n":                 true,
+		"data: {\"type\":\"response.output_text.delta\"}\n":          false,
+		"data: {\"delta\":\"event: response.completed\"}\n":          false,
+		"data: {\"delta\":\"{\\\"type\\\":\\\"response.completed\"}": false,
+	}
+	for input, want := range cases {
+		if got := responsesTerminalEvent([]byte(input)); got != want {
+			t.Fatalf("responsesTerminalEvent(%q) = %v, want %v", input, got, want)
+		}
+	}
+	if !sseFrameBoundary([]byte("x\n\n")) || sseFrameBoundary([]byte("x\n")) {
+		t.Fatal("sseFrameBoundary mismatch")
+	}
+}
+
+const twoModels = "models:\n  - {name: model-a, alias: model-a}\n  - {name: model-b, alias: model-b}\n"
+
+func execModel(t *testing.T, model string) pluginapi.ExecutorResponse {
+	t.Helper()
+	return mustExec(t, "openai", model, []byte(`{"model":"`+model+`"}`))
+}
+
+func lastBearer(t *testing.T, f *fakeHost) string {
+	t.Helper()
+	calls := f.httpCalls(t)
+	return bearer(t, calls[len(calls)-1])
+}
+
+func penaltyCounts() (index, token int) {
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	return len(runtime.penaltyIndex), len(runtime.penaltyToken)
+}
+
+func TestModelCooldownIsPerModel(t *testing.T) {
+	const refusal = `{"detail":"The 'model-a' model is not supported when using Codex with a ChatGPT account."}`
+	t.Run("a refusal for one model keeps the account for other models", func(t *testing.T) {
+		f := setup(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(refusal)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: fill-first\nrequest-retry: 1\n"+twoModels)
+		execModel(t, "model-a")
+		execModel(t, "model-b")
+		execModel(t, "model-a")
+		calls := f.httpCalls(t)
+		want := []string{tokenA, tokenB, tokenA, tokenB}
+		if len(calls) != len(want) {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		for i, token := range want {
+			if bearer(t, calls[i]) != "Bearer "+token {
+				t.Fatalf("call %d bearer = %s, want %s", i, bearer(t, calls[i]), token)
+			}
+		}
+		if !cooled("1", tokenA, "model-a", now) || cooled("1", tokenA, "model-b", now) {
+			t.Fatal("cooldown is not scoped to model-a")
+		}
+		if !cooledAny("1", tokenA, now) || cooledAny("2", tokenB, now) {
+			t.Fatal("cooledAny mismatch")
+		}
+	})
+
+	t.Run("thinking suffix shares the base model cooldown", func(t *testing.T) {
+		f := setup(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(refusal)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: fill-first\nrequest-retry: 1\n"+twoModels)
+		execModel(t, "model-a(high)")
+		execModel(t, "model-a(low)")
+		calls := f.httpCalls(t)
+		if len(calls) != 3 || bearer(t, calls[2]) != "Bearer "+tokenB || requestModel(t, calls[2]) != "model-a(low)" {
+			t.Fatalf("suffix cooldown calls = %d", len(calls))
+		}
+		if !cooled("1", tokenA, "model-a(medium)", now) {
+			t.Fatal("suffix changed the cooldown key")
+		}
+	})
+
+	t.Run("cooldown file records the model and drops legacy rows", func(t *testing.T) {
+		stats := filepath.Join(t.TempDir(), "stats.json")
+		path := stats + ".cooldowns.json"
+		f := setup(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		mustConfigure(t, "enabled: true\nstats-file: "+strconv.Quote(stats)+"\n"+twoModels)
+		markModelCooldown("1", tokenA, "model-a(high)", time.Hour, stats)
+		raw, errRead := os.ReadFile(path)
+		if errRead != nil || !strings.Contains(string(raw), `"model":"model-a"`) {
+			t.Fatalf("cooldown file = %s err=%v", raw, errRead)
+		}
+		legacy := `[{"auth_index":"1","until":"2026-10-26T00:00:00Z","reason":"chatgpt_model_unsupported"},{"token_hash":"` + tokenKey(tokenA) + `","until":"2026-10-26T00:00:00Z"}]`
+		if errWrite := os.WriteFile(path, []byte(legacy), 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+		mustConfigure(t, "enabled: true\nstats-file: "+strconv.Quote(stats)+"\n"+twoModels)
+		if cooledAny("1", tokenA, now) {
+			t.Fatal("legacy cooldown record survived load")
+		}
+		markModelCooldown("1", tokenA, "model-b", time.Hour, stats)
+		mustConfigure(t, "enabled: true\nstats-file: "+strconv.Quote(stats)+"\n"+twoModels)
+		if !cooled("1", tokenA, "model-b", now) || cooled("1", tokenA, "model-a", now) {
+			t.Fatal("model rows did not round-trip")
+		}
+	})
+
+	t.Run("fallback attempts skip an account cooled for the fallback model", func(t *testing.T) {
+		f := setup(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusNotFound, body: []byte(`{"error":{"code":"model_not_found"}}`)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: fill-first\nrequest-retry: 0\nfallback-retry: 2\nmodels:\n  - {name: primary-model, alias: primary-model, fallback: [other-model]}\n")
+		markModelCooldown("1", tokenA, "other-model", time.Hour, "")
+		execModel(t, "primary-model")
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || bearer(t, calls[0]) != "Bearer "+tokenA || requestModel(t, calls[0]) != "primary-model" ||
+			bearer(t, calls[1]) != "Bearer "+tokenB || requestModel(t, calls[1]) != "other-model" {
+			t.Fatalf("fallback skip calls = %d", len(calls))
+		}
+	})
+
+	t.Run("in-stream refusal cools only the streamed model", func(t *testing.T) {
+		f := setup(t)
+		closed := make(chan struct{}, 1)
+		previousHost := hostCallOverride
+		hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+			raw, errCall := previousHost(method, payload)
+			if method == pluginabi.MethodHostStreamClose {
+				closed <- struct{}{}
+			}
+			return raw, errCall
+		}
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, streamID: "http-200-err", chunks: []readChunk{{payload: []byte("data: " + refusal + "\n\n"), done: true}}}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\n"+twoModels)
+		req := execReq("openai", "model-a(high)", []byte(`{"model":"model-a(high)"}`))
+		req.StreamID = "exec-model-a"
+		callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+		waitCh(t, closed, "stream close")
+		if !cooled("1", tokenA, "model-a", now) || cooled("1", tokenA, "model-b", now) {
+			t.Fatal("stream refusal cooled the wrong model")
+		}
+	})
+}
+
+func TestRateLimitDelay(t *testing.T) {
+	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	header := func(value string) http.Header { return http.Header{"Retry-After": {value}} }
+	cases := []struct {
+		name   string
+		header http.Header
+		body   string
+		want   time.Duration
+	}{
+		{"resets_in_seconds", nil, `{"error":{"resets_in_seconds":120,"resets_at":1}}`, 2 * time.Minute},
+		{"resets_at", nil, `{"error":{"resets_at":` + strconv.FormatInt(now.Add(5*time.Minute).Unix(), 10) + `}}`, 5 * time.Minute},
+		{"retry-after seconds", header("90"), `{"error":"rate_limit"}`, 90 * time.Second},
+		{"retry-after date", header(now.Add(time.Hour).Format(http.TimeFormat)), ``, time.Hour},
+		{"body wins over header", header("90"), `{"error":{"resets_in_seconds":300}}`, 5 * time.Minute},
+		{"default", nil, `{"error":"rate_limit"}`, 10 * time.Minute},
+		{"clamp low", nil, `{"error":{"resets_in_seconds":5}}`, 30 * time.Second},
+		{"clamp high", nil, `{"error":{"resets_in_seconds":99999999}}`, 7 * 24 * time.Hour},
+		{"past reset clamps low", nil, `{"error":{"resets_at":` + strconv.FormatInt(now.Add(-time.Hour).Unix(), 10) + `}}`, 30 * time.Second},
+	}
+	for _, tc := range cases {
+		if got := rateLimitDelay(tc.header, []byte(tc.body), now); got != tc.want {
+			t.Fatalf("%s: delay = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestSoftPenalty(t *testing.T) {
+	start := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	const fill = "enabled: true\nplus-preference: off\nrotation-mode: fill-first\n"
+	const model = "models:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+
+	t.Run("429 demotes the account until the reset", func(t *testing.T) {
+		f := setup(t)
+		now := start
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusTooManyRequests, body: []byte(`{"error":{"resets_in_seconds":120}}`)}}
+		mustConfigure(t, fill+"request-retry: 1\n"+model)
+		execModel(t, "gpt-5.4")
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenB {
+			t.Fatalf("demoted account was first again: %s", got)
+		}
+		now = start.Add(121 * time.Second)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenA {
+			t.Fatalf("penalty did not expire: %s", got)
+		}
+	})
+
+	t.Run("401 penalizes the token and 402 403 the account", func(t *testing.T) {
+		for _, tc := range []struct {
+			status    int
+			wantIndex int
+			wantToken int
+		}{{http.StatusUnauthorized, 0, 1}, {http.StatusPaymentRequired, 1, 0}, {http.StatusForbidden, 1, 0}} {
+			f := setup(t)
+			nowFn = func() time.Time { return start }
+			f.codex("1", tokenA, "plus", nil)
+			f.codex("2", tokenB, "plus", nil)
+			f.scripts = []httpScript{{status: tc.status, body: []byte(`{"error":"denied"}`)}}
+			mustConfigure(t, fill+"request-retry: 1\n"+model)
+			execModel(t, "gpt-5.4")
+			if gotIndex, gotToken := penaltyCounts(); gotIndex != tc.wantIndex || gotToken != tc.wantToken {
+				t.Fatalf("status %d penalties = %d/%d", tc.status, gotIndex, gotToken)
+			}
+			execModel(t, "gpt-5.4")
+			if got := lastBearer(t, f); got != "Bearer "+tokenB {
+				t.Fatalf("status %d: demoted account came first: %s", tc.status, got)
+			}
+			runtimeMu.Lock()
+			var until time.Time
+			for _, p := range runtime.penaltyIndex {
+				until = p.until
+			}
+			for _, p := range runtime.penaltyToken {
+				until = p.until
+			}
+			runtimeMu.Unlock()
+			if want := start.Add(10 * time.Minute); !until.Equal(want) {
+				t.Fatalf("status %d penalty until %v, want %v", tc.status, until, want)
+			}
+		}
+	})
+
+	t.Run("5xx and transport errors carry no penalty", func(t *testing.T) {
+		for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusRequestTimeout} {
+			f := setup(t)
+			f.codex("1", tokenA, "plus", nil)
+			f.scripts = []httpScript{{status: status, body: []byte(`{"error":"down"}`)}}
+			mustConfigure(t, fill+"request-retry: 0\n"+model)
+			callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+			if gotIndex, gotToken := penaltyCounts(); gotIndex+gotToken != 0 {
+				t.Fatalf("status %d left penalties %d/%d", status, gotIndex, gotToken)
+			}
+		}
+	})
+
+	t.Run("penalized accounts stay as a tail sorted by expiry", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.codex("3", "tok-c", "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusTooManyRequests, body: []byte(`{"error":{"resets_in_seconds":600}}`)},
+			{status: http.StatusTooManyRequests, body: []byte(`{"error":{"resets_in_seconds":60}}`)},
+			{status: http.StatusTooManyRequests, body: []byte(`{"error":{"resets_in_seconds":300}}`)},
+		}
+		mustConfigure(t, fill+"request-retry: 2\n"+model)
+		callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+		if len(f.httpCalls(t)) != 3 {
+			t.Fatalf("setup calls = %d", len(f.httpCalls(t)))
+		}
+		// Everything is penalized, so the next request still tries the soonest expiry first.
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenB {
+			t.Fatalf("tail order first = %s", got)
+		}
+	})
+
+	t.Run("a success clears an older penalty", func(t *testing.T) {
+		f := setup(t)
+		now := start
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		mustConfigure(t, fill+"request-retry: 0\n"+model)
+		penalizeAttempt(attempt{index: "1", token: tokenA}, http.StatusTooManyRequests, nil, nil, now)
+		now = now.Add(time.Second)
+		execModel(t, "gpt-5.4")
+		if gotIndex, gotToken := penaltyCounts(); gotIndex+gotToken != 0 {
+			t.Fatalf("penalty survived a success: %d/%d", gotIndex, gotToken)
+		}
+	})
+
+	t.Run("a penalty set during the attempt survives and does not pin", func(t *testing.T) {
+		f := setup(t)
+		now := start
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		previousHost := hostCallOverride
+		hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+			if method == pluginabi.MethodHostHTTPDo {
+				now = now.Add(time.Second)
+				penalizeAttempt(attempt{index: "1", token: tokenA}, http.StatusTooManyRequests, nil, nil, now)
+			}
+			return previousHost(method, payload)
+		}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: round-robin\nrequest-retry: 0\n"+model)
+		execModel(t, "gpt-5.4")
+		if gotIndex, _ := penaltyCounts(); gotIndex != 1 {
+			t.Fatalf("newer penalty was cleared: %d", gotIndex)
+		}
+		runtimeMu.Lock()
+		pinned := runtime.pinnedIndex
+		runtimeMu.Unlock()
+		if pinned != "" {
+			t.Fatalf("penalized account was pinned: %q", pinned)
+		}
+	})
+
+	t.Run("expired entries are pruned on write", func(t *testing.T) {
+		setup(t)
+		penalizeAttempt(attempt{index: "1", token: tokenA}, http.StatusForbidden, nil, nil, start)
+		penalizeAttempt(attempt{index: "2", token: tokenB}, http.StatusUnauthorized, nil, nil, start)
+		penalizeAttempt(attempt{index: "3", token: "tok-c"}, http.StatusForbidden, nil, nil, start.Add(time.Hour))
+		runtimeMu.Lock()
+		_, staleIndex := runtime.penaltyIndex["1"]
+		_, staleToken := runtime.penaltyToken[tokenKey(tokenB)]
+		runtimeMu.Unlock()
+		if staleIndex || staleToken {
+			t.Fatalf("expired penalties kept: index=%v token=%v", staleIndex, staleToken)
+		}
+	})
+
+	t.Run("priority tiers apply after the penalty split", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("1", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 2 })
+		f.codex("2", tokenB, "plus", nil)
+		mustConfigure(t, fill+"request-retry: 0\n"+model)
+		penalizeAttempt(attempt{index: "1", token: tokenA}, http.StatusTooManyRequests, nil, nil, start)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenB {
+			t.Fatalf("penalized top tier was used first: %s", got)
+		}
+		// With both penalized, the tail keeps only the highest priority.
+		penalizeAttempt(attempt{index: "2", token: tokenB}, http.StatusTooManyRequests, header429(30), nil, start)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenA {
+			t.Fatalf("tail priority = %s", got)
+		}
+	})
+
+	t.Run("priority tiers apply after the cooldown split", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("1", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 2 })
+		f.codex("2", tokenB, "plus", nil)
+		mustConfigure(t, fill+"request-retry: 0\n"+twoModels)
+		markModelCooldown("1", tokenA, "model-a", time.Hour, "")
+		execModel(t, "model-a")
+		if got := lastBearer(t, f); got != "Bearer "+tokenB {
+			t.Fatalf("cooled top tier was used: %s", got)
+		}
+		execModel(t, "model-b")
+		if got := lastBearer(t, f); got != "Bearer "+tokenA {
+			t.Fatalf("top tier unavailable for another model: %s", got)
+		}
+	})
+}
+
+func header429(seconds int) http.Header {
+	return http.Header{"Retry-After": {strconv.Itoa(seconds)}}
+}
+
+func TestClientErrorsDoNotRotate(t *testing.T) {
+	const model = "models:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+	for _, status := range []int{400, 404, 409, 413, 415, 422} {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: status, body: []byte(`{"error":"bad request"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: round-robin\nrequest-retry: 3\n"+model)
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+		if env.OK || env.Error == nil || env.Error.HTTPStatus != status || len(f.httpCalls(t)) != 1 {
+			t.Fatalf("status %d rotated: err=%+v calls=%d", status, env.Error, len(f.httpCalls(t)))
+		}
+		if gotIndex, gotToken := penaltyCounts(); gotIndex+gotToken != 0 {
+			t.Fatalf("status %d penalized: %d/%d", status, gotIndex, gotToken)
+		}
+		runtimeMu.Lock()
+		pinned, failed := runtime.pinnedIndex, runtime.pinFailed
+		runtimeMu.Unlock()
+		if pinned != "" || failed {
+			t.Fatalf("status %d moved the pin: %q %v", status, pinned, failed)
+		}
+	}
+
+	t.Run("model refusal bodies still rotate", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusNotFound, body: []byte(`{"error":{"code":"model_not_found"}}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: fill-first\nrequest-retry: 1\n"+model)
+		execModel(t, "gpt-5.4")
+		if len(f.httpCalls(t)) != 2 {
+			t.Fatalf("model_not_found did not rotate: %d", len(f.httpCalls(t)))
+		}
+	})
+}
+
+func TestNoRepeatAfterAccountFailure(t *testing.T) {
+	const model = "models:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+	const unsupported = `{"detail":"The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."}`
+	run := func(t *testing.T, status int, body, extra string) int {
+		t.Helper()
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: status, body: []byte(body)}, {status: status, body: []byte(body)}, {status: status, body: []byte(body)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 2\n"+extra+model)
+		callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+		return len(f.httpCalls(t))
+	}
+	for _, status := range []int{401, 402, 403, 429} {
+		if got := run(t, status, `{"error":"denied"}`, ""); got != 1 {
+			t.Fatalf("status %d repeated the account: %d calls", status, got)
+		}
+	}
+	if got := run(t, 400, unsupported, "model-cooldown-minutes: 0\n"); got != 1 {
+		t.Fatalf("model refusal repeated the account: %d calls", got)
+	}
+	for _, status := range []int{500, 502, 503} {
+		if got := run(t, status, `{"error":"down"}`, ""); got != 3 {
+			t.Fatalf("status %d should repeat the account: %d calls", status, got)
+		}
+	}
+}
+
+func TestRoundRobinSuccessor(t *testing.T) {
+	const yml = "enabled: true\nplus-preference: off\nrotation-mode: round-robin\nrequest-retry: 0\nmodels:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+	pin := func(index string, failed bool) {
+		runtimeMu.Lock()
+		runtime.pinnedIndex, runtime.pinFailed = index, failed
+		runtimeMu.Unlock()
+	}
+	setupThree := func(t *testing.T) *fakeHost {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.codex("2", tokenB, "plus", nil)
+		f.codex("3", "tok-c", "plus", nil)
+		mustConfigure(t, yml)
+		return f
+	}
+	t.Run("a missing pinned account hands over to the next index", func(t *testing.T) {
+		f := setupThree(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		penalizeAttempt(attempt{index: "2", token: tokenB}, http.StatusForbidden, nil, nil, now)
+		pin("2", false)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer tok-c" {
+			t.Fatalf("successor = %s", got)
+		}
+	})
+	t.Run("the successor wraps to the first account", func(t *testing.T) {
+		f := setupThree(t)
+		now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+		nowFn = func() time.Time { return now }
+		penalizeAttempt(attempt{index: "3", token: "tok-c"}, http.StatusForbidden, nil, nil, now)
+		pin("3", true)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenA {
+			t.Fatalf("wrap = %s", got)
+		}
+	})
+	t.Run("a failed pin in the pool moves to the next account", func(t *testing.T) {
+		f := setupThree(t)
+		pin("1", true)
+		execModel(t, "gpt-5.4")
+		if got := lastBearer(t, f); got != "Bearer "+tokenB {
+			t.Fatalf("failed pin successor = %s", got)
+		}
+	})
+}
+
+func TestLeastRecentIsLRU(t *testing.T) {
+	f := setup(t)
+	tick := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time {
+		tick = tick.Add(time.Second)
+		return tick
+	}
+	f.codex("1", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.UpdatedAt = time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC) })
+	f.codex("2", tokenB, "plus", func(e *pluginapi.HostAuthFileEntry) { e.UpdatedAt = time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC) })
+	f.codex("3", "tok-c", "plus", func(e *pluginapi.HostAuthFileEntry) { e.UpdatedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) })
+	mustConfigure(t, "enabled: true\nplus-preference: off\nrotation-mode: least-recent\nrequest-retry: 0\nmodels:\n  - {name: gpt-5.4, alias: gpt-5.4}\n")
+	var got []string
+	for i := 0; i < 5; i++ {
+		execModel(t, "gpt-5.4")
+		got = append(got, strings.TrimPrefix(lastBearer(t, f), "Bearer "))
+	}
+	// Never-used accounts go first by UpdatedAt, then the oldest use.
+	want := []string{"tok-c", tokenB, tokenA, "tok-c", tokenB}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("lru order = %v, want %v", got, want)
+	}
+}
+
+func TestLeastRecentSpreadsConcurrentPlans(t *testing.T) {
+	setup(t)
+	now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	accounts := []account{{index: "1"}, {index: "2"}, {index: "3"}}
+	cfg := defaultPluginConfig()
+	cfg.RotationMode = "least-recent"
+	runtimeMu.Lock()
+	first := planAccountsLocked(cfg, accounts, nil, "", now)
+	second := planAccountsLocked(cfg, accounts, nil, "", now)
+	third := planAccountsLocked(cfg, accounts, nil, "", now)
+	runtimeMu.Unlock()
+	if first[0].index == second[0].index || second[0].index == third[0].index || first[0].index == third[0].index {
+		t.Fatalf("plans did not spread: %s %s %s", first[0].index, second[0].index, third[0].index)
+	}
+}
+
+func TestStickyPrunesExpiredBinds(t *testing.T) {
+	setup(t)
+	now := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	bindSticky("old-1", "1", 60)
+	bindSticky("old-2", "2", 60)
+	now = now.Add(2 * time.Minute)
+	bindSticky("fresh", "1", 60)
+	runtimeMu.Lock()
+	defer runtimeMu.Unlock()
+	if len(runtime.sticky) != 1 {
+		t.Fatalf("sticky binds = %d, want 1", len(runtime.sticky))
+	}
+	if _, ok := runtime.sticky["fresh"]; !ok {
+		t.Fatal("fresh bind missing")
+	}
+}
+
+func TestPriorityTiersDoNotLeakIntoTails(t *testing.T) {
+	start := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	const fill = "enabled: true\nplus-preference: off\nrotation-mode: fill-first\n"
+
+	t.Run("penalized tail stays at or above the healthy tier", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("a", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 10 })
+		f.codex("b", tokenB, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 1 })
+		f.codex("c", "tok-c", "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 1 })
+		down := httpScript{status: http.StatusBadGateway, body: []byte(`{"error":"down"}`)}
+		f.scripts = []httpScript{down, down, down, down}
+		mustConfigure(t, fill+"request-retry: 3\nmodels:\n  - {name: gpt-5.4, alias: gpt-5.4}\n")
+		penalizeAttempt(attempt{index: "b", token: tokenB}, http.StatusForbidden, nil, nil, start)
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+		if env.OK {
+			t.Fatal("expected failure after 5xx")
+		}
+		for _, call := range f.httpCalls(t) {
+			if got := bearer(t, call); got != "Bearer "+tokenA {
+				t.Fatalf("lower tier leaked into the order: %s", got)
+			}
+		}
+	})
+
+	t.Run("fallback cooling accounts stay at or above the ordered tier", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return start }
+		f.codex("a", tokenA, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 10 })
+		f.codex("b", tokenB, "plus", func(e *pluginapi.HostAuthFileEntry) { e.Priority = 1 })
+		f.scripts = []httpScript{
+			{status: http.StatusNotFound, body: []byte(`{"error":{"code":"model_not_found"}}`)},
+			{status: http.StatusNotFound, body: []byte(`{"error":{"code":"model_not_found"}}`)},
+		}
+		mustConfigure(t, fill+"request-retry: 0\nfallback-retry: 3\nmodels:\n  - {name: primary-model, alias: primary-model, fallback: [other-model]}\n")
+		// Account b is cooled for the primary model; a serves it and sits in a higher tier.
+		markModelCooldown("b", tokenB, "primary-model", time.Hour, "")
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(`{"model":"primary-model"}`)))
+		if env.OK {
+			t.Fatal("expected failure")
+		}
+		for _, call := range f.httpCalls(t) {
+			if got := bearer(t, call); got != "Bearer "+tokenA {
+				t.Fatalf("lower-tier cooling account joined the fallback pool: %s", got)
+			}
+		}
+	})
+
+	t.Run("an all-penalized or all-cooled pool keeps its own top tier", func(t *testing.T) {
+		pool := []account{{index: "a", priority: 3}, {index: "b", priority: 1}}
+		if got := priorityAtLeast(pool, nil); len(got) != 1 || got[0].index != "a" {
+			t.Fatalf("empty anchor = %+v", got)
+		}
+		if got := priorityAtLeast(pool, []account{{index: "x", priority: 1}}); len(got) != 2 {
+			t.Fatalf("anchor at tier 1 = %+v", got)
 		}
 	})
 }

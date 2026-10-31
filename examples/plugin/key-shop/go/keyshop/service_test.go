@@ -822,6 +822,58 @@ func TestRequestsAndSessionIncludeFilteredTotal(t *testing.T) {
 	}
 }
 
+func TestUsageHandleBillsUpstreamTotal(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 10_000)
+	_ = call(t, svc, "request.intercept_before", interceptBody(secret, "claude-total", "/v1/messages", true))
+	_ = call(t, svc, "usage.handle", `{"RequestID":"claude-total","Failed":false,"Detail":{"InputTokens":10,"OutputTokens":50,"TotalTokens":1060,"CacheReadTokens":1000,"CachedTokens":1000}}`)
+	_ = call(t, svc, "request.complete", `{"RequestID":"claude-total","Outcome":"succeeded"}`)
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Headers":{"Authorization":["Bearer `+secret+`"]}}`)
+	var env struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		Key      struct{ TokensUsed int64 }
+		Requests []struct{ Billed, Cached, Input, Output int64 }
+	}
+	if err := json.Unmarshal(env.Result.Body, &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Key.TokensUsed != 1060 {
+		t.Fatalf("tokens used=%d", session.Key.TokensUsed)
+	}
+	if len(session.Requests) != 1 || session.Requests[0].Billed != 1060 || session.Requests[0].Cached != 1000 || session.Requests[0].Input != 10 || session.Requests[0].Output != 50 {
+		t.Fatalf("requests=%+v", session.Requests)
+	}
+}
+
+func TestUsageHandleTreatsCacheCreationAsMiss(t *testing.T) {
+	svc := testService(t)
+	secret := createSecret(t, svc, 3600, 10_000)
+	_ = call(t, svc, "request.intercept_before", interceptBody(secret, "claude-write", "/v1/messages", true))
+	_ = call(t, svc, "usage.handle", `{"RequestID":"claude-write","Failed":false,"Detail":{"InputTokens":10,"OutputTokens":50,"TotalTokens":1060,"CacheCreationTokens":1000,"CachedTokens":1000}}`)
+	_ = call(t, svc, "request.complete", `{"RequestID":"claude-write","Outcome":"succeeded"}`)
+	raw := call(t, svc, "management.handle", `{"Method":"GET","Path":"/api/session","Headers":{"Authorization":["Bearer `+secret+`"]}}`)
+	var env struct {
+		Result struct{ Body []byte }
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var session struct {
+		Requests []struct{ Billed, Cached int64 }
+	}
+	if err := json.Unmarshal(env.Result.Body, &session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Requests) != 1 || session.Requests[0].Cached != 0 || session.Requests[0].Billed != 1060 {
+		t.Fatalf("requests=%+v", session.Requests)
+	}
+}
+
 func TestSecondInterceptDoesNotFailTheStore(t *testing.T) {
 	svc := testService(t)
 	secret := createSecret(t, svc, 3600, 100)
@@ -917,4 +969,98 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func createKeyInGroup(t *testing.T, svc *Service, groupID string) string {
+	t.Helper()
+	raw := call(t, svc, "management.handle", `{"Method":"POST","Path":"/v0/management/plugins/key-shop/keys","Body":`+string(mustJSON(t, map[string]any{"ttl_seconds": 3600, "token_limit": 1000, "group_id": groupID}))+`}`)
+	var env struct {
+		Result struct {
+			Body []byte
+		}
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatal(err)
+	}
+	var created struct {
+		Secret string
+	}
+	if err := json.Unmarshal(env.Result.Body, &created); err != nil || created.Secret == "" {
+		t.Fatalf("create did not return a secret: %s", env.Result.Body)
+	}
+	return created.Secret
+}
+
+func listKeyModels(t *testing.T, svc *Service, secret string) listModelsResult {
+	t.Helper()
+	raw := call(t, svc, "keyshop.list_models", string(mustJSON(t, map[string]string{"Secret": secret})))
+	var env struct {
+		OK     bool             `json:"ok"`
+		Result listModelsResult `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
+		t.Fatalf("list_models failed: %s", raw)
+	}
+	return env.Result
+}
+
+func TestServiceListModelsGroupAlias(t *testing.T) {
+	svc := testService(t)
+	group, err := svc.store.CreateGroup(GroupInput{Name: "luna", Models: []GroupModel{{Name: "gpt-6-luna", Alias: "luna"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := createKeyInGroup(t, svc, group.ID)
+
+	result := listKeyModels(t, svc, secret)
+	if result.Mode != "group" || result.AllModels {
+		t.Fatalf("list_models mode = %q all = %v, want group only", result.Mode, result.AllModels)
+	}
+	if len(result.Models) != 1 || result.Models[0].Name != "gpt-6-luna" || result.Models[0].Alias != "luna" {
+		t.Fatalf("list_models models = %+v", result.Models)
+	}
+}
+
+func TestServiceListModelsAllModelsGroup(t *testing.T) {
+	svc := testService(t)
+	group, err := svc.store.CreateGroup(GroupInput{Name: "everything", AllModels: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := createKeyInGroup(t, svc, group.ID)
+
+	result := listKeyModels(t, svc, secret)
+	if result.Mode != "group" || !result.AllModels {
+		t.Fatalf("list_models = %+v, want all_models group", result)
+	}
+}
+
+func TestServiceListModelsUnknownKeyIsLegacy(t *testing.T) {
+	svc := testService(t)
+
+	result := listKeyModels(t, svc, "ck_missing")
+	if result.Mode != "legacy" || result.AllModels || len(result.Models) != 0 {
+		t.Fatalf("unknown key list_models = %+v, want legacy", result)
+	}
+}
+
+func TestServiceListModelsDeletedGroupFailsClosed(t *testing.T) {
+	svc := testService(t)
+	group, err := svc.store.CreateGroup(GroupInput{Name: "gone", Models: []GroupModel{{Name: "gpt-6-luna"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := createKeyInGroup(t, svc, group.ID)
+
+	svc.store.mu.Lock()
+	_, err = svc.store.db.Exec(`DELETE FROM model_groups WHERE id=?`, group.ID)
+	svc.store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := listKeyModels(t, svc, secret)
+	if result.Mode != "group" || result.AllModels || result.Models == nil || len(result.Models) != 0 {
+		t.Fatalf("deleted group list_models = %+v, want an empty group list", result)
+	}
 }

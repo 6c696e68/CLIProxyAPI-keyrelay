@@ -2529,3 +2529,83 @@ func TestHostCanceledRegisterRetainsLoadTokenUntilShutdownReturns(t *testing.T) 
 		t.Fatal("PluginBusy(alpha) = true after physical shutdown returned")
 	}
 }
+
+type keyShopListTestEntry struct {
+	Name  string `json:"Name"`
+	Alias string `json:"Alias"`
+}
+
+type keyShopListTestPayload struct {
+	Mode      string                 `json:"Mode"`
+	AllModels bool                   `json:"AllModels"`
+	Models    []keyShopListTestEntry `json:"Models"`
+}
+
+func TestHostKeyShopListModelsDecodesResult(t *testing.T) {
+	var seen []byte
+	client := &lifecycleTestClient{call: func(_ context.Context, method string, request []byte) ([]byte, error) {
+		if method != "keyshop.list_models" {
+			return nil, fmt.Errorf("unexpected plugin method %s", method)
+		}
+		seen = append([]byte(nil), request...)
+		return marshalRPCResult(keyShopListTestPayload{
+			Mode:      "group",
+			AllModels: true,
+			Models:    []keyShopListTestEntry{{Name: "gpt-6-luna", Alias: "luna"}},
+		})
+	}}
+	h := NewForTest(nil)
+	h.mu.Lock()
+	h.loaded["key-shop"] = &loadedPlugin{id: "key-shop", client: client}
+	h.mu.Unlock()
+	t.Cleanup(h.ShutdownAll)
+
+	got, err := h.KeyShopListModels(context.Background(), "ck_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Loaded || got.Mode != "group" || !got.AllModels {
+		t.Fatalf("KeyShopListModels() = %+v, want a loaded all-models group", got)
+	}
+	if len(got.Models) != 1 || got.Models[0].Name != "gpt-6-luna" || got.Models[0].Alias != "luna" {
+		t.Fatalf("KeyShopListModels() models = %+v", got.Models)
+	}
+	if secret := gjson.GetBytes(seen, "Secret").String(); secret != "ck_test" {
+		t.Fatalf("list_models secret = %q, want ck_test", secret)
+	}
+}
+
+func TestHostKeyShopListModelsEmptyModeIsLegacy(t *testing.T) {
+	client := &lifecycleTestClient{call: func(_ context.Context, method string, _ []byte) ([]byte, error) {
+		if method != "keyshop.list_models" {
+			return nil, fmt.Errorf("unexpected plugin method %s", method)
+		}
+		return marshalRPCResult(keyShopListTestPayload{})
+	}}
+	h := NewForTest(nil)
+	h.mu.Lock()
+	h.loaded["key-shop"] = &loadedPlugin{id: "key-shop", client: client}
+	h.mu.Unlock()
+	t.Cleanup(h.ShutdownAll)
+
+	got, err := h.KeyShopListModels(context.Background(), "ck_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Loaded || got.Mode != "legacy" {
+		t.Fatalf("KeyShopListModels() = %+v, want a loaded legacy mode", got)
+	}
+}
+
+func TestHostKeyShopListModelsNotLoaded(t *testing.T) {
+	h := NewForTest(nil)
+	t.Cleanup(h.ShutdownAll)
+
+	got, err := h.KeyShopListModels(context.Background(), "ck_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Loaded || got.Mode != "" || got.AllModels || len(got.Models) != 0 {
+		t.Fatalf("KeyShopListModels() = %+v, want the zero value", got)
+	}
+}

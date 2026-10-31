@@ -15,6 +15,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 	"github.com/tidwall/gjson"
 )
@@ -603,5 +604,42 @@ func TestCodexExecutorDirectOpenAIImage25Models(t *testing.T) {
 				t.Fatalf("model = %q, want %s; body=%s", got, baseModel, string(gotBody))
 			}
 		})
+	}
+}
+
+func TestCodexExecutorDirectOpenAIImageStreamReportsUsageOfLargeFrame(t *testing.T) {
+	// A real image frame is far larger than one read, so the usage that ends it
+	// must still be parsed from the reassembled line.
+	image := strings.Repeat("A", 300*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: image_generation.completed\ndata: {\"type\":\"image_generation.completed\",\"b64_json\":\"" + image + "\",\"usage\":{\"total_tokens\":523,\"input_tokens\":8,\"output_tokens\":515}}\n\n"))
+	}))
+	defer server.Close()
+
+	alias := t.Name()
+	capture := &codexResponseModelUsageCapture{alias: alias, records: make(chan coreusage.Record, 4)}
+	coreusage.RegisterNamedPlugin(t.Name(), capture)
+	t.Cleanup(func() {
+		coreusage.RegisterNamedPlugin(t.Name(), codexResponseModelNoopUsagePlugin{})
+	})
+	ctx := coreusage.WithRequestedModelAlias(context.Background(), alias)
+
+	executor := NewCodexExecutor(&config.Config{})
+	stream, errStream := executor.ExecuteStream(ctx, newCodexOpenAIImageTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gpt-image-2",
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"red dot"}`),
+	}, codexOpenAIImageTestOptions(codexImagesGenerationsPath, true))
+	if errStream != nil {
+		t.Fatalf("ExecuteStream() error = %v", errStream)
+	}
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	record := capture.await(t)
+	if record.Detail.InputTokens != 8 || record.Detail.OutputTokens != 515 || record.Detail.TotalTokens != 523 {
+		t.Fatalf("usage = %+v, want 8/515/523", record.Detail)
 	}
 }

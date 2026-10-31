@@ -209,7 +209,7 @@ func TestQuotaProviderCapability_RPC(t *testing.T) {
 	})
 
 	host := New()
-	registered, errRegister := registerRPCPlugin(context.Background(), host, "rpc-quota-plugin", lookup, pluginabi.MethodPluginRegister, nil)
+	registered, errRegister := registerRPCPlugin(context.Background(), host, "rpc-quota-plugin", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if errRegister != nil {
 		t.Fatalf("registerRPCPlugin() error = %v", errRegister)
 	}
@@ -488,7 +488,7 @@ func TestRegisterRPCPlugin_ContextCancellation(t *testing.T) {
 	cancel() // pre-canceled context
 
 	host := New()
-	_, err := registerRPCPlugin(ctx, host, "cancel-register-plugin", lookup, pluginabi.MethodPluginRegister, nil)
+	_, err := registerRPCPlugin(ctx, host, "cancel-register-plugin", lookup, pluginabi.MethodPluginRegister, nil, "")
 	if err == nil {
 		t.Fatal("expected error when registering with canceled context")
 	}

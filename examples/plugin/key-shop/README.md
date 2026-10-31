@@ -26,7 +26,7 @@ Codex and other OpenAI-compatible clients point at `/v1` and use the customer ke
 | Reservation | `32768` tokens | Held until usage arrives or 15 minutes pass |
 | Request log retention | 30 days | Does not reduce `tokens_used` |
 
-Billed tokens are `input_tokens + output_tokens`. Reasoning and cache are shown and are not added again. A failed, rejected, or canceled request is logged and bills `0`.
+Billed tokens are the upstream `total_tokens` (Codex/OpenAI: input incl. cache + output incl. reasoning; Claude adds cache read/creation; Gemini adds thinking), falling back to `input_tokens + output_tokens` when total is missing. A failed, rejected, or canceled request is logged and bills `0`.
 
 Every recorded call consumes one request-quota unit, including successful, failed, canceled, and rejected attempts. This stops a key from avoiding the cap by sending failing or disallowed calls. Raising `request_limit` allows more calls without resetting the counters. A request-limit denial is HTTP `429` with code `request_limit_exceeded`. Token limits stay separate.
 
@@ -99,9 +99,9 @@ It uses the management password already stored by the panel when that password w
 
 The **Customer model access** section controls the global policy for all `ck_` keys. `full` allows every model. `custom` uses the model list below it; clients may call the configured alias, or the upstream `name` when no alias is set. Thinking suffixes such as `(high)` remain valid. The embedded page and the management panel edit the same `plugins.configs.key-shop` values. That policy is not a model group.
 
-The admin page has four screens: Dashboard (`#/`), Model groups (`#/groups`), Keys (`#/keys`), and Request log (`#/requests`).
+The admin page has screens for Dashboard (`#/`), Model groups (`#/groups`), Keys (`#/keys`), Plans (`#/plans`), Partners (`#/partners`), Request log (`#/requests`), and Tunnels (`#/tunnels`).
 
-A model group is `{id, name, description, all_models, models[]}`. Each model is `{name, alias}`. `name` is the upstream model, such as `vippro/gpt-6-sol`. `alias` is optional and is the name the client sends. Create and update also accept a legacy `string[]` of upstream names. Responses always return `{name, alias}`. Names and aliases must be unique in the group, ignoring case. An alias must not equal a different model's name. The built-in group `all-models` (`is_system`, `all_models: true`) always exists and cannot be edited or deleted. A specific-model group needs at least one model. A group that keys still use cannot be deleted (HTTP 409 with `key_count`). Editing a group takes effect on the next request.
+A model group is `{id, name, description, all_models, models[]}`. Each model is `{name, alias}`. `name` is the upstream model, such as `vippro/gpt-6-sol`. `alias` is optional and is the name the client sends. Create and update also accept a legacy `string[]` of upstream names. Responses always return `{name, alias}`. Names and aliases must be unique in the group, ignoring case. An alias must not equal a different model's name and must not contain parentheses, because parentheses start a thinking suffix. The built-in group `all-models` (`is_system`, `all_models: true`) always exists and cannot be edited or deleted. A specific-model group needs at least one model. A group that keys still use cannot be deleted (HTTP 409 with `key_count`). Editing a group takes effect on the next request.
 
 A key with an empty `group_id` keeps the legacy global-policy behavior. New keys, including bulk create, require `group_id`. Update and bulk update can move a key to another group but cannot clear `group_id`.
 
@@ -130,9 +130,37 @@ Omitted `ttl_seconds` means 7 days. `never_expires: true` ignores `ttl_seconds`.
 
 Create and rotate return `secret` once. List responses contain `display` such as `ck_abcd…wxyz` and `GroupID` (empty for a legacy key). They never contain `secret` or `secret_hash`.
 
-Group and bulk errors are JSON `{"error": "message"}`. Validation failures are HTTP 400 (`group_id is required`, `unknown model group`, `name must be 1-80 characters`, `choose at least one model`, `name already exists`, `names and aliases must be unique within the group`). Missing `group_id` on create is 400 before a key is written.
+Group and bulk errors are JSON `{"error": "message"}`. Validation failures are HTTP 400 (`group_id is required`, `unknown model group`, `name must be 1-80 characters`, `choose at least one model`, `name already exists`, `names and aliases must be unique within the group`, `alias must not contain parentheses`). Missing `group_id` on create is 400 before a key is written.
 
 These routes require the management secret because they sit under `/v0/management`. Paths cannot contain `:`.
+
+## Partner sales
+
+Partners (the Telegram shop, later other sellers) mint `ck_` keys for their customers over an authenticated API. key-shop does not take money: the shop charges its own wallet and debits only after a mint succeeds.
+
+Turn it on with `partner_api_enabled: true`. The host exposes the public routes at `/keyshop/partner/v1`: `GET health`, `GET plans`, and `POST mint|confirm|void|status|refs`. The host strips any client `X-Key-Shop-Partner*` header and injects the partner proof and client IP. Partner secrets are `ksp_...` and are shown once on create or rotate. The plugin must register the seven partner routes in `management.register`; without them the public alias returns 404. Every minted key is a normal `ck_` key with the plan's group, lifetime, and limits, and it is active immediately.
+
+The admin page has two sales screens:
+
+- **Plans** (`#/plans`): group, TTL or never expires, token/request limits, active state, and delete (refused while partner orders use the plan).
+- **Partners** (`#/partners`): partner list with 24h calls and orders, overdue counter, create/edit, rotate, soft delete, a detail drawer with the call log and orders, and the **Partner API settings** card.
+
+Config keys, all under `plugins.configs.key-shop`:
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `partner_api_enabled` | bool | `false` | Enables the public partner API |
+| `public_base_url` | string | `""` | Absolute http(s) URL without a trailing `/`; empty uses the request Host |
+| `public_dashboard_path` | string | `/client` | Must start with `/` |
+| `partner_max_quantity` | integer | `50` | 1–500; the most keys one mint may create |
+| `partner_daily_key_cap` | integer | `300` | ≥ 0; `0` means unlimited |
+| `partner_max_body_kb` | integer | `64` | 1–1024; the plugin business body limit |
+| `partner_unconfirmed_alert_min` | integer | `10` | ≥ 1; minutes before a minted order counts as overdue |
+| `partner_log_retention_days` | integer | `30` | ≥ 1; how long `partner_calls` rows are kept |
+| `partner_key_label_template` | string | `{plan}-{ref}-{i}` | Non-empty, ≤ 120; placeholders `{plan}`, `{partner}`, `{ref}` (last 8), `{i}` (1-based) |
+| `partner_key_note_template` | string | `partner:{partner} ref:{ref}` | ≤ 200; same placeholders |
+
+The integrator contract, request/response examples, every error code, idempotency and tombstone rules, and the shop integration checklist: [docs/partner-api.md](docs/partner-api.md). Design: [../../../../docs/superpowers/specs/2026-10-30-key-shop-partner-sales-design.md](../../../../docs/superpowers/specs/2026-10-30-key-shop-partner-sales-design.md).
 
 ## Customer dashboard
 
@@ -189,9 +217,15 @@ Stored status is `active` or `disabled`. Computed status adds `expired` and `exh
 
 Optional management routes under `/plugins/key-shop/tunnels` start and stop Cloudflare tunnels the plugin itself created. Set `tunnels_enabled: false` to disable the routes and never spawn a child. `cloudflared_path` defaults to looking up `cloudflared` on `PATH`. A missing binary is not a startup error; start returns 409.
 
-Each row is `token` (named tunnel, token only in the child env as `TUNNEL_TOKEN`) or `quick` (`--url`, public `trycloudflare.com` URL parsed from the child output). The API returns `has_token` and a 4-character hint, never the token. The plugin signals only processes it spawned, or a recorded pid whose environ contains `KEYSHOP_TUNNEL_ID` on Linux. It does not scan or signal other cloudflared processes. Child `HOME` is `<data dir>/tunnels/<id>`, so the device `~/.cloudflared` config is not used.
+Each row is `token` (named tunnel, token only in the child env as `TUNNEL_TOKEN`) or `quick` (`--url`, public `trycloudflare.com` URL parsed from the child log). The API returns `has_token` and a 4-character hint, never the token. The plugin signals only a process it spawned, or a recorded pid whose environ contains `KEYSHOP_TUNNEL_ID` on Linux. It does not scan or signal other cloudflared processes. Child `HOME` is `<data dir>/tunnels/<id>`, so the device `~/.cloudflared` config is not used. Child stdout and stderr go to `<data dir>/tunnels/<id>/cloudflared.log` (0600); the Logs route returns its tail with the token redacted, including after a plugin reload.
+
+Keep-alive is on by default. `tunnel_keep_alive: false` restores the old behavior where a plugin reconfigure, a plugin reload or a host restart ends every child; the flag takes effect at the next plugin reload or CPA restart. `tunnel_watch_interval` (Go duration, default `2s`) is how often a kept tunnel and its log are checked. `tunnel_log_max_kb` (default `1024`, i.e. 1 MiB) caps `cloudflared.log`: the watcher truncates the file to 0 when it grows past the cap, and the child writes through an O_APPEND fd, so its next line lands at offset 0. With keep-alive, a config save, a plugin reload and a `systemctl restart` leave the same cloudflared process and the same quick URL running: the next manager adopts the recorded pid instead of starting a second child, and restarts the child only when it dies. Only Stop, Delete, an update of a running tunnel, `tunnels_enabled: false` or `tunnel_keep_alive: false` end a tunnel.
+
+Keep-alive is Linux only. There the child runs in its own session and, when the plugin runs as root with systemd, in a transient scope named `keyshop-tunnel-<id>-<random>`; this is not an installed system service. Surviving a CPA restart needs Linux, root and systemd, because only that scope detaches the child from the service control group. Without it the plugin starts the child again after the restart, and a quick URL changes. `systemctl stop 'keyshop-tunnel-*.scope'` ends every kept scope. A quick URL is stable only while that cloudflared process lives: a crash, a reboot, a stop/start or an update of a running tunnel changes it. Limitation: a tunnel that is dead or in backoff during a plugin hot reload can get a second, unrecorded child; stop it with `systemctl stop 'keyshop-tunnel-<id>-*.scope'`. Stop tunnels before removing the plugin.
 
 The admin page has a Tunnels screen at `#/tunnels`. The token field is write-only: edit leaves it blank, and an empty token keeps the stored value. See [docs/key-shop.md](../../../docs/key-shop.md) for the route table and isolation rules.
+
+A tunnel without an explicit `target_url` falls back to `tunnel_target_url` from the plugin YAML, then to the `host_base_url` the host sends on register, so a quick tunnel reaches the proxy on its real port even behind a proxy that drops the port from `Host`. Creating a tunnel also starts it; a start failure still returns 201 with `start_error`.
 
 ## Tests
 

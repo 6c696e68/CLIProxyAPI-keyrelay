@@ -598,14 +598,58 @@ func TestManagementV8RequestsAreNotLogged(t *testing.T) {
 	}
 }
 
+func TestPartnerRequestsAreNotLoggedOrCaptured(t *testing.T) {
+	for _, path := range []string{"/keyshop/partner/v1/mint", "/keyshop/partner/v1/health", "/keyshop/partner/v1/confirm"} {
+		if shouldLogRequest(path) {
+			t.Errorf("partner request would be logged: %s", path)
+		}
+	}
+
+	gin.SetMode(gin.TestMode)
+	logger := &spyRequestLogger{}
+	router := gin.New()
+	router.Use(RequestLoggingMiddleware(logger))
+	var received []byte
+	router.POST("/keyshop/partner/v1/mint", func(c *gin.Context) {
+		received, _ = io.ReadAll(c.Request.Body)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request"})
+	})
+	router.GET("/keyshop/partner/v1/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+	})
+
+	body := `{"ref":"order-0001","secrets":["ck_` + strings.Repeat("A", 43) + `"]}`
+	req := httptest.NewRequest(http.MethodPost, "/keyshop/partner/v1/mint", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", rec.Code)
+	}
+	if logger.logRequestCalls != 0 || logger.streamingCalls != 0 {
+		t.Fatalf("partner request was logged: request=%d streaming=%d", logger.logRequestCalls, logger.streamingCalls)
+	}
+	if string(received) != body {
+		t.Fatalf("partner body was consumed before the handler: %q", received)
+	}
+
+	health := httptest.NewRequest(http.MethodGet, "/keyshop/partner/v1/health", nil)
+	router.ServeHTTP(httptest.NewRecorder(), health)
+	if logger.logRequestCalls != 0 || logger.streamingCalls != 0 {
+		t.Fatalf("partner health request was logged: request=%d streaming=%d", logger.logRequestCalls, logger.streamingCalls)
+	}
+}
+
 type spyRequestLogger struct {
 	lastLogRequestID       string
 	lastStreamingRequestID string
+	logRequestCalls        int
+	streamingCalls         int
 	underlying             logging.RequestLogger
 }
 
 func (s *spyRequestLogger) LogRequest(url, method string, requestHeaders map[string][]string, body []byte, statusCode int, responseHeaders map[string][]string, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline []byte, apiResponseErrors []*interfaces.ErrorMessage, requestID string, requestTimestamp, apiResponseTimestamp time.Time) error {
 	s.lastLogRequestID = requestID
+	s.logRequestCalls++
 	if s.underlying != nil {
 		return s.underlying.LogRequest(url, method, requestHeaders, body, statusCode, responseHeaders, response, websocketTimeline, apiRequest, apiResponse, apiWebsocketTimeline, apiResponseErrors, requestID, requestTimestamp, apiResponseTimestamp)
 	}
@@ -614,6 +658,7 @@ func (s *spyRequestLogger) LogRequest(url, method string, requestHeaders map[str
 
 func (s *spyRequestLogger) LogStreamingRequest(url, method string, headers map[string][]string, body []byte, requestID string) (logging.StreamingLogWriter, error) {
 	s.lastStreamingRequestID = requestID
+	s.streamingCalls++
 	if s.underlying != nil {
 		return s.underlying.LogStreamingRequest(url, method, headers, body, requestID)
 	}

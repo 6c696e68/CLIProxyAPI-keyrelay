@@ -23,6 +23,7 @@ const editing = ref<Tunnel | null>(null)
 const name = ref('')
 const kind = ref<TunnelKind>('quick')
 const targetUrl = ref('')
+const defaultTargetUrl = ref('')
 const token = ref('')
 const autostart = ref(false)
 const { pending: busy, guard } = useSubmitGuard()
@@ -36,6 +37,8 @@ const logError = ref('')
 const logsLoading = ref(false)
 let logTimer = 0
 let logPull: Promise<void> | null = null
+let refreshTimer = 0
+let disposed = false
 
 function statusClass(status: string) {
   if (status === 'running') return 'chip-good'
@@ -55,10 +58,39 @@ function load() {
     const page = await props.service.tunnels(props.scenario)
     tunnels.value = page.tunnels
     cloudflared.value = page.cloudflared
+    defaultTargetUrl.value = page.defaultTargetUrl
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'Request failed'
   }
-  })
+  }).then(syncRefresh)
+}
+
+// needsSettle marks a row whose status or public URL is still moving.
+function needsSettle(row: Tunnel) {
+  if (row.status === 'starting') return true
+  if (row.status === 'running' && row.kind === 'quick' && !row.publicUrl) return true
+  return row.status === 'failed' && row.desired === 'running'
+}
+
+// syncRefresh keeps one poll running only while some row is still settling.
+function syncRefresh() {
+  if (disposed) return
+  const pending = tunnels.value.some(needsSettle)
+  if (pending && !refreshTimer) {
+    refreshTimer = window.setInterval(() => {
+      if (loading.value) return
+      void load()
+    }, 2000)
+    return
+  }
+  if (!pending && refreshTimer) {
+    window.clearInterval(refreshTimer)
+    refreshTimer = 0
+  }
+}
+
+function targetPlaceholder() {
+  return defaultTargetUrl.value || 'http://127.0.0.1:<CPA port>'
 }
 
 function openCreate() {
@@ -66,7 +98,7 @@ function openCreate() {
   editing.value = null
   name.value = ''
   kind.value = 'quick'
-  targetUrl.value = 'http://127.0.0.1:8319'
+  targetUrl.value = defaultTargetUrl.value
   token.value = ''
   autostart.value = false
   editorOpen.value = true
@@ -87,7 +119,7 @@ async function save() {
   if (busy.value) return
   await guard(async () => {
   try {
-    await props.service.saveTunnel({
+    const saved = await props.service.saveTunnel({
       id: editing.value?.id,
       name: name.value,
       kind: kind.value,
@@ -97,7 +129,9 @@ async function save() {
     }, props.scenario)
     editorOpen.value = false
     token.value = ''
-    notify(editing.value ? 'Tunnel saved' : 'Tunnel created')
+    if (editing.value) notify('Tunnel saved')
+    else if (saved.startError) notify(`Tunnel created, start failed: ${saved.startError}`)
+    else notify('Tunnel created and starting')
     await load()
   } catch (err) {
     notify(err instanceof Error ? err.message : 'Tunnel could not be saved')
@@ -184,7 +218,12 @@ function closeLogs() {
 
 watch(() => props.scenario, () => { void load() }, { immediate: true })
 watch(refreshTick, () => { void load() })
-onBeforeUnmount(() => window.clearInterval(logTimer))
+onBeforeUnmount(() => {
+  disposed = true
+  window.clearInterval(logTimer)
+  window.clearInterval(refreshTimer)
+  refreshTimer = 0
+})
 </script>
 
 <template>
@@ -262,7 +301,7 @@ onBeforeUnmount(() => window.clearInterval(logTimer))
           </select>
         </AppField>
         <AppField label="Target URL" :hint="kind === 'quick' ? 'Required. http or https.' : 'Optional hint.'">
-          <AppTextInput v-model="targetUrl" placeholder="http://127.0.0.1:8319" />
+          <AppTextInput v-model="targetUrl" :placeholder="targetPlaceholder()" />
         </AppField>
         <AppField v-if="kind === 'token'" label="Token" :hint="editing?.hasToken ? `Saved token ends in ${editing.tokenHint}. Leave blank to keep it.` : 'Write-only. 20 or more characters, no spaces.'">
           <AppTextInput v-model="token" type="password" autocomplete="off" placeholder="Paste a new token" />

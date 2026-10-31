@@ -293,6 +293,95 @@ func TestFinalizeBillsOnceAndFailureBillsZero(t *testing.T) {
 	}
 }
 
+func TestFinalizeBillsUpstreamTotal(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: 3600, TokenLimit: 10_000, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "claude", Path: "/v1/messages", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteUsage(UsageNote{RequestID: "claude", Input: 10, Output: 50, Cached: 1000, Total: 1060}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finalize(FinalizeInput{RequestID: "claude", Outcome: "succeeded", RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.Requests(RequestQuery{KeyID: key.ID})
+	if err != nil || len(rows) != 1 || rows[0].Billed != 1060 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	updated, err := store.keyByID(key.ID)
+	if err != nil || updated.TokensUsed != 1060 {
+		t.Fatalf("tokens=%d err=%v", updated.TokensUsed, err)
+	}
+	// A note arriving after finalize must not bill the total a second time.
+	if err = store.NoteUsage(UsageNote{RequestID: "claude", Input: 10, Output: 50, Cached: 1000, Total: 1060}); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err = store.keyByID(key.ID); err != nil || updated.TokensUsed != 1060 {
+		t.Fatalf("tokens after late note=%d err=%v", updated.TokensUsed, err)
+	}
+}
+
+func TestLateUsageBillsUpstreamTotalOnce(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: 3600, TokenLimit: 10_000, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "late", Path: "/v1/messages", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finalize(FinalizeInput{RequestID: "late", Outcome: "succeeded", RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	note := UsageNote{RequestID: "late", Input: 10, Output: 50, Cached: 1000, Total: 1060}
+	if err := store.NoteUsage(note); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteUsage(note); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.Requests(RequestQuery{KeyID: key.ID})
+	if err != nil || len(rows) != 1 || rows[0].Billed != 1060 || rows[0].Input != 10 || rows[0].Output != 50 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	if updated, err := store.keyByID(key.ID); err != nil || updated.TokensUsed != 1060 {
+		t.Fatalf("tokens=%d err=%v", updated.TokensUsed, err)
+	}
+}
+
+// TestLateUsageBillsTotalWithoutInputOutput covers a note that only carries an
+// upstream total, so the request row stays empty but the total still bills.
+func TestLateUsageBillsTotalWithoutInputOutput(t *testing.T) {
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store := testStore(t, now)
+	key, secret, err := store.Create(CreateInput{TTLSeconds: 3600, TokenLimit: 10_000, TokenLimitSet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Admit(AdmitInput{Secret: secret, RequestID: "total-only", Path: "/v1/messages", Generate: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Finalize(FinalizeInput{RequestID: "total-only", Outcome: "succeeded", RequestedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.NoteUsage(UsageNote{RequestID: "total-only", Total: 42}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.Requests(RequestQuery{KeyID: key.ID})
+	if err != nil || len(rows) != 1 || rows[0].Billed != 42 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	if updated, err := store.keyByID(key.ID); err != nil || updated.TokensUsed != 42 {
+		t.Fatalf("tokens=%d err=%v", updated.TokensUsed, err)
+	}
+}
+
 func TestSweepDropsOldReservationWithoutBilling(t *testing.T) {
 	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
 	store := testStore(t, now)

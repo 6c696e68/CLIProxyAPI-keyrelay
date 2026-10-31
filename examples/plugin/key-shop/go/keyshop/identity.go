@@ -39,14 +39,24 @@ func Display(prefix, last4 string) string {
 	return "ck_" + prefix + "…" + last4
 }
 
-func BilledTokens(input, output int64) int64 {
+// BilledTokens returns the tokens a request bills. The upstream total wins
+// because provider totals include counters that input and output miss: Claude
+// adds cache reads and creation, Gemini adds thoughts. Codex totals already
+// equal input plus output. A missing total falls back to input plus output.
+func BilledTokens(input, output, total int64) int64 {
 	if input < 0 {
 		input = 0
 	}
 	if output < 0 {
 		output = 0
 	}
-	return input + output
+	if total < 0 {
+		total = 0
+	}
+	if sum := input + output; sum > total {
+		return sum
+	}
+	return total
 }
 
 func ExtractSecret(header func(string) string) (string, bool) {

@@ -38,6 +38,21 @@ const deleteError = ref('')
 const customPolicy = computed(() => policy.value?.loaded && policy.value.mode === 'custom')
 const aliasProblems = computed(() => groupModelProblems(models.value))
 const aliasInvalid = computed(() => Object.keys(aliasProblems.value).length > 0)
+const nameTaken = computed(() => {
+  const wanted = name.value.trim().toLowerCase()
+  return Boolean(wanted) && groups.value.some((group) => group.id !== editing.value?.id && group.name.trim().toLowerCase() === wanted)
+})
+const editingInUse = computed(() => (editing.value?.keyCount ?? 0) > 0)
+
+// clientNames lists what customers type: the alias when set, else the upstream name.
+function clientNames(group: ModelGroup): string[] {
+  return group.models.map((item) => item.alias.trim() || item.name)
+}
+function preview(group: ModelGroup): string {
+  const names = clientNames(group)
+  const shown = names.slice(0, 3).join(', ')
+  return names.length > 3 ? `${shown} +${names.length - 3}` : shown
+}
 
 function load() {
   return runLoad(async () => {
@@ -147,7 +162,13 @@ watch(refreshTick, () => { void load() })
                     <strong>{{ group.name }}</strong>
                     <div class="sub">{{ group.description || group.id }}</div>
                   </td>
-                  <td class="num text-xs">{{ group.allModels ? 'All models' : formatNumber(group.models.length) }}</td>
+                  <td class="text-xs">
+                    <template v-if="group.allModels">All models</template>
+                    <template v-else>
+                      <strong class="num">{{ formatNumber(group.models.length) }}</strong>
+                      <div class="sub num" :title="clientNames(group).join(', ')">{{ preview(group) }}</div>
+                    </template>
+                  </td>
                   <td class="num text-right">{{ formatNumber(group.keyCount) }}</td>
                   <td class="actions">
                     <div class="flex gap-1">
@@ -165,6 +186,7 @@ watch(refreshTick, () => { void load() })
           <article v-for="group in groups" :key="group.id" class="record">
             <strong>{{ group.name }}</strong>
             <p class="sub">{{ group.description || 'No description' }}</p>
+            <p v-if="!group.allModels && group.models.length" class="sub num mt-1" :title="clientNames(group).join(', ')">{{ preview(group) }}</p>
             <div class="mt-3 grid grid-cols-2 gap-3">
               <div class="kv"><span>Models</span><strong class="num">{{ group.allModels ? 'All' : formatNumber(group.models.length) }}</strong></div>
               <div class="kv"><span>Keys</span><strong class="num">{{ formatNumber(group.keyCount) }}</strong></div>
@@ -181,17 +203,19 @@ watch(refreshTick, () => { void load() })
 
     <AppSheet wide :open="editorOpen" :title="editing ? 'Edit group' : 'New group'" :locked="saving || deleting" @close="editorOpen = false">
       <form class="grid gap-3" @submit.prevent="save">
-        <AppField label="Name" hint="1–80 characters. The built-in All models group cannot be edited.">
+        <p v-if="editingInUse" class="notice" role="status">{{ editing?.keyCount }} key{{ editing?.keyCount === 1 ? '' : 's' }} use this group. Changes apply on the next request. Removing a model or changing an alias makes the old name fail with 403 for those keys.</p>
+        <AppField label="Name" hint="1–80 characters. The built-in All models group cannot be edited." :error="nameTaken ? 'Another group already uses this name.' : ''">
           <AppTextInput v-model="name" :maxlength="80" placeholder="vippro" />
         </AppField>
         <AppField label="Description"><AppTextInput v-model="description" placeholder="Optional" /></AppField>
         <ModelPicker v-model="models" :catalog="catalog" :problems="aliasProblems" />
-        <AppButton kind="primary" type="submit" :disabled="saving || deleting || !name.trim() || !models.length || aliasInvalid">{{ saving ? 'Saving...' : (editing ? 'Save group' : 'Create group') }}</AppButton>
+        <AppButton kind="primary" type="submit" :disabled="saving || deleting || !name.trim() || nameTaken || !models.length || aliasInvalid">{{ saving ? 'Saving...' : (editing ? 'Save group' : 'Create group') }}</AppButton>
       </form>
     </AppSheet>
 
     <AppModal :open="Boolean(pendingDelete)" kicker="Confirm" title="Delete this group?" :locked="deleting" @close="pendingDelete = null">
-      <p class="section-copy">“{{ pendingDelete?.name }}” will be removed. Keys that still use it block the delete.</p>
+      <p class="section-copy">“{{ pendingDelete?.name }}” will be removed.</p>
+      <p v-if="(pendingDelete?.keyCount ?? 0) > 0" class="notice mt-3" role="status">{{ pendingDelete?.keyCount }} key{{ pendingDelete?.keyCount === 1 ? '' : 's' }} still use this group. Move them to another group first, or the delete is refused.</p>
       <p v-if="deleteError" class="alert mt-3" role="alert">{{ deleteError }}</p>
       <div class="mt-5 flex justify-end gap-2">
         <AppButton :disabled="deleting" @click="pendingDelete = null">Cancel</AppButton>

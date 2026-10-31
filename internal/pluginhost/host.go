@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -313,6 +315,55 @@ func (h *Host) KeyShopResolveModel(ctx context.Context, secret, model, bodyModel
 		Mode:    mode,
 		Allowed: env.Result.Allowed,
 		Model:   env.Result.Model,
+	}, nil
+}
+
+// KeyShopListModels asks the loaded key-shop plugin for the models a ck_ key
+// may list. Loaded is false when the plugin is not loaded, so the handler keeps
+// the legacy YAML policy. A call or decode error fails closed at the handler.
+func (h *Host) KeyShopListModels(ctx context.Context, secret string) (handlers.KeyShopModelList, error) {
+	client := h.keyShopClient()
+	if client == nil {
+		return handlers.KeyShopModelList{}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	body, err := json.Marshal(map[string]string{"Secret": secret})
+	if err != nil {
+		return handlers.KeyShopModelList{}, err
+	}
+	raw, err := client.Call(ctx, "keyshop.list_models", body)
+	if err != nil {
+		return handlers.KeyShopModelList{}, err
+	}
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Mode      string `json:"Mode"`
+			AllModels bool   `json:"AllModels"`
+			Models    []struct {
+				Name  string `json:"Name"`
+				Alias string `json:"Alias"`
+			} `json:"Models"`
+		} `json:"result"`
+	}
+	if err = json.Unmarshal(raw, &env); err != nil || !env.OK {
+		return handlers.KeyShopModelList{}, fmt.Errorf("key-shop list_models failed")
+	}
+	mode := strings.TrimSpace(env.Result.Mode)
+	if mode == "" {
+		mode = "legacy"
+	}
+	models := make([]handlers.KeyShopModelEntry, 0, len(env.Result.Models))
+	for _, entry := range env.Result.Models {
+		models = append(models, handlers.KeyShopModelEntry{Name: entry.Name, Alias: entry.Alias})
+	}
+	return handlers.KeyShopModelList{
+		Loaded:    true,
+		Mode:      mode,
+		AllModels: env.Result.AllModels,
+		Models:    models,
 	}, nil
 }
 
@@ -1236,6 +1287,27 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
 	}, true
 }
 
+// hostBaseURLFromConfig builds the base URL the host listens on, for plugins that
+// need to reach the proxy itself. Loopback is used for wildcard binds so a plugin
+// never dials an interface address it cannot reach. A nil config or a missing port
+// yields an empty string, which leaves the plugin default in place.
+func hostBaseURLFromConfig(cfg *config.Config) string {
+	if cfg == nil || cfg.Port <= 0 {
+		return ""
+	}
+	scheme := "http"
+	if cfg.TLS.Enable {
+		scheme = "https"
+	}
+	host := strings.TrimSpace(cfg.Host)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+	return scheme + "://" + net.JoinHostPort(host, strconv.Itoa(cfg.Port))
+}
+
 func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
 	if lp == nil {
 		return pluginapi.Plugin{}, false
@@ -1244,13 +1316,14 @@ func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeI
 	method := pluginabi.MethodPluginRegister
 	h.mu.Lock()
 	registered := lp.registered
+	hostBaseURL := hostBaseURLFromConfig(h.runtimeConfig)
 	h.mu.Unlock()
 	if registered {
 		method = pluginabi.MethodPluginReconfigure
 	}
 
 	plugin, okCall := h.safePluginCall(ctx, lp.id, method, func() pluginapi.Plugin {
-		plugin, errRegister := registerRPCPlugin(ctx, h, lp.id, lp.client, method, item.ConfigYAML)
+		plugin, errRegister := registerRPCPlugin(ctx, h, lp.id, lp.client, method, item.ConfigYAML, hostBaseURL)
 		if errRegister != nil {
 			log.Warnf("pluginhost: plugin %s %s failed: %v", lp.id, method, errRegister)
 			return pluginapi.Plugin{}

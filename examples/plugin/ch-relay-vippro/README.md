@@ -27,6 +27,8 @@ rm -f ch-relay-vippro.h
 
 Copy the library to the host plugin directory for that OS and CPU, for example `plugins/linux/arm64/ch-relay-vippro.so`. Restart the host process so it loads the new file. Replacing the CLIProxyAPI server binary is not required.
 
+An older `.so` rejects a config that sets `free-models` because config decoding uses `KnownFields`. Replace the `.so` before adding the key.
+
 A bundled `linux-arm64/ch-relay-vippro.so` in a release zip is built with the command above.
 
 ## Enable
@@ -74,8 +76,9 @@ plugins:
 | `fallback-retry` | Extra attempts with the row `fallback` names after every primary attempt failed because the upstream refused the model. `0` disables fallback even when a list is filled in. Default `0`. Maximum `3`. These calls do not spend `request-retry`. |
 | `rotation-mode` | `round-robin`, `fill-first`, `least-recent`, or `sticky`. |
 | `plus-preference` | `off`, `prefer`, or `only`. `ignore` is stored as `off`. Default `prefer`. |
+| `free-models` | Upstream model names, not aliases, that may also use free and other non-Plus Codex accounts. Other models keep `plus-preference`. No effect when `plus-preference` is `off`. Default empty. |
 | `sticky-seconds` | Sticky session lifetime. Default `300`. Maximum `86400`. |
-| `model-cooldown-minutes` | After the upstream says the model is not supported for a ChatGPT account, skip that account and that access token for this many minutes. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. When `stats-file` is set, the skip is saved in `stats-file + ".cooldowns.json"` and survives restart. The file stores a token hash, not the access token. |
+| `model-cooldown-minutes` | After the upstream says a model is not supported for a ChatGPT account, skip that account and that access token for that model only, for this many minutes. Other models keep using the account. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. When `stats-file` is set, the skip is saved in `stats-file + ".cooldowns.json"` and survives restart. The file stores a token hash and the model name, not the access token. Rows from older versions have no model and are dropped on load. |
 | `stats-file` | JSON file of hourly buckets kept for 90 days. Empty does not write a file. Reloading replaces in-memory model cooldowns with that file's sidecar, and an empty value clears them. |
 | `models` | Rows of upstream model name, optional alias, optional fallback names, and optional OpenAI model fields. |
 
@@ -93,7 +96,7 @@ Optional row fields follow the OpenAI-compatible model object: `display-name`, `
 
 Fallback only changes the `model` value in the request. Response bytes and stream bytes are passed through unchanged, so the response `model` field shows the fallback name. Fallback never starts after a 2xx response, including a 2xx stream that carries an error, because the client may already have bytes. Other errors such as 429 or 5xx keep the primary model. A Responses request that carries `previous_response_id` or encrypted reasoning from another model may still be refused by the fallback model.
 
-A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls. Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for `model-cooldown-minutes`, including when the error arrives inside a 2xx stream.
+A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls, except client errors (see Upstream response). Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for that model, without its thinking suffix, for `model-cooldown-minutes`, including when the error arrives inside a 2xx stream. A cooled account is still skipped for that model only, so a fallback name may use it unless it is cooled for the fallback name too.
 
 ## Accounts
 
@@ -113,14 +116,23 @@ Plus means the access token that is sent as `Authorization: Bearer` has `chatgpt
 - `prefer`: while any enabled Plus account exists, including Plus accounts that are cooling or unavailable, free and other plans are not used. If every enabled Plus account is cooling or unavailable, the request fails with `no_plus_account` and does not call HTTP. Other plans are used only when no enabled Plus account exists.
 - `only`: Plus accounts only. If none are eligible, the request fails with `no_plus_account` and does not call HTTP.
 
-Among the accounts that remain, only the highest auth `priority` is used.
+`free-models` lets selected upstream model names use non-Plus Codex accounts even when `plus-preference` says otherwise. List upstream `name` values, never aliases. Matching is a case-insensitive exact match, and a thinking suffix does not change it. A listed name gets the same account pool as `off`. Other models keep the normal rules above, including `no_plus_account`. The check is applied per upstream name, so a listed fallback name may use a free account while the unlisted primary name stays Plus-only.
+
+```yaml
+plus-preference: only
+free-models: [gpt-6-luna]
+```
+
+Among the accounts that remain, only the highest auth `priority` is used. The tier is picked after the model cooldown and the soft penalty below are applied, so a top tier that is fully cooled or penalized falls to the next tier.
 
 ## Rotation
 
-- `round-robin` keeps the access token that succeeded. One upstream error moves to the next account and stays there if that account succeeds. A client cancel does not move the token.
+- `round-robin` keeps the access token that succeeded. One upstream error moves to the next account and stays there if that account succeeds. When the pinned account is no longer in the pool (cooled, penalized, unavailable) or just failed, the next request starts at the first account whose index sorts after the pinned one, wrapping to the first. A client cancel, a client error, or a success on an account penalized during that attempt does not move the pin.
 - `fill-first` keeps using the first account in the sorted pool.
-- `least-recent` orders by `UpdatedAt`, earliest first.
+- `least-recent` is a real LRU kept in memory per auth index. Accounts never used since start go first, then the oldest last use. Ties fall back to `UpdatedAt`, then index. The first planned account is stamped when the request is planned, so concurrent requests spread across accounts.
 - `sticky` keeps one account for a session until `sticky-seconds` elapses. The bind is written only after that account returns 2xx. `0` stores no bind.
+
+Penalized accounts (see Upstream response) are never part of this rotation. Healthy accounts rotate first. Penalized ones follow as a tail, soonest expiry first, so a pool that is entirely penalized is still tried.
 
 The session id is the first non-empty value among executor metadata `canonical_session_id`, `execution_session_id`, and `session_id`, then the headers `Session-Id`, `X-Session-Id`, and `X-Claude-Code-Session-Id`. `$CPA-SESSION-ID` uses that same value. A client header whose name is literally `CPA-SESSION-ID` is not copied.
 
@@ -132,7 +144,12 @@ A 2xx body or stream is returned as the base URL sent it. The plugin does not re
 
 Chat streams pass each upstream line through `ConvertOpenAIResponseToOpenAI`. Responses streams are the original bytes. The request is `POST {base-url}/chat/completions` or `POST {base-url}/responses` with `Authorization: Bearer` set to the selected Codex access token. Stream requests also send `Accept: text/event-stream` and `Cache-Control: no-cache`.
 
-A non-2xx response tries the next account with the same model, up to `1 + request-retry` calls. The error `model is not supported` with `ChatGPT account` cools that account index and that access token until `model-cooldown-minutes` elapse. Later requests do not select either one. The same match inside a 2xx stream body cools the account after that stream is opened. `0` still switches accounts inside the current request and does not remember the skip. When `stats-file` is set, active cooldowns are reloaded after restart. The last upstream error body is returned unchanged.
+A non-2xx response tries the next account with the same model, up to `1 + request-retry` calls. The last upstream error body is returned unchanged.
+
+- Model refusal: the error `model is not supported` with `ChatGPT account` cools that account index and that access token for that model until `model-cooldown-minutes` elapse. Later requests for that model do not select either one. The same match inside a 2xx stream body cools them after that stream is opened. `0` still switches accounts inside the current request and does not remember the cooldown. When `stats-file` is set, active cooldowns are reloaded after restart.
+- Client errors: a 400, 404, 409, 413, 415 or 422 whose body is not a model refusal blames the request, not the account. It is returned at once, with no further account, no penalty, and no change to the round-robin pin. `model_not_found` and "model ... does not exist" bodies still count as model refusals.
+- Soft penalty: a failed attempt demotes the account in memory only, so a restart clears it. A 429 penalizes the account until `error.resets_in_seconds`, else `error.resets_at` (unix seconds), else `Retry-After` (seconds or HTTP date), else 10 minutes, clamped to 30 seconds through 7 days. A 401 penalizes that access token for 10 minutes. A 402 or 403 penalizes the account for 10 minutes. A 5xx, 408, transport error or missing stream id carries no penalty. Penalized accounts are demoted, not removed. A 2xx clears the penalty that was set before that attempt started.
+- Within one request, an account that returned 429, 401, 402, 403 or a model refusal is not sent to again. Repeats after a 5xx or transport error stay allowed.
 
 ## Protocols
 
@@ -161,7 +178,7 @@ The client `Authorization` header is not forwarded. The plugin sets `Authorizati
 | `total` | Enabled Codex records considered. |
 | `eligible` | Enabled, available, not cooling, with a token. This includes free accounts. |
 | `plus` | Eligible records whose live token plan is `plus`. |
-| `cooling` | Enabled records still before `next_retry_after`, or skipped by model cooldown. The timer scan calls `host.auth.list` with an empty callback id, so a failed list leaves the previous snapshot. |
+| `cooling` | Enabled records still before `next_retry_after`, or skipped by a model cooldown for any model. The timer scan calls `host.auth.list` with an empty callback id, so a failed list leaves the previous snapshot. |
 | `unavailable` | Enabled records that are unavailable or have no token. |
 | `disabled_skipped` | Disabled Codex records. They are not part of `total`. |
 | `checked_at` | RFC3339 time, or empty. |

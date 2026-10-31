@@ -62,13 +62,14 @@ type rpcResponseNormalizer struct {
 	method string
 }
 
-func registerRPCPlugin(ctx context.Context, host *Host, id string, client pluginClient, method string, configYAML []byte) (pluginapi.Plugin, error) {
+func registerRPCPlugin(ctx context.Context, host *Host, id string, client pluginClient, method string, configYAML []byte, hostBaseURL string) (pluginapi.Plugin, error) {
 	if client == nil {
 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
 	}
 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
 		ConfigYAML:    bytes.Clone(configYAML),
 		SchemaVersion: pluginabi.SchemaVersion,
+		HostBaseURL:   strings.TrimSpace(hostBaseURL),
 	})
 	if errCall != nil {
 		return pluginapi.Plugin{}, errCall

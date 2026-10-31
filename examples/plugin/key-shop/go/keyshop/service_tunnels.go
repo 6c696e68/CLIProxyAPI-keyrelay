@@ -27,6 +27,12 @@ type keyTunnelResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
+// tunnelViewResponse keeps the view fields top-level and adds the start failure.
+type tunnelViewResponse struct {
+	TunnelView
+	StartError string `json:"start_error,omitempty"`
+}
+
 func (s *Service) tunnelDisabled() bool {
 	return s == nil || s.tunnels == nil || !s.tunnels.Enabled()
 }
@@ -45,8 +51,9 @@ func (s *Service) listTunnels() map[string]any {
 	}
 	found, path, version := s.tunnels.BinaryInfo()
 	return jsonResponse(http.StatusOK, map[string]any{
-		"tunnels":     views,
-		"cloudflared": map[string]any{"found": found, "path": path, "version": version},
+		"tunnels":            views,
+		"default_target_url": s.tunnels.DefaultTarget(),
+		"cloudflared":        map[string]any{"found": found, "path": path, "version": version},
 	})
 }
 
@@ -71,7 +78,11 @@ func (s *Service) createTunnel(body []byte) map[string]any {
 	if err = validateKind(in.Kind); err != nil {
 		return jsonError(http.StatusBadRequest, "invalid kind")
 	}
-	target, err := validateTarget(in.TargetURL, in.Kind == "quick")
+	requested := in.TargetURL
+	if in.Kind == "quick" && strings.TrimSpace(requested) == "" {
+		requested = s.tunnels.DefaultTarget()
+	}
+	target, err := validateTarget(requested, in.Kind == "quick")
 	if err != nil {
 		return jsonError(http.StatusBadRequest, "invalid target_url")
 	}
@@ -84,7 +95,17 @@ func (s *Service) createTunnel(body []byte) map[string]any {
 	if err != nil {
 		return tunnelStoreError(err)
 	}
-	return jsonResponse(http.StatusCreated, s.tunnels.View(row))
+	// A new tunnel starts right away so the operator sees it running. A start
+	// failure keeps the row: the view still carries the reason.
+	out := tunnelViewResponse{TunnelView: s.tunnels.View(row)}
+	if err = s.tunnels.Start(row.ID); err != nil {
+		out.StartError = err.Error()
+		return jsonResponse(http.StatusCreated, out)
+	}
+	if reloaded, errGet := s.store.GetTunnel(row.ID); errGet == nil {
+		out.TunnelView = s.tunnels.View(reloaded)
+	}
+	return jsonResponse(http.StatusCreated, out)
 }
 
 func (s *Service) updateTunnel(body []byte) map[string]any {
@@ -114,7 +135,11 @@ func (s *Service) updateTunnel(body []byte) map[string]any {
 		cur.Name = name
 	}
 	if bytes.Contains(body, []byte(`"target_url"`)) {
-		target, errTarget := validateTarget(in.TargetURL, cur.Kind == "quick")
+		requested := in.TargetURL
+		if cur.Kind == "quick" && strings.TrimSpace(requested) == "" {
+			requested = s.tunnels.DefaultTarget()
+		}
+		target, errTarget := validateTarget(requested, cur.Kind == "quick")
 		if errTarget != nil {
 			return jsonError(http.StatusBadRequest, "invalid target_url")
 		}
@@ -226,7 +251,7 @@ func (s *Service) attachKeyTunnel(label, keyID, requested string, headers map[st
 	}
 	target := strings.TrimSpace(requested)
 	if target == "" {
-		target = strings.TrimSpace(s.tunnels.cfg.TargetURL)
+		target = s.tunnels.DefaultTarget()
 	}
 	if target == "" {
 		target = targetFromHost(headers)

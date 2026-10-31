@@ -561,9 +561,46 @@ func applyCPAWebSearchCapability(entry map[string]any, id string, capabilityForM
 func applyCodexClientProviderCapabilities(entry map[string]any, id string, providersForModel ProvidersForModelFunc) {
 	if providersForModel != nil && !isPureCodexProvider(id, providersForModel) {
 		entry["prefer_websockets"] = false
-		entry["service_tiers"] = []any{}
+		if !providersAdvertiseServiceTier(id, providersForModel) {
+			entry["service_tiers"] = []any{}
+		}
 		nullCodexClientRequiredOptions(entry)
 	}
+}
+
+// codexServiceTierParameter is the request parameter a provider lists in its
+// registered SupportedParameters when it forwards service_tier upstream.
+const codexServiceTierParameter = "service_tier"
+
+// providersAdvertiseServiceTier reports whether every provider serving the
+// model registered it with service_tier as a supported parameter. A relay that
+// forwards the field to the Codex backend keeps the template speed tiers; any
+// other non-Codex route still hides them.
+func providersAdvertiseServiceTier(id string, providersForModel ProvidersForModelFunc) bool {
+	providers := codexClientModelProviders(id, providersForModel)
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		info := registry.LookupModelInfo(id, provider)
+		if info == nil && strings.Contains(id, "/") {
+			idx := strings.Index(id, "/")
+			info = registry.LookupModelInfo(strings.TrimSpace(id[idx+1:]), provider)
+		}
+		if info == nil || !containsFold(info.SupportedParameters, codexServiceTierParameter) {
+			return false
+		}
+	}
+	return true
+}
+
+func containsFold(values []string, want string) bool {
+	for _, value := range values {
+		if strings.EqualFold(strings.TrimSpace(value), want) {
+			return true
+		}
+	}
+	return false
 }
 
 // nullCodexClientRequiredOptions clears capabilities that non-Codex models must not advertise.

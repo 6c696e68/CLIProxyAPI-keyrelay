@@ -468,15 +468,32 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 			reporter.EnsurePublished(ctx)
 		}()
 
+		// An image frame carries a whole base64 image and the final usage, so a
+		// line spans many reads. Usage is parsed per complete line, not per read.
+		var pending []byte
+		observeLines := func(chunk []byte, final bool) {
+			pending = append(pending, chunk...)
+			for {
+				idx := bytes.IndexByte(pending, '\n')
+				if idx < 0 {
+					break
+				}
+				streamUsage.ObserveOpenAIStream(bytes.TrimSpace(pending[:idx]))
+				pending = pending[idx+1:]
+			}
+			if final && len(pending) > 0 {
+				streamUsage.ObserveOpenAIStream(bytes.TrimSpace(pending))
+				pending = nil
+			}
+		}
+
 		buffer := make([]byte, 32*1024)
 		for {
 			n, errRead := httpResp.Body.Read(buffer)
 			if n > 0 {
 				chunk := bytes.Clone(buffer[:n])
 				helps.AppendAPIResponseChunk(ctx, e.cfg, chunk)
-				for _, line := range bytes.Split(chunk, []byte("\n")) {
-					streamUsage.ObserveOpenAIStream(bytes.TrimSpace(line))
-				}
+				observeLines(chunk, false)
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunk}:
 				case <-ctx.Done():
@@ -484,7 +501,9 @@ func (e *CodexExecutor) executeDirectOpenAIImageStream(ctx context.Context, auth
 				}
 			}
 			if errRead != nil {
-				if errRead != io.EOF {
+				if errRead == io.EOF {
+					observeLines(nil, true)
+				} else {
 					helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 					reporter.PublishFailure(ctx, errRead)
 					select {

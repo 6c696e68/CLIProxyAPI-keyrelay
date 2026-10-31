@@ -17,6 +17,7 @@ const mobileOpen = ref(false)
 const groups = [
   { label: 'Overview', items: [{ id: 'dashboard', href: '#/', label: 'Dashboard', icon: 'panel' }] },
   { label: 'Access', items: [{ id: 'groups', href: '#/groups', label: 'Model groups', icon: 'layers' }, { id: 'keys', href: '#/keys', label: 'Keys', icon: 'key' }] },
+  { label: 'Sales', items: [{ id: 'plans', href: '#/plans', label: 'Plans', icon: 'layers' }, { id: 'partners', href: '#/partners', label: 'Partners', icon: 'panel' }] },
   { label: 'Activity', items: [{ id: 'requests', href: '#/requests', label: 'Request log', icon: 'activity' }, { id: 'tunnels', href: '#/tunnels', label: 'Tunnels', icon: 'layers' }] },
 ]
 </script>

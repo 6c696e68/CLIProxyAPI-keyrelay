@@ -2,7 +2,7 @@ import { ApiError } from '@/lib/api-error'
 import { groupModelProblems } from '@/lib/group-models'
 import { bulkPayload } from '@/lib/bulk'
 import { availableModels, seedGroups, seedKeys, seedPolicyModels, seedRequests } from '@/mock/fixtures'
-import type { AdminService, BulkPatch, CreateDraft, EditDraft, GroupInput, KeyRecord, KeysQuery, ModelEntry, ModelGroup, Policy, RequestPage, RequestQuery, RequestRow, RequestSummary, Scenario, Stats, Tunnel, TunnelDraft, UsageQuery, UsageRank, UsageReport } from '@/types'
+import type { AdminService, BulkPatch, CreateDraft, EditDraft, GroupInput, KeyRecord, KeysQuery, ModelEntry, ModelGroup, Partner, PartnerCall, PartnerCallQuery, PartnerInput, PartnerOrder, PartnerOrderQuery, PartnerSettings, PartnerStats, Plan, PlanInput, Policy, RequestPage, RequestQuery, RequestRow, RequestSummary, Scenario, Stats, Tunnel, TunnelDraft, UsageQuery, UsageRank, UsageReport } from '@/types'
 
 const PAGE_SIZE = 5
 
@@ -33,6 +33,19 @@ function displayFrom(secret: string): string {
 function fakeSecret(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16))
   return `ck_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function fakePartnerSecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return `ksp_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')}`
+}
+
+function blankStats(partial: Partial<PartnerStats> = {}): PartnerStats {
+  return {
+    callsOk: 0, callsClientError: 0, callsServerError: 0,
+    minted: 0, confirmed: 0, voided: 0, unconfirmedOverdue: 0,
+    dailyUsed: 0, dailyCap: 0, ...partial,
+  }
 }
 
 function assertReadable(scenario?: Scenario) {
@@ -132,6 +145,57 @@ export function createAdminService(): AdminService {
     updatedAt: '2026-10-20T00:00:00Z',
   }]
   let policy: Policy = { mode: 'custom', models: clone(seedPolicyModels), loaded: true }
+
+  const plans: Plan[] = [
+    {
+      id: 'plan_starter', name: 'Starter', description: 'Trial keys', revision: 1, active: true,
+      group: { id: 'grp_studio', name: 'Studio', allModels: false, models: ['gpt-5-codex', 'claude-sonnet-4-5'] },
+      ttlSeconds: 7 * 86_400, neverExpires: false, tokenLimit: 5_000_000, unlimitedTokens: false,
+      requestLimit: 0, unlimitedRequests: true,
+    },
+    {
+      id: 'plan_pro', name: 'Pro 30d', description: 'Monthly plan', revision: 2, active: true,
+      group: { id: 'grp_vippro', name: 'vippro', allModels: false, models: ['gpt-6-sol', 'gpt-6-astra'] },
+      ttlSeconds: 30 * 86_400, neverExpires: false, tokenLimit: 0, unlimitedTokens: true,
+      requestLimit: 5000, unlimitedRequests: false,
+    },
+    {
+      id: 'plan_lifetime', name: 'Lifetime', description: '', revision: 1, active: false,
+      group: { id: 'all-models', name: 'All models', allModels: true, models: [] },
+      ttlSeconds: 0, neverExpires: true, tokenLimit: 0, unlimitedTokens: true,
+      requestLimit: 0, unlimitedRequests: true,
+    },
+  ]
+  const partners: Partner[] = [
+    {
+      id: 'ptn_demoshop', name: 'Demo shop', secretPrefix: 'ksp_demo', secretLast4: 'a1b2', status: 'active',
+      allowedPlanIds: [], dailyKeyCap: null, maxQuantity: null,
+      createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z', lastUsedAt: '2026-10-30T09:00:00Z',
+      stats: blankStats({ callsOk: 42, callsClientError: 3, minted: 6, confirmed: 5, voided: 1, unconfirmedOverdue: 1, dailyUsed: 4, dailyCap: 300 }),
+    },
+    {
+      id: 'ptn_reseller', name: 'Reseller', secretPrefix: 'ksp_rese', secretLast4: 'c3d4', status: 'disabled',
+      allowedPlanIds: ['plan_pro'], dailyKeyCap: 50, maxQuantity: 5,
+      createdAt: '2026-10-21T00:00:00Z', updatedAt: '2026-10-21T00:00:00Z', lastUsedAt: null,
+      stats: blankStats({ callsOk: 8, callsServerError: 1, minted: 2, confirmed: 2, dailyUsed: 0, dailyCap: 50 }),
+    },
+  ]
+  const calls: PartnerCall[] = [
+    { id: 3, partnerId: 'ptn_demoshop', at: '2026-10-30T09:00:00Z', op: 'mint', httpStatus: 200, code: '', ref: 'demo-0006', latencyMs: 18, clientIp: '198.51.100.7' },
+    { id: 2, partnerId: 'ptn_demoshop', at: '2026-10-30T08:59:00Z', op: 'confirm', httpStatus: 200, code: '', ref: 'demo-0005', latencyMs: 12, clientIp: '198.51.100.7' },
+    { id: 1, partnerId: 'ptn_reseller', at: '2026-10-30T08:00:00Z', op: 'status', httpStatus: 404, code: 'ref_not_found', ref: 'reseller-0001', latencyMs: 9, clientIp: '203.0.113.9' },
+  ]
+  const orders: PartnerOrder[] = [
+    { partnerId: 'ptn_demoshop', ref: 'demo-0006', planId: 'plan_pro', planRevision: 2, quantity: 2, state: 'minted', orderId: '', buyer: '', customer: 'buyer@example.com', voidReason: '', createdAt: '2026-10-30T09:00:00Z', confirmedAt: null, voidedAt: null },
+    { partnerId: 'ptn_demoshop', ref: 'demo-0005', planId: 'plan_starter', planRevision: 1, quantity: 1, state: 'confirmed', orderId: 'shop-5', buyer: 'buyer-5', customer: 'buyer@example.com', voidReason: '', createdAt: '2026-10-29T09:00:00Z', confirmedAt: '2026-10-29T09:05:00Z', voidedAt: null },
+  ]
+  let partnerSettings: PartnerSettings = {
+    apiEnabled: true, publicBaseUrl: '', publicDashboardPath: '/client',
+    maxQuantity: 50, dailyKeyCap: 300, maxBodyKb: 64, alertMin: 10, logRetentionDays: 30,
+    labelTemplate: '{plan}-{ref}-{i}', noteTemplate: 'partner:{partner} ref:{ref}',
+  }
+  if (keys[0]) { keys[0].partnerId = 'ptn_demoshop'; keys[0].partnerRef = 'demo-0006' }
+  if (keys[1]) { keys[1].partnerId = 'ptn_demoshop'; keys[1].partnerRef = 'demo-0005' }
 
   function syncCounts() {
     for (const group of groups) group.keyCount = keys.filter((key) => key.groupId === group.id).length
@@ -306,7 +370,9 @@ export function createAdminService(): AdminService {
         const matchesQuery = !needle || [key.label, key.customer, key.id, key.display].join(' ').toLowerCase().includes(needle)
         const matchesStatus = !query.status || key.status === query.status
         const matchesGroup = !query.group || (query.group === 'none' ? !key.groupId : key.groupId === query.group)
-        return matchesQuery && matchesStatus && matchesGroup
+        const matchesPartner = !query.partner || key.partnerId === query.partner
+        const matchesRef = !query.ref || (key.partnerRef || '').toLowerCase().includes(query.ref.toLowerCase())
+        return matchesQuery && matchesStatus && matchesGroup && matchesPartner && matchesRef
       })
       const size = query.pageSize || PAGE_SIZE
       return { keys: clone(filtered.slice((query.page - 1) * size, query.page * size)), total: filtered.length }
@@ -438,8 +504,8 @@ export function createAdminService(): AdminService {
     },
     async tunnels(scenario?: Scenario) {
       assertReadable(scenario)
-      if (scenario === 'empty') return { tunnels: [], cloudflared: { found: false, path: '', version: '' } }
-      return { tunnels: clone(tunnels), cloudflared: { found: true, path: '/usr/local/bin/cloudflared', version: '2026.1.0' } }
+      if (scenario === 'empty') return { tunnels: [], cloudflared: { found: false, path: '', version: '' }, defaultTargetUrl: 'http://127.0.0.1:8317' }
+      return { tunnels: clone(tunnels), cloudflared: { found: true, path: '/usr/local/bin/cloudflared', version: '2026.1.0' }, defaultTargetUrl: 'http://127.0.0.1:8317' }
     },
     async saveTunnel(draft: TunnelDraft, scenario?: Scenario) {
       assertWritable(scenario)
@@ -515,6 +581,145 @@ export function createAdminService(): AdminService {
       assertReadable(scenario)
       if (!tunnels.some((item) => item.id === id)) throw new ApiError('unknown id', 404)
       return ['cloudflared mock ready', 'https://demo.trycloudflare.com'].slice(0, lines)
+    },
+    async plans(scenario?: Scenario) {
+      assertReadable(scenario)
+      return scenario === 'empty' ? [] : clone(plans)
+    },
+    async savePlan(input: PlanInput, scenario?: Scenario) {
+      assertWritable(scenario)
+      const name = input.name.trim()
+      if (!name) throw new Error('name is required')
+      if (!input.neverExpires && Number(input.ttlSeconds) <= 0) throw new Error('ttl_seconds must be positive unless never_expires')
+      const group = groups.find((item) => item.id === input.groupId)
+      if (!group) throw new Error('unknown model group')
+      const existing = input.id ? plans.find((item) => item.id === input.id) : undefined
+      if (input.id && !existing) throw new ApiError('plan not found', 404)
+      if (plans.some((item) => item.name.toLowerCase() === name.toLowerCase() && item.id !== existing?.id)) throw new Error('name already exists')
+      const next: Plan = {
+        id: existing?.id || `plan_${fakeSecret().slice(3, 11)}`,
+        name,
+        description: input.description.trim(),
+        revision: existing ? existing.revision + 1 : 1,
+        active: input.active,
+        group: { id: group.id, name: group.name, allModels: group.allModels, models: group.models.map((model) => model.alias || model.name) },
+        ttlSeconds: input.neverExpires ? 0 : Number(input.ttlSeconds),
+        neverExpires: input.neverExpires,
+        tokenLimit: input.unlimitedTokens ? 0 : Number(input.tokenLimit),
+        unlimitedTokens: input.unlimitedTokens,
+        requestLimit: input.unlimitedRequests ? 0 : Number(input.requestLimit),
+        unlimitedRequests: input.unlimitedRequests,
+      }
+      if (existing) Object.assign(existing, next)
+      else plans.push(next)
+      return clone(next)
+    },
+    async removePlan(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const index = plans.findIndex((item) => item.id === id)
+      if (index < 0) throw new ApiError('plan not found', 404)
+      const used = orders.filter((item) => item.planId === id).length
+      if (used) throw new ApiError(`plan is used by ${used} partner order(s)`, 409)
+      plans.splice(index, 1)
+    },
+    async partners(scenario?: Scenario) {
+      assertReadable(scenario)
+      return scenario === 'empty' ? [] : clone(partners)
+    },
+    async createPartner(input: PartnerInput, scenario?: Scenario) {
+      assertWritable(scenario)
+      const name = input.name.trim()
+      if (!name) throw new Error('name is required')
+      if (partners.some((item) => item.name.toLowerCase() === name.toLowerCase())) throw new Error('name already exists')
+      if (input.allowedPlanIds.some((id) => !plans.some((plan) => plan.id === id))) throw new Error('unknown plan')
+      const secret = fakePartnerSecret()
+      const now = new Date().toISOString()
+      const partner: Partner = {
+        id: `ptn_${secret.slice(4, 12)}`,
+        name,
+        secretPrefix: secret.slice(4, 8),
+        secretLast4: secret.slice(-4),
+        status: 'active',
+        allowedPlanIds: [...input.allowedPlanIds],
+        dailyKeyCap: input.dailyKeyCap,
+        maxQuantity: input.maxQuantity,
+        createdAt: now,
+        updatedAt: now,
+        lastUsedAt: null,
+        stats: blankStats({ dailyCap: input.dailyKeyCap ?? 300 }),
+      }
+      partners.unshift(partner)
+      return { partner: clone(partner), secret }
+    },
+    async updatePartner(input: PartnerInput, scenario?: Scenario) {
+      assertWritable(scenario)
+      const partner = partners.find((item) => item.id === input.id)
+      if (!partner) throw new ApiError('partner not found', 404)
+      const name = input.name.trim()
+      if (!name) throw new Error('name is required')
+      if (partners.some((item) => item.name.toLowerCase() === name.toLowerCase() && item.id !== partner.id)) throw new Error('name already exists')
+      if (input.allowedPlanIds.some((id) => !plans.some((plan) => plan.id === id))) throw new Error('unknown plan')
+      partner.name = name
+      partner.status = input.status || 'active'
+      partner.allowedPlanIds = [...input.allowedPlanIds]
+      partner.dailyKeyCap = input.dailyKeyCap
+      partner.maxQuantity = input.maxQuantity
+      partner.updatedAt = new Date().toISOString()
+      if (partner.stats) partner.stats.dailyCap = input.dailyKeyCap ?? 300
+      return clone(partner)
+    },
+    async rotatePartner(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const partner = partners.find((item) => item.id === id)
+      if (!partner) throw new ApiError('partner not found', 404)
+      const secret = fakePartnerSecret()
+      partner.secretPrefix = secret.slice(4, 8)
+      partner.secretLast4 = secret.slice(-4)
+      partner.updatedAt = new Date().toISOString()
+      return { partner: clone(partner), secret }
+    },
+    async removePartner(id: string, scenario?: Scenario) {
+      assertWritable(scenario)
+      const index = partners.findIndex((item) => item.id === id)
+      if (index < 0) throw new ApiError('partner not found', 404)
+      partners.splice(index, 1)
+    },
+    async partnerCalls(query: PartnerCallQuery, scenario?: Scenario) {
+      assertReadable(scenario)
+      const matched = calls.filter((row) => {
+        if (query.partner && row.partnerId !== query.partner) return false
+        if (query.op && row.op !== query.op) return false
+        if (query.status === 'ok' && row.httpStatus >= 400) return false
+        if (query.status === 'error' && row.httpStatus < 400) return false
+        return true
+      })
+      const limit = query.limit || 20
+      const start = query.cursor ? Number(query.cursor) || 0 : 0
+      const page = matched.slice(start, start + limit)
+      const next = start + page.length
+      return { calls: clone(page), nextCursor: next < matched.length ? String(next) : '' }
+    },
+    async partnerOrders(query: PartnerOrderQuery, scenario?: Scenario) {
+      assertReadable(scenario)
+      const matched = orders.filter((row) => {
+        if (query.partner && row.partnerId !== query.partner) return false
+        if (query.state && row.state !== query.state) return false
+        if (query.ref && row.ref !== query.ref) return false
+        return true
+      })
+      const limit = query.limit || 20
+      const start = query.cursor ? Number(query.cursor) || 0 : 0
+      const page = matched.slice(start, start + limit)
+      const next = start + page.length
+      return { orders: clone(page), nextCursor: next < matched.length ? String(next) : '' }
+    },
+    async partnerSettings(scenario?: Scenario) {
+      assertReadable(scenario)
+      return clone(partnerSettings)
+    },
+    async savePartnerSettings(next: PartnerSettings, scenario?: Scenario) {
+      assertWritable(scenario)
+      partnerSettings = clone(next)
     },
   }
 }

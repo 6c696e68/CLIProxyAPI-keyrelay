@@ -1854,3 +1854,58 @@ func TestCodexClientModelsResponse_DoesNotLeakResponsesLiteOrCodeModeToNonCodexR
 		}
 	}
 }
+
+func TestCodexClientModelsResponse_PluginProviderKeepsServiceTiersWhenAdvertised(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	clientID := "codex-plugin-service-tier-test-client"
+	modelRegistry.RegisterClient(clientID, "ch-relay-test", []*registry.ModelInfo{
+		{
+			ID:                  "relay/gpt-6-astra",
+			DisplayName:         "Astra via relay",
+			SupportedParameters: []string{"service_tier"},
+			Thinking:            &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:          "relay/gpt-6-sol",
+			DisplayName: "Sol via relay",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(clientID)
+	})
+
+	availableModels := []map[string]any{
+		{"id": "relay/gpt-6-astra", "display_name": "Astra via relay"},
+		{"id": "relay/gpt-6-sol", "display_name": "Sol via relay"},
+	}
+	resp := BuildResponseForClientWithToolCapabilities(availableModels, modelRegistry.GetModelProviders, nil, func(string) bool { return true }, nil, false, "0.163.0")
+	models, ok := resp["models"].([]map[string]any)
+	if !ok || len(models) != 2 {
+		t.Fatalf("models = %#v, want two models", resp["models"])
+	}
+	bySlug := map[string]map[string]any{}
+	for _, entry := range models {
+		bySlug[stringModelValue(entry, "slug")] = entry
+	}
+
+	astra := bySlug["relay/gpt-6-astra"]
+	tiers, okTiers := astra["service_tiers"].([]any)
+	if !okTiers || len(tiers) == 0 {
+		t.Fatalf("relay/gpt-6-astra service_tiers = %#v, want the gpt-6-astra template tiers kept", astra["service_tiers"])
+	}
+	if first, _ := tiers[0].(map[string]any); stringModelValue(first, "id") != "priority" {
+		t.Errorf("relay/gpt-6-astra first tier = %#v, want priority", tiers[0])
+	}
+	if got, _ := astra["prefer_websockets"].(bool); got {
+		t.Errorf("prefer_websockets = %v, want false for a plugin provider", got)
+	}
+	if got := stringModelValue(astra, "tool_mode"); got != "direct" {
+		t.Errorf("tool_mode = %q, want direct for a plugin provider", got)
+	}
+
+	sol := bySlug["relay/gpt-6-sol"]
+	if tiers, okTiers := sol["service_tiers"].([]any); !okTiers || len(tiers) != 0 {
+		t.Errorf("relay/gpt-6-sol service_tiers = %#v, want empty when service_tier is not advertised", sol["service_tiers"])
+	}
+}

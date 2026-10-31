@@ -19,11 +19,21 @@ var (
 	ErrGroupInvalid  = errors.New("invalid model group")
 )
 
-// GroupInUseError reports a delete blocked by keys that still use the group.
-type GroupInUseError struct{ Count int }
+// GroupInUseError reports a delete blocked by keys or active plans that still use the group.
+type GroupInUseError struct {
+	Count int
+	Plans int
+}
 
 func (e *GroupInUseError) Error() string {
-	return fmt.Sprintf("model group is used by %d key(s)", e.Count)
+	switch {
+	case e.Count > 0 && e.Plans > 0:
+		return fmt.Sprintf("model group is used by %d key(s) and %d active plan(s)", e.Count, e.Plans)
+	case e.Plans > 0:
+		return fmt.Sprintf("model group is used by %d active plan(s)", e.Plans)
+	default:
+		return fmt.Sprintf("model group is used by %d key(s)", e.Count)
+	}
 }
 
 // GroupModel is one upstream model and the optional name clients call it by.
@@ -61,18 +71,59 @@ func (m GroupModel) ClientName() string {
 }
 
 // Allows reports whether the group admits the requested model. A match may be
-// the client alias or the upstream name. A thinking suffix such as "(high)" is
-// ignored, matching the global model policy.
+// the client alias or the upstream name, because the host gate may already have
+// rewritten the alias. A thinking suffix such as "(high)" is ignored, matching
+// the global model policy.
 func (g Group) Allows(requested string) bool {
 	if g.AllModels {
 		return true
 	}
+	_, ok := g.match(requested, false)
+	return ok
+}
+
+// Resolve maps the client-visible name to the upstream name. A bare upstream
+// name is accepted only when that entry has no alias. The client's thinking
+// suffix is kept. An all-models group returns the request unchanged.
+func (g Group) Resolve(requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if g.AllModels {
+		return requested, requested != ""
+	}
+	model, ok := g.match(requested, true)
+	if !ok {
+		return "", false
+	}
+	_, rawSuffix, hasSuffix := parseClientSuffix(requested)
+	if !hasSuffix {
+		return model.Name, true
+	}
+	return model.Name + "(" + rawSuffix + ")", true
+}
+
+// match finds the entry for a requested name, compared case-insensitively with
+// and without a thinking suffix. visibleOnly limits the match to the client
+// name (alias when set); otherwise the upstream name also matches.
+func (g Group) match(requested string, visibleOnly bool) (GroupModel, bool) {
+	requested = strings.TrimSpace(requested)
+	base, _, _ := parseClientSuffix(requested)
+	if base == "" {
+		return GroupModel{}, false
+	}
 	for _, model := range g.Models {
-		if modelNamesEqual(requested, model.Name) || (strings.TrimSpace(model.Alias) != "" && modelNamesEqual(requested, model.Alias)) {
-			return true
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		visible := model.ClientName()
+		if strings.EqualFold(base, visible) || strings.EqualFold(requested, visible) {
+			return model, true
+		}
+		if !visibleOnly && (strings.EqualFold(base, name) || strings.EqualFold(requested, name)) {
+			return model, true
 		}
 	}
-	return false
+	return GroupModel{}, false
 }
 
 func (s *Store) seedSystemGroup() error {
@@ -112,6 +163,11 @@ func normalizeGroupModels(in []GroupModel) ([]GroupModel, error) {
 		}
 		if strings.EqualFold(alias, name) {
 			alias = ""
+		}
+		// Parentheses start a thinking suffix, so an alias containing them
+		// could never be told apart from "alias(high)".
+		if strings.ContainsAny(alias, "()") {
+			return nil, fmt.Errorf("%w: alias must not contain parentheses", ErrGroupInvalid)
 		}
 		key := strings.ToLower(name)
 		if prev, dup := seenName[key]; dup {
@@ -194,6 +250,11 @@ func StripPrefixAliases(names []string, prefix string) []GroupModel {
 
 const groupSelect = `SELECT g.id, g.name, g.description, g.all_models, g.models_json, g.aliases_json, g.is_system, g.created_at, g.updated_at,
   (SELECT COUNT(1) FROM keys WHERE keys.group_id = g.id AND keys.deleted_at IS NULL)
+FROM model_groups g`
+
+// groupPolicySelect is the request-path shape: no key count, so a per-request
+// lookup never scans the keys table.
+const groupPolicySelect = `SELECT g.id, g.name, g.description, g.all_models, g.models_json, g.aliases_json, g.is_system, g.created_at, g.updated_at, 0
 FROM model_groups g`
 
 func scanGroup(sc rowScanner) (Group, error) {
@@ -304,6 +365,18 @@ func (s *Store) groupOn(q rowQuery, id string) (Group, error) {
 	return g, err
 }
 
+// GroupPolicy loads a group for request-time checks. KeyCount is always zero;
+// management screens use Group, which counts the keys.
+func (s *Store) GroupPolicy(id string) (Group, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, err := scanGroup(s.db.QueryRow(groupPolicySelect+` WHERE g.id=?`, id))
+	if err == sql.ErrNoRows {
+		return Group{}, ErrGroupNotFound
+	}
+	return g, err
+}
+
 // requireGroupOn returns nil for an empty id (legacy keys) and ErrGroupNotFound for an unknown one.
 func (s *Store) requireGroupOn(q rowQuery, id string) error {
 	if strings.TrimSpace(id) == "" {
@@ -385,8 +458,12 @@ func (s *Store) DeleteGroup(id string) error {
 	if current.IsSystem {
 		return ErrGroupSystem
 	}
-	if current.KeyCount > 0 {
-		return &GroupInUseError{Count: current.KeyCount}
+	inUse := &GroupInUseError{Count: current.KeyCount}
+	if err = s.db.QueryRow(`SELECT COUNT(1) FROM plans WHERE group_id=? AND active=1`, id).Scan(&inUse.Plans); err != nil {
+		return err
+	}
+	if inUse.Count > 0 || inUse.Plans > 0 {
+		return inUse
 	}
 	_, err = s.db.Exec(`DELETE FROM model_groups WHERE id=?`, id)
 	return err
@@ -399,7 +476,7 @@ func (s *Store) GroupAllows(groupID, model string) bool {
 	if strings.TrimSpace(groupID) == "" {
 		return true
 	}
-	g, err := s.Group(groupID)
+	g, err := s.GroupPolicy(groupID)
 	if err != nil {
 		return false
 	}

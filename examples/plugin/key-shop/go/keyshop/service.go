@@ -54,6 +54,19 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 					{"Name": "cloudflared_path", "Type": "string", "Description": "Path to cloudflared. Empty looks up cloudflared in PATH"},
 					{"Name": "tunnels_enabled", "Type": "bool", "Default": true, "Description": "When false, tunnel routes return 404 and no child is spawned"},
 					{"Name": "tunnel_target_url", "Type": "string", "Description": "Default quick-tunnel target when creating a key with a tunnel"},
+					{"Name": "tunnel_keep_alive", "Type": "bool", "Default": true, "Description": "Keep cloudflared running across a config reload, plugin reload and host restart (Linux only)"},
+					{"Name": "tunnel_watch_interval", "Type": "string", "Default": DefaultTunnelWatchInterval.String(), "Description": "How often a kept-alive tunnel and its log are checked"},
+					{"Name": "tunnel_log_max_kb", "Type": "integer", "Default": DefaultTunnelLogMaxKB, "Description": "Cap for cloudflared.log in KiB; the watcher truncates it to 0 when it grows past this"},
+					{"Name": "partner_api_enabled", "Type": "bool", "Default": false, "Description": "Enable the partner v1 API"},
+					{"Name": "public_base_url", "Type": "string", "Description": "Public base URL for partner responses. Empty uses the request Host"},
+					{"Name": "public_dashboard_path", "Type": "string", "Default": "/client", "Description": "Dashboard path appended to the public URLs"},
+					{"Name": "partner_max_quantity", "Type": "integer", "Default": 50, "Description": "Most keys one mint may create unless the partner overrides it"},
+					{"Name": "partner_daily_key_cap", "Type": "integer", "Default": 300, "Description": "Daily keys per partner. 0 means unlimited"},
+					{"Name": "partner_max_body_kb", "Type": "integer", "Default": 64, "Description": "Largest partner request body in KB"},
+					{"Name": "partner_unconfirmed_alert_min", "Type": "integer", "Default": 10, "Description": "Minutes before a minted order counts as unconfirmed"},
+					{"Name": "partner_log_retention_days", "Type": "integer", "Default": 30, "Description": "How long partner call rows are kept"},
+					{"Name": "partner_key_label_template", "Type": "string", "Default": "{plan}-{ref}-{i}", "Description": "Minted key label template using {plan}, {partner}, {ref}, {i}"},
+					{"Name": "partner_key_note_template", "Type": "string", "Default": "partner:{partner} ref:{ref}", "Description": "Minted key note template using {plan}, {partner}, {ref}, {i}"},
 				},
 			},
 			"capabilities": map[string]any{
@@ -75,6 +88,12 @@ func (s *Service) Call(method string, request []byte) ([]byte, error) {
 		return ok(map[string]any{})
 	case "keyshop.resolve_model":
 		result, err := s.resolveModel(payload)
+		if err != nil {
+			return nil, err
+		}
+		return ok(result)
+	case "keyshop.list_models":
+		result, err := s.listModels(payload)
 		if err != nil {
 			return nil, err
 		}
@@ -167,14 +186,17 @@ func (s *Service) intercept(payload []byte) map[string]any {
 		_ = s.store.RecordRejection(req.RequestID, key.ID, "request_limit_exceeded", http.StatusTooManyRequests)
 		return terminate(http.StatusTooManyRequests, "request_limit_exceeded", denialMessage("request_limit_exceeded"), "insufficient_quota")
 	}
-	// A limited group is authoritative. The host already rewrote its alias, so
-	// matching the original client model against the global list would deny it.
-	// The all-models group still follows the global policy.
-	if !limitedGroup(s, key, keyErr) && !modelAllowed(s.store.cfg.ModelAccessMode, s.store.cfg.Models, requestedModel) {
+	// One group read serves both checks. A limited group is authoritative: the
+	// host already rewrote its alias, so matching the original client model
+	// against the global list would deny it. The all-models group and a key
+	// without a group follow the global policy. An unknown group fails closed.
+	group, groupKnown := s.keyGroup(key, keyErr)
+	limited := keyErr == nil && strings.TrimSpace(key.GroupID) != "" && (!groupKnown || !group.AllModels)
+	if !limited && !modelAllowed(s.store.cfg.ModelAccessMode, s.store.cfg.Models, requestedModel) {
 		_ = s.store.RejectSecret(secret, req.RequestID, "model_not_allowed", http.StatusForbidden)
 		return terminate(http.StatusForbidden, "model_not_allowed", "model is not allowed for this key", "invalid_request_error")
 	}
-	if keyErr == nil && !s.groupAllowsAny(key.GroupID, requestedModel, req.Model, bodyModel(req.Body)) {
+	if limited && (!groupKnown || !groupAllowsAny(group, requestedModel, req.Model, bodyModel(req.Body))) {
 		_ = s.store.RecordRejection(req.RequestID, key.ID, "model_not_allowed", http.StatusForbidden, strings.TrimSpace(req.Model), requestedModel)
 		return terminate(http.StatusForbidden, "model_not_allowed", "model is not allowed for this key", "invalid_request_error")
 	}
@@ -230,28 +252,23 @@ func modelAllowed(mode string, models []ModelAccessModel, requested string) bool
 	return true
 }
 
-func limitedGroup(s *Service, key Key, keyErr error) bool {
+// keyGroup loads the key's group without the key count. known is false for a
+// legacy key with no group, an unknown key, or a group id that no longer exists.
+func (s *Service) keyGroup(key Key, keyErr error) (Group, bool) {
 	if keyErr != nil || strings.TrimSpace(key.GroupID) == "" {
-		return false
+		return Group{}, false
 	}
-	group, err := s.store.Group(key.GroupID)
+	group, err := s.store.GroupPolicy(key.GroupID)
 	if err != nil {
-		return true
+		return Group{}, false
 	}
-	return !group.AllModels
+	return group, true
 }
 
-// groupAllowsAny admits the request when the key's group allows any model name
-// the host reports for it. The host gate may already have rewritten a client
-// alias to the upstream name, so more than one candidate can be valid.
-func (s *Service) groupAllowsAny(groupID string, candidates ...string) bool {
-	if strings.TrimSpace(groupID) == "" {
-		return true
-	}
-	group, err := s.store.Group(groupID)
-	if err != nil {
-		return false
-	}
+// groupAllowsAny admits the request when the group allows any model name the
+// host reports for it. The host gate may already have rewritten a client alias
+// to the upstream name, so more than one candidate can be valid.
+func groupAllowsAny(group Group, candidates ...string) bool {
 	for _, candidate := range candidates {
 		if group.Allows(candidate) {
 			return true
@@ -292,7 +309,7 @@ func (s *Service) resolveModel(payload []byte) (resolveModelResult, error) {
 	if strings.TrimSpace(key.GroupID) == "" {
 		return resolveModelResult{Mode: "legacy"}, nil
 	}
-	group, err := s.store.Group(key.GroupID)
+	group, err := s.store.GroupPolicy(key.GroupID)
 	if err != nil {
 		if errors.Is(err, ErrGroupNotFound) {
 			return resolveModelResult{Mode: "group", Allowed: false}, nil
@@ -306,13 +323,13 @@ func (s *Service) resolveModel(payload []byte) (resolveModelResult, error) {
 	if group.AllModels {
 		return resolveModelResult{Mode: "group", Allowed: true, Model: requested}, nil
 	}
-	rewritten, okMatch := resolveGroupModel(group, requested)
+	rewritten, okMatch := group.Resolve(requested)
 	if !okMatch {
 		return resolveModelResult{Mode: "group", Allowed: false}, nil
 	}
 	body := strings.TrimSpace(req.BodyModel)
 	if body != "" && !strings.EqualFold(body, requested) {
-		bodyRewritten, bodyOK := resolveGroupModel(group, body)
+		bodyRewritten, bodyOK := group.Resolve(body)
 		if !bodyOK || bodyRewritten != rewritten {
 			return resolveModelResult{Mode: "group", Allowed: false}, nil
 		}
@@ -320,31 +337,60 @@ func (s *Service) resolveModel(payload []byte) (resolveModelResult, error) {
 	return resolveModelResult{Mode: "group", Allowed: true, Model: rewritten}, nil
 }
 
-// resolveGroupModel matches the client-visible name. A bare upstream name is
-// accepted only when that entry has no alias. The client's thinking suffix is kept.
-func resolveGroupModel(group Group, requested string) (string, bool) {
-	base, rawSuffix, hasSuffix := parseClientSuffix(requested)
-	if base == "" {
-		return "", false
+type listModelsEntry struct {
+	Name  string `json:"Name"`
+	Alias string `json:"Alias"`
+}
+
+type listModelsResult struct {
+	Mode      string            `json:"Mode"`
+	AllModels bool              `json:"AllModels"`
+	Models    []listModelsEntry `json:"Models"`
+}
+
+// listModels returns the models a ck_ key's group allows. A key with no group,
+// an unknown key, and a non-ck_ secret stay on the legacy global policy. An
+// unknown group fails closed with an empty list.
+func (s *Service) listModels(payload []byte) (listModelsResult, error) {
+	var req struct {
+		Secret string
 	}
+	if err := json.Unmarshal(payload, &req); err != nil {
+		return listModelsResult{}, err
+	}
+	secret := strings.TrimSpace(req.Secret)
+	if !strings.HasPrefix(secret, "ck_") {
+		return listModelsResult{Mode: "legacy"}, nil
+	}
+	key, err := s.store.Lookup(secret)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return listModelsResult{Mode: "legacy"}, nil
+		}
+		return listModelsResult{}, err
+	}
+	if strings.TrimSpace(key.GroupID) == "" {
+		return listModelsResult{Mode: "legacy"}, nil
+	}
+	group, err := s.store.GroupPolicy(key.GroupID)
+	if err != nil {
+		if errors.Is(err, ErrGroupNotFound) {
+			return listModelsResult{Mode: "group", Models: []listModelsEntry{}}, nil
+		}
+		return listModelsResult{}, err
+	}
+	if group.AllModels {
+		return listModelsResult{Mode: "group", AllModels: true, Models: []listModelsEntry{}}, nil
+	}
+	models := make([]listModelsEntry, 0, len(group.Models))
 	for _, model := range group.Models {
 		name := strings.TrimSpace(model.Name)
 		if name == "" {
 			continue
 		}
-		visible := name
-		if alias := strings.TrimSpace(model.Alias); alias != "" {
-			visible = alias
-		}
-		if !strings.EqualFold(base, visible) && !strings.EqualFold(strings.TrimSpace(requested), visible) {
-			continue
-		}
-		if !hasSuffix {
-			return name, true
-		}
-		return name + "(" + rawSuffix + ")", true
+		models = append(models, listModelsEntry{Name: name, Alias: strings.TrimSpace(model.Alias)})
 	}
-	return "", false
+	return listModelsResult{Mode: "group", Models: models}, nil
 }
 
 func parseClientSuffix(model string) (base, rawSuffix string, hasSuffix bool) {
@@ -398,6 +444,7 @@ func (s *Service) noteUsage(payload []byte) {
 		TTFT, Latency                                     time.Duration
 		Detail                                            struct {
 			InputTokens, OutputTokens, ReasoningTokens, CachedTokens int64
+			CacheReadTokens, CacheCreationTokens, TotalTokens        int64
 		}
 	}
 	_ = json.Unmarshal(payload, &rec)
@@ -408,8 +455,15 @@ func (s *Service) noteUsage(payload []byte) {
 	if tier == "" {
 		tier = rec.ServiceTier
 	}
+	cached := rec.Detail.CachedTokens
+	if rec.Detail.CacheReadTokens > 0 {
+		cached = rec.Detail.CacheReadTokens
+	} else if rec.Detail.CacheCreationTokens > 0 {
+		// A Claude cache write is not a cache hit.
+		cached = 0
+	}
 	_ = s.store.NoteUsage(UsageNote{
-		RequestID: rec.RequestID, Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Reasoning: rec.Detail.ReasoningTokens, Cached: rec.Detail.CachedTokens, Failed: rec.Failed,
+		RequestID: rec.RequestID, Input: rec.Detail.InputTokens, Output: rec.Detail.OutputTokens, Reasoning: rec.Detail.ReasoningTokens, Cached: cached, Total: rec.Detail.TotalTokens, Failed: rec.Failed,
 		TTFT: rec.TTFT, Latency: rec.Latency, Provider: rec.Provider, AuthID: rec.AuthID, AuthIndex: rec.AuthIndex, AuthType: rec.AuthType, Effort: rec.ReasoningEffort, ServiceTier: tier,
 	})
 }
@@ -478,6 +532,24 @@ func (s *Service) routes() map[string]any {
 			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/start"},
 			{"Method": "POST", "Path": "/plugins/key-shop/tunnels/stop"},
 			{"Method": "GET", "Path": "/plugins/key-shop/tunnels/logs"},
+			{"Method": "GET", "Path": "/plugins/key-shop/partner/v1/health"},
+			{"Method": "GET", "Path": "/plugins/key-shop/partner/v1/plans"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partner/v1/mint"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partner/v1/confirm"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partner/v1/void"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partner/v1/status"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partner/v1/refs"},
+			{"Method": "GET", "Path": "/plugins/key-shop/plans"},
+			{"Method": "POST", "Path": "/plugins/key-shop/plans"},
+			{"Method": "POST", "Path": "/plugins/key-shop/plans/update"},
+			{"Method": "POST", "Path": "/plugins/key-shop/plans/delete"},
+			{"Method": "GET", "Path": "/plugins/key-shop/partners"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partners"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partners/update"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partners/rotate"},
+			{"Method": "POST", "Path": "/plugins/key-shop/partners/delete"},
+			{"Method": "GET", "Path": "/plugins/key-shop/partners/calls"},
+			{"Method": "GET", "Path": "/plugins/key-shop/partners/orders"},
 		},
 		"resources": []map[string]string{
 			{"Path": "/admin", "Menu": "API Keys", "Description": "Create and manage client API keys"},
@@ -487,17 +559,26 @@ func (s *Service) routes() map[string]any {
 	}
 }
 
+type managementRequest struct {
+	Method  string
+	Path    string
+	Headers map[string][]string
+	Query   map[string][]string
+	Body    json.RawMessage
+}
+
 func (s *Service) manage(payload []byte) map[string]any {
-	var req struct {
-		Method  string
-		Path    string
-		Headers map[string][]string
-		Query   map[string][]string
-		Body    json.RawMessage
-	}
+	var req managementRequest
 	_ = json.Unmarshal(payload, &req)
 	body := bodyBytes(req.Body)
 	path := req.Path
+	// Partner paths dispatch before the suffix switch. A partner path must never
+	// reach an admin handler (/partner/v1/plans is not the admin plans list), and
+	// any other partner path must 404 without falling through. The new handlers
+	// live in service_partners.go and service_plans.go.
+	if relative := pluginRelativePath(path); strings.HasPrefix(relative, partnerAPIPrefix) {
+		return s.managePartner(req, body)
+	}
 	switch {
 	case strings.HasSuffix(path, "/dashboard"):
 		return htmlResponse(s.dash)
@@ -510,7 +591,7 @@ func (s *Service) manage(payload []byte) map[string]any {
 	case strings.HasSuffix(path, "/keys/bulk") && req.Method == http.MethodPost:
 		return s.createBulk(body, req.Headers)
 	case strings.HasSuffix(path, "/keys") && req.Method == http.MethodGet:
-		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryOne(req.Query, "group"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
+		return s.list(queryOne(req.Query, "q"), queryOne(req.Query, "status"), queryOne(req.Query, "group"), queryOne(req.Query, "partner"), queryOne(req.Query, "ref"), queryInt(req.Query, "page", 1), queryInt(req.Query, "page_size", 25))
 	case strings.HasSuffix(path, "/keys/bulk-update"):
 		return s.bulkUpdate(body)
 	case strings.HasSuffix(path, "/keys/bulk-delete"):
@@ -523,6 +604,28 @@ func (s *Service) manage(payload []byte) map[string]any {
 		return s.updateGroup(body)
 	case strings.HasSuffix(path, "/groups/delete"):
 		return s.deleteGroup(body)
+	case strings.HasSuffix(path, "/plans") && req.Method == http.MethodGet:
+		return s.listPlans()
+	case strings.HasSuffix(path, "/plans") && req.Method == http.MethodPost:
+		return s.createPlan(body)
+	case strings.HasSuffix(path, "/plans/update"):
+		return s.updatePlan(body)
+	case strings.HasSuffix(path, "/plans/delete"):
+		return s.deletePlan(body)
+	case strings.HasSuffix(path, "/partners") && req.Method == http.MethodGet:
+		return s.listPartners()
+	case strings.HasSuffix(path, "/partners") && req.Method == http.MethodPost:
+		return s.createPartner(body)
+	case strings.HasSuffix(path, "/partners/update"):
+		return s.updatePartner(body)
+	case strings.HasSuffix(path, "/partners/rotate"):
+		return s.rotatePartner(body)
+	case strings.HasSuffix(path, "/partners/delete"):
+		return s.deletePartner(body)
+	case strings.HasSuffix(path, "/partners/calls") && req.Method == http.MethodGet:
+		return s.partnerCalls(req.Query)
+	case strings.HasSuffix(path, "/partners/orders") && req.Method == http.MethodGet:
+		return s.partnerOrders(req.Query)
 	case strings.HasSuffix(path, "/tunnels/logs") && req.Method == http.MethodGet:
 		return s.tunnelLogs(queryOne(req.Query, "id"), queryInt(req.Query, "lines", 200))
 	case strings.HasSuffix(path, "/tunnels") && req.Method == http.MethodGet:
@@ -669,8 +772,8 @@ func (s *Service) createBulkFresh(body []byte, headers map[string][]string) map[
 	return jsonResponse(http.StatusOK, payload)
 }
 
-func (s *Service) list(q, status, group string, page, pageSize int) map[string]any {
-	keys, total, err := s.store.ListPageGroup(q, status, group, page, pageSize)
+func (s *Service) list(q, status, group, partner, ref string, page, pageSize int) map[string]any {
+	keys, total, err := s.store.ListPagePartner(q, status, group, partner, ref, page, pageSize)
 	if err != nil {
 		return textResponse(http.StatusInternalServerError, "list failed")
 	}
@@ -881,6 +984,15 @@ func headerValue(headers map[string][]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// pluginRelativePath drops a management prefix so dispatch sees the same
+// /plugins/key-shop path whether or not the host prefixed /v0/management.
+func pluginRelativePath(path string) string {
+	if index := strings.Index(path, "/plugins/key-shop"); index >= 0 {
+		return path[index:]
+	}
+	return path
 }
 
 func parseTimeQuery(value string) time.Time {

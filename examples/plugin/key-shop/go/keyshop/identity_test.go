@@ -21,9 +21,25 @@ func TestNewSecretIsURLSafeAndHashMatches(t *testing.T) {
 	}
 }
 
-func TestBilledTokensIgnoresReasoningAndCache(t *testing.T) {
-	if got := BilledTokens(3, 4); got != 7 {
-		t.Fatalf("billed = %d", got)
+func TestBilledTokensUsesUpstreamTotal(t *testing.T) {
+	// Codex reports a total that already equals input plus output.
+	if got := BilledTokens(100, 50, 150); got != 150 {
+		t.Fatalf("codex billed = %d", got)
+	}
+	// Claude adds cache read and cache creation tokens to the total.
+	if got := BilledTokens(10, 50, 1060); got != 1060 {
+		t.Fatalf("claude billed = %d", got)
+	}
+	// A missing total falls back to input plus output.
+	if got := BilledTokens(3, 4, 0); got != 7 {
+		t.Fatalf("fallback billed = %d", got)
+	}
+	// Negative counters clamp to zero instead of crediting usage.
+	if got := BilledTokens(-5, -6, -7); got != 0 {
+		t.Fatalf("clamped billed = %d", got)
+	}
+	if got := BilledTokens(4, -9, 0); got != 4 {
+		t.Fatalf("partial clamp billed = %d", got)
 	}
 }
 
