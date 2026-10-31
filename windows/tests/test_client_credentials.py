@@ -109,16 +109,28 @@ class CredentialTests(unittest.TestCase):
     def test_malformed_catalog_entries_are_skipped(self):
         def get_json(url, key):
             if "client_version" in url:
-                return {"models": ["not-a-dict", {"slug": "fixture-model"}]}
+                return {"models": ["not-a-dict", 7, {"slug": "fixture-model"}]}
             return {"data": [{"id": "fixture-model"}]}
 
         with tempfile.TemporaryDirectory() as folder:
             command, _ = self._launch(
                 folder, get_json, ["http://127.0.0.1:8319/v1", "1", folder])
             catalog = json.loads((Path(folder) / "client-models.json").read_text())
-        self.assertEqual(catalog["models"][0], "not-a-dict")
-        self.assertFalse(catalog["models"][1]["use_responses_lite"])
-        self.assertTrue(any("model_catalog_json" in part for part in command))
+        self.assertEqual(catalog["models"], [{"slug": "fixture-model", "use_responses_lite": False,
+                                              "multi_agent_version": "v1"}])
+        self.assertTrue(any(part.startswith("model_catalog_json=") for part in command))
+
+    def test_catalog_without_dict_entries_is_not_written(self):
+        def get_json(url, key):
+            if "client_version" in url:
+                return {"models": ["not-a-dict", 7]}
+            return {"data": [{"id": "fixture-model"}]}
+
+        with tempfile.TemporaryDirectory() as folder:
+            command, _ = self._launch(
+                folder, get_json, ["http://127.0.0.1:8319/v1", "1", folder])
+            self.assertFalse((Path(folder) / "client-models.json").exists())
+        self.assertFalse(any(part.startswith("model_catalog_json=") for part in command))
 
 
 if __name__ == "__main__":

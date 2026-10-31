@@ -183,12 +183,13 @@ def main():
     try:
         version = subprocess.check_output([executable, "--version"], text=True).strip().split()[-1]
         catalog = get_json(endpoint + "/models?" + urllib.parse.urlencode({"client_version": version}), key)
-        if isinstance(catalog.get("models"), list) and catalog["models"]:
-            for entry in catalog["models"]:
-                if not isinstance(entry, dict):
-                    continue
+        entries = catalog.get("models") if isinstance(catalog, dict) else None
+        catalog_models = [entry for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        if catalog_models:
+            for entry in catalog_models:
                 entry["use_responses_lite"] = False
                 entry["multi_agent_version"] = "v1"
+            catalog["models"] = catalog_models
             catalog_path = runtime / "client-models.json"
             catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
             command += ["-c", "model_catalog_json=" + json.dumps(str(catalog_path))]

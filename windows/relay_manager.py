@@ -148,7 +148,11 @@ class Relay:
     def process_info(self):
         if not self.pid_file.exists():
             return None
-        process_id = int(self.pid_file.read_text().strip())
+        recorded = self.pid_file.read_text().strip()
+        if not recorded.isdecimal():
+            # An empty or non-numeric pid file is stale; nothing may be looked up or stopped.
+            return None
+        process_id = int(recorded)
         code = (f"Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}' | "
                 "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress")
         raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", code], text=True).strip()

@@ -125,6 +125,40 @@ class RelayTests(unittest.TestCase):
                 start.assert_not_called()
                 stop.assert_not_called()
 
+    def test_start_replaces_a_corrupt_pid_file_without_a_process_lookup(self):
+        for text in ("", "  \n", "abc", "12x"):
+            with self.subTest(pid=text):
+                with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+                    relay = manager.Relay(Path(folder))
+                    relay.runtime.mkdir()
+                    relay.manifest.write_text("{}")
+                    relay.pid_file.write_text(text)
+                    child = MagicMock()
+                    child.pid = 4444
+                    child.poll.return_value = None
+                    with patch.object(manager.subprocess, "check_output") as lookup, \
+                            patch.object(manager.subprocess, "Popen", return_value=child), \
+                            patch("socket.socket"), patch.object(relay, "health"), \
+                            patch.object(manager.subprocess, "run") as stop:
+                        relay.start()
+                        stop.assert_not_called()
+                        lookup.assert_not_called()
+                    self.assertEqual(relay.pid_file.read_text().strip(), "4444")
+
+    def test_stop_removes_a_corrupt_pid_file_without_a_process_lookup(self):
+        for text in ("", "abc"):
+            with self.subTest(pid=text):
+                with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+                    relay = manager.Relay(Path(folder))
+                    relay.runtime.mkdir()
+                    relay.pid_file.write_text(text)
+                    with patch.object(manager.subprocess, "check_output") as lookup, \
+                            patch.object(manager.subprocess, "run") as stop:
+                        relay.stop()
+                        stop.assert_not_called()
+                        lookup.assert_not_called()
+                    self.assertFalse(relay.pid_file.exists())
+
     def test_new_install_preserves_an_existing_client_key(self):
         with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
             relay = manager.Relay(Path(folder))
