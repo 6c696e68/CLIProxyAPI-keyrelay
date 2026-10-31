@@ -148,7 +148,11 @@ class Relay:
     def process_info(self):
         if not self.pid_file.exists():
             return None
-        process_id = int(self.pid_file.read_text().strip())
+        recorded = self.pid_file.read_text().strip()
+        if not recorded.isdecimal():
+            # An empty or non-numeric pid file is stale; nothing may be looked up or stopped.
+            return None
+        process_id = int(recorded)
         code = (f"Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}' | "
                 "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress")
         raw = subprocess.check_output(["powershell", "-NoProfile", "-Command", code], text=True).strip()
@@ -157,7 +161,8 @@ class Relay:
         info = json.loads(raw)
         if (os.path.normcase(info.get("ExecutablePath") or "") != os.path.normcase(str(self.bun))
                 or str(self.source / "src/cli.ts") not in (info.get("CommandLine") or "")):
-            raise RuntimeError("Saved relay PID belongs to another process; it was left unchanged")
+            # The recorded PID now belongs to another process, so the entry is stale.
+            return None
         return info
 
     def start(self):
@@ -168,6 +173,9 @@ class Relay:
             self.health()
             print("Local relay is already running.")
             return
+        if self.pid_file.exists():
+            # The recorded PID is stale: never stop that process, just start a new relay.
+            self.pid_file.unlink()
         # Refuse occupied ports instead of replacing another application's service.
         import socket
         for port in (11500, 11504):
@@ -192,7 +200,7 @@ class Relay:
                 self.health()
                 print("Local token-authenticated relay is healthy on 127.0.0.1:11500.")
                 return
-            except (OSError, ValueError):
+            except (OSError, ValueError, RuntimeError):
                 time.sleep(0.25)
         raise RuntimeError("Relay health check failed; see its private log files")
 
@@ -201,6 +209,8 @@ class Relay:
         if info:
             subprocess.run(["powershell", "-NoProfile", "-Command",
                             f"Stop-Process -Id {int(info['ProcessId'])} -ErrorAction Stop"], check=True)
+        if self.pid_file.exists():
+            self.pid_file.unlink()
         print("Local relay stopped; its data was preserved.")
 
     def status(self):

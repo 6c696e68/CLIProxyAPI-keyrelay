@@ -3,6 +3,7 @@
 from contextlib import redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -72,6 +73,64 @@ class CredentialTests(unittest.TestCase):
             self.assertNotIn("ck_old", output.getvalue())
             self.assertNotIn("ck_new", output.getvalue())
             self.assertNotIn("ck_new", (runtime / "client-preferences.json").read_text())
+
+    def _launch(self, folder, get_json, answers):
+        output = io.StringIO()
+        with patch.object(sys, "argv", [str(source), "--runtime-root", folder]), \
+                patch.object(client, "private_directory"), \
+                patch.object(client, "find_codex", return_value="fixture-codex"), \
+                patch("builtins.input", side_effect=answers), \
+                patch.object(client.getpass, "getpass", return_value="ck_fixture"), \
+                patch.object(client, "get_json", side_effect=get_json), \
+                patch.object(client.subprocess, "check_output", return_value="codex-cli 0.163.0"), \
+                patch.object(client.subprocess, "call", return_value=0) as launch, \
+                redirect_stdout(output):
+            self.assertEqual(client.main(), 0)
+        return launch.call_args.args[0], output.getvalue()
+
+    def test_http_500_asks_for_an_exact_model_name(self):
+        def get_json(url, key):
+            raise urllib.error.HTTPError(url, 500, "error", {}, None)
+
+        with tempfile.TemporaryDirectory() as folder:
+            command, output = self._launch(
+                folder, get_json, ["http://127.0.0.1:8319/v1", "fixture-manual", folder])
+        self.assertEqual(command[command.index("--model") + 1], "fixture-manual")
+        self.assertNotIn(" 1. ", output)
+
+    def test_empty_model_list_still_aborts(self):
+        def get_json(url, key):
+            return {"data": []}
+
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(RuntimeError, "No active models"):
+                self._launch(folder, get_json, ["http://127.0.0.1:8319/v1"])
+
+    def test_malformed_catalog_entries_are_skipped(self):
+        def get_json(url, key):
+            if "client_version" in url:
+                return {"models": ["not-a-dict", 7, {"slug": "fixture-model"}]}
+            return {"data": [{"id": "fixture-model"}]}
+
+        with tempfile.TemporaryDirectory() as folder:
+            command, _ = self._launch(
+                folder, get_json, ["http://127.0.0.1:8319/v1", "1", folder])
+            catalog = json.loads((Path(folder) / "client-models.json").read_text())
+        self.assertEqual(catalog["models"], [{"slug": "fixture-model", "use_responses_lite": False,
+                                              "multi_agent_version": "v1"}])
+        self.assertTrue(any(part.startswith("model_catalog_json=") for part in command))
+
+    def test_catalog_without_dict_entries_is_not_written(self):
+        def get_json(url, key):
+            if "client_version" in url:
+                return {"models": ["not-a-dict", 7]}
+            return {"data": [{"id": "fixture-model"}]}
+
+        with tempfile.TemporaryDirectory() as folder:
+            command, _ = self._launch(
+                folder, get_json, ["http://127.0.0.1:8319/v1", "1", folder])
+            self.assertFalse((Path(folder) / "client-models.json").exists())
+        self.assertFalse(any(part.startswith("model_catalog_json=") for part in command))
 
 
 if __name__ == "__main__":
