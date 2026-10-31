@@ -16,7 +16,7 @@ const remember = ref(true)
     <form class="gate-card panel" @submit.prevent="props.loading ? undefined : emit('submit', value, remember)">
       <p class="page-kicker">CLI Proxy API</p>
       <h1 class="page-title">API keys</h1>
-      <p class="page-copy">Use your panel management key to issue and manage customer API keys.</p>
+      <p class="page-copy">Use your panel management password to issue and manage customer API keys. Customer keys starting with ck_ cannot sign in here.</p>
       <div class="mt-6 grid gap-4">
         <AppField label="Management key" :error="error">
           <AppPasswordInput v-model="value" placeholder="Management key" />

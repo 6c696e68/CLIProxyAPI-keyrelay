@@ -6,6 +6,9 @@ If you want to use CLIProxyAPI on your desktop, we recommend our [EasyCLIProxyAP
 
 CLIProxyAPI is a proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
 
+For this fork's Windows CMD launchers and instructions for continuing on
+another computer, see [windows/CONTINUE.md](windows/CONTINUE.md).
+
 You can access the following providers locally and with multiple CLI accounts through any OpenAI (including Responses), Gemini (including Interactions), or Claude-compatible client or SDK.
 
 <table>

@@ -1,4 +1,5 @@
 import { ttlSecondsFromLocal } from '@/lib/datetime'
+import { ApiError } from '@/lib/api-error'
 import { bulkPayload } from '@/lib/bulk'
 import type { AdminService, BulkPatch, CreateDraft, CreatedTunnel, EditDraft, GroupInput, KeysQuery, Partner, PartnerCall, PartnerCallQuery, PartnerInput, PartnerOrder, PartnerOrderQuery, PartnerSettings, PartnerStats, Plan, PlanInput, Policy, RequestQuery, Scenario, Tunnel, TunnelDraft, UsageQuery } from '@/types'
 import { managementJSON, managementRequest } from './http'
@@ -277,16 +278,21 @@ export function createLiveAdminService(): AdminService {
   return {
     pageSize: PAGE_SIZE,
     async authenticate(value: string) {
+      secret = ''
       const next = value.trim()
       if (!next) throw new Error('Enter the management key.')
+      if (next.startsWith('ck_')) {
+        throw new Error('This is a customer API key (ck_...). Use management_password from ACCESS.txt to open the admin workspace.')
+      }
       secret = next
       try {
         await call('GET', `${ROOT}/stats`)
       } catch (error) {
         secret = ''
-        const message = error instanceof Error ? error.message : ''
-        if (message.includes('did not respond')) throw error
-        throw new Error('The management key could not be authenticated.')
+        if (error instanceof ApiError && error.status === 401) {
+          throw new Error('The management password is incorrect. Use management_password from ACCESS.txt, not a customer API key.')
+        }
+        throw error
       }
     },
     async stats(_scenario?: Scenario) {
