@@ -139,6 +139,7 @@ def main():
     endpoint = endpoint_url(prompt("Endpoint", saved.get("endpoint", "http://127.0.0.1:8319/v1")))
     local_key = load_local_client_key(runtime, endpoint)
     models = []
+    manual_model = False
     while True:
         key = prompt_client_key(local_key)
         try:
@@ -150,17 +151,22 @@ def main():
                 print(f"Key rejected: HTTP {error.code}. Rotate invalidates the previous key; enter the newest key.")
                 local_key = None
                 continue
-            print(f"Model listing returned HTTP {error.code}; enter a model manually")
+            # The endpoint works but cannot list models: ask for the exact name instead of aborting.
+            print(f"Model listing returned HTTP {error.code}; enter the exact model name to use")
+            manual_model = True
         except (urllib.error.URLError, TimeoutError) as error:
             raise RuntimeError("The endpoint is unavailable. Start the server on this computer first") from error
         break
-    for number, name in enumerate(models, 1):
-        print(f"  {number}. {name}")
-    if not models:
-        raise RuntimeError("No active models are available. Complete SETUP-RELAY.cmd and LOGIN-PLUS.cmd first")
-    selected = prompt("Model number or exact name", saved.get("model", "gpt-6.1-sol"))
-    if selected.isdecimal() and 1 <= int(selected) <= len(models):
-        selected = models[int(selected) - 1]
+    if manual_model:
+        selected = prompt("Model name", saved.get("model", "gpt-6.1-sol"))
+    else:
+        for number, name in enumerate(models, 1):
+            print(f"  {number}. {name}")
+        if not models:
+            raise RuntimeError("No active models are available. Complete SETUP-RELAY.cmd and LOGIN-PLUS.cmd first")
+        selected = prompt("Model number or exact name", saved.get("model", "gpt-6.1-sol"))
+        if selected.isdecimal() and 1 <= int(selected) <= len(models):
+            selected = models[int(selected) - 1]
     project = Path(prompt("Project directory", saved.get("project", str(Path.cwd())))).expanduser().resolve()
     if not project.is_dir():
         raise ValueError("The project directory does not exist")
@@ -179,6 +185,8 @@ def main():
         catalog = get_json(endpoint + "/models?" + urllib.parse.urlencode({"client_version": version}), key)
         if isinstance(catalog.get("models"), list) and catalog["models"]:
             for entry in catalog["models"]:
+                if not isinstance(entry, dict):
+                    continue
                 entry["use_responses_lite"] = False
                 entry["multi_agent_version"] = "v1"
             catalog_path = runtime / "client-models.json"

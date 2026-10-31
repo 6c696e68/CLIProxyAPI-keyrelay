@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import relay_manager as manager
@@ -30,15 +30,99 @@ class RelayTests(unittest.TestCase):
         self.assertEqual(env["CH_PORT"], "0")
 
     def test_stop_rejects_a_pid_reused_by_another_process(self):
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
             relay = manager.Relay(Path(folder))
             relay.runtime.mkdir()
             relay.pid_file.write_text("1234")
             raw = json.dumps({"ProcessId": 1234, "ExecutablePath": "unrelated.exe", "CommandLine": ""})
             with patch.object(manager.subprocess, "check_output", return_value=raw), \
                     patch.object(manager.subprocess, "run") as stop:
-                with self.assertRaisesRegex(RuntimeError, "another process"):
-                    relay.stop()
+                relay.stop()
+                stop.assert_not_called()
+            self.assertFalse(relay.pid_file.exists())
+
+    def test_start_replaces_a_pid_reused_by_another_process(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            relay = manager.Relay(Path(folder))
+            relay.runtime.mkdir()
+            relay.manifest.write_text("{}")
+            relay.pid_file.write_text("1234")
+            child = MagicMock()
+            child.pid = 5555
+            child.poll.return_value = None
+            raw = json.dumps({"ProcessId": 1234, "ExecutablePath": "unrelated.exe", "CommandLine": ""})
+            with patch.object(manager.subprocess, "check_output", return_value=raw), \
+                    patch.object(manager.subprocess, "Popen", return_value=child) as start, \
+                    patch("socket.socket"), patch.object(relay, "health"), \
+                    patch.object(manager.subprocess, "run") as stop:
+                relay.start()
+                stop.assert_not_called()
+            self.assertTrue(start.called)
+            self.assertEqual(relay.pid_file.read_text().strip(), "5555")
+
+    def test_start_replaces_a_pid_file_without_a_process(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            relay = manager.Relay(Path(folder))
+            relay.runtime.mkdir()
+            relay.manifest.write_text("{}")
+            relay.pid_file.write_text("1234")
+            child = MagicMock()
+            child.pid = 6666
+            child.poll.return_value = None
+            with patch.object(manager.subprocess, "check_output", return_value=""), \
+                    patch.object(manager.subprocess, "Popen", return_value=child), \
+                    patch("socket.socket"), patch.object(relay, "health"), \
+                    patch.object(manager.subprocess, "run") as stop:
+                relay.start()
+                stop.assert_not_called()
+            self.assertEqual(relay.pid_file.read_text().strip(), "6666")
+
+    def test_start_removes_the_pid_file_after_stopping_its_own_relay(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            relay = manager.Relay(Path(folder))
+            relay.runtime.mkdir()
+            relay.pid_file.write_text("777")
+            own = json.dumps({"ProcessId": 777, "ExecutablePath": str(relay.bun),
+                              "CommandLine": f'"{relay.bun}" "{relay.source / "src/cli.ts"}" start'})
+            with patch.object(manager.subprocess, "check_output", return_value=own), \
+                    patch.object(manager.subprocess, "run") as stop:
+                relay.stop()
+                self.assertTrue(stop.called)
+            self.assertFalse(relay.pid_file.exists())
+
+    def test_start_retries_a_transient_health_error(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            relay = manager.Relay(Path(folder))
+            relay.runtime.mkdir()
+            relay.manifest.write_text("{}")
+            child = MagicMock()
+            child.pid = 8888
+            child.poll.return_value = None
+            outcomes = iter([RuntimeError("Relay health check did not return ok=true"), None])
+
+            def health():
+                outcome = next(outcomes)
+                if outcome:
+                    raise outcome
+
+            with patch.object(manager.subprocess, "Popen", return_value=child), \
+                    patch("socket.socket"), patch.object(relay, "health", side_effect=health), \
+                    patch.object(manager.time, "sleep") as sleep:
+                relay.start()
+            self.assertEqual(sleep.call_count, 1)
+
+    def test_start_refuses_an_occupied_port_without_stopping_it(self):
+        with tempfile.TemporaryDirectory() as folder, redirect_stdout(io.StringIO()):
+            relay = manager.Relay(Path(folder))
+            relay.runtime.mkdir()
+            relay.manifest.write_text("{}")
+            with patch("socket.socket") as probe, \
+                    patch.object(manager.subprocess, "Popen") as start, \
+                    patch.object(manager.subprocess, "run") as stop:
+                probe.return_value.__enter__.return_value.bind.side_effect = OSError("busy")
+                with self.assertRaisesRegex(RuntimeError, "Port 11500 is occupied"):
+                    relay.start()
+                start.assert_not_called()
                 stop.assert_not_called()
 
     def test_new_install_preserves_an_existing_client_key(self):
