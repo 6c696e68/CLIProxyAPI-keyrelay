@@ -8,6 +8,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/redis/go-redis/v9"
 	log "github.com/sirupsen/logrus"
@@ -58,9 +59,23 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 	}
 	options.ReadTimeout = -1
 	options.WriteTimeout = -1
-	options.Dialer = redis.NewDialer(options)
+	// Cancellation closes the dialed sockets directly. go-redis ConnPool.Close health-checks
+	// in-use connections, which needs the read lock held by a blocked read, so closing the
+	// client alone cannot abort a stuck command.
+	transport := &cancelableTransport{}
+	baseDialer := redis.NewDialer(options)
+	options.Dialer = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+		conn, errDial := baseDialer(dialCtx, network, addr)
+		if errDial != nil {
+			return nil, errDial
+		}
+		if errTrack := transport.track(conn); errTrack != nil {
+			return nil, errTrack
+		}
+		return conn, nil
+	}
 	command := redis.NewClient(options)
-	stopCancel := context.AfterFunc(ctx, func() { _ = command.Close() })
+	stopCancel := context.AfterFunc(ctx, transport.cancel)
 	defer func() {
 		stopCancel()
 		if errClose := command.Close(); errClose != nil && ctx.Err() == nil {
@@ -72,6 +87,35 @@ func (c *Client) rebalanceCommand(ctx context.Context, address string, args ...a
 		return "", fmt.Errorf("Home rebalance %v: %w", args[0], errCommand)
 	}
 	return raw, nil
+}
+
+// cancelableTransport tracks the sockets of one rebalance client so cancellation can
+// unblock a read that has no deadline.
+type cancelableTransport struct {
+	mu       sync.Mutex
+	canceled bool
+	conns    []net.Conn
+}
+
+// track records a dialed socket. A socket dialed after cancellation is closed at once.
+func (t *cancelableTransport) track(conn net.Conn) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.canceled {
+		_ = conn.Close()
+		return context.Canceled
+	}
+	t.conns = append(t.conns, conn)
+	return nil
+}
+
+func (t *cancelableTransport) cancel() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.canceled = true
+	for _, conn := range t.conns {
+		_ = conn.Close()
+	}
 }
 
 func (c *Client) syncClusterBalance(ctx context.Context) error {

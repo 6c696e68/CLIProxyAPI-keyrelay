@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -239,5 +240,37 @@ func TestClusterBalanceMalformedRegistrationEndsSubscriberBeforeReady(t *testing
 	}
 	if ready || client.HeartbeatOK() {
 		t.Fatal("malformed registration published a healthy subscriber")
+	}
+}
+
+func TestCancelableTransportClosesSockets(t *testing.T) {
+	transport := &cancelableTransport{}
+	tracked, trackedPeer := net.Pipe()
+	defer func() { _ = trackedPeer.Close() }()
+	if errTrack := transport.track(tracked); errTrack != nil {
+		t.Fatalf("track before cancel: %v", errTrack)
+	}
+	readDone := make(chan error, 1)
+	go func() {
+		_, errRead := tracked.Read(make([]byte, 1))
+		readDone <- errRead
+	}()
+	transport.cancel()
+	select {
+	case errRead := <-readDone:
+		if errRead == nil {
+			t.Fatal("blocked read returned no error after cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel did not unblock a read without deadline")
+	}
+
+	late, latePeer := net.Pipe()
+	defer func() { _ = latePeer.Close() }()
+	if errTrack := transport.track(late); !errors.Is(errTrack, context.Canceled) {
+		t.Fatalf("track after cancel error = %v, want context.Canceled", errTrack)
+	}
+	if _, errWrite := late.Write([]byte{1}); errWrite == nil {
+		t.Fatal("socket dialed after cancel was not closed")
 	}
 }
