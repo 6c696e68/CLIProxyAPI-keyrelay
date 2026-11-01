@@ -317,6 +317,28 @@ func clampLevel(level ThinkingLevel, modelInfo *registry.ModelInfo, provider str
 	return level
 }
 
+// ClampLevelToSupported returns the supported level nearest to level using the
+// standard level order. Ties prefer the lower level. ok is false when level is
+// not a standard level or supported has no standard level.
+func ClampLevelToSupported(level string, supported []string) (string, bool) {
+	level = strings.ToLower(strings.TrimSpace(level))
+	if levelIndex(level) == -1 {
+		return "", false
+	}
+	hasStandard := false
+	for _, item := range supported {
+		if levelIndex(strings.TrimSpace(item)) != -1 {
+			hasStandard = true
+			break
+		}
+	}
+	if !hasStandard {
+		return "", false
+	}
+	clamped := clampLevel(ThinkingLevel(level), &registry.ModelInfo{Thinking: &registry.ThinkingSupport{Levels: supported}}, "")
+	return string(clamped), true
+}
+
 // clampBudget clamps a budget value to the model's supported range.
 func clampBudget(value int, modelInfo *registry.ModelInfo, provider string) int {
 	model := "unknown"
