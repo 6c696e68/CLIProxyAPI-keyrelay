@@ -58,8 +58,10 @@ import "C"
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,24 +81,29 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/codex"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/thinking/provider/openai"
 	oaichat "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/openai/openai/chat-completions"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	pluginID                    = "ch-relay-vippro"
-	defaultBaseURL              = "https://7656b154.linhtd.com/v1"
-	defaultRetry                = 3
-	defaultStickySeconds        = 300
-	defaultModelCooldownMinutes = 1440
-	maxExtraRetries             = 32
-	maxModelCooldownMinutes     = 10080
-	maxFallbackRetries          = 3
-	maxStickySeconds            = 86400
-	redactedToken               = "[REDACTED]"
-	cooldownReasonUnsupported   = "chatgpt_model_unsupported"
+	pluginID                          = "ch-relay-vippro"
+	defaultBaseURL                    = "https://7656b154.linhtd.com/v1"
+	defaultRetry                      = 3
+	defaultStickySeconds              = 300
+	defaultModelCooldownMinutes       = 1440
+	defaultModelOutageCooldownMinutes = 5
+	maxExtraRetries                   = 32
+	maxModelCooldownMinutes           = 10080
+	maxFallbackRetries                = 3
+	maxStickySeconds                  = 86400
+	redactedToken                     = "[REDACTED]"
+	cooldownReasonUnsupported         = "chatgpt_model_unsupported"
 )
 
 var modelDoesNotExist = regexp.MustCompile(`\bmodel\b[\w\s'".-]{0,80}does not exist`)
@@ -118,22 +125,27 @@ type lifecycleRequest struct {
 }
 
 type pluginConfig struct {
-	Enabled              bool              `yaml:"enabled"`
-	Priority             int               `yaml:"priority"`
-	BaseURL              string            `yaml:"base-url"`
-	Prefix               string            `yaml:"prefix"`
-	Headers              map[string]string `yaml:"headers"`
-	RequestRetry         *int              `yaml:"request-retry"`
-	FallbackRetry        *int              `yaml:"fallback-retry"`
-	RotationMode         string            `yaml:"rotation-mode"`
-	PlusPreference       string            `yaml:"plus-preference"`
-	FreeModels           []string          `yaml:"free-models"`
-	StickySeconds        *int              `yaml:"sticky-seconds"`
-	ModelCooldownMinutes *int              `yaml:"model-cooldown-minutes"`
-	StatsFile            string            `yaml:"stats-file"`
+	Enabled                    bool              `yaml:"enabled"`
+	Priority                   int               `yaml:"priority"`
+	BaseURL                    string            `yaml:"base-url"`
+	Prefix                     string            `yaml:"prefix"`
+	Headers                    map[string]string `yaml:"headers"`
+	RequestRetry               *int              `yaml:"request-retry"`
+	FallbackRetry              *int              `yaml:"fallback-retry"`
+	RotationMode               string            `yaml:"rotation-mode"`
+	PlusPreference             string            `yaml:"plus-preference"`
+	FreeModels                 []string          `yaml:"free-models"`
+	StickySeconds              *int              `yaml:"sticky-seconds"`
+	ModelCooldownMinutes       *int              `yaml:"model-cooldown-minutes"`
+	ModelOutageCooldownMinutes *int              `yaml:"model-outage-cooldown-minutes"`
+	StatsFile                  string            `yaml:"stats-file"`
 	// UpstreamCache is deprecated and ignored. Production configs still set it.
-	UpstreamCache bool        `yaml:"upstream-cache"`
-	Models        []modelSpec `yaml:"models"`
+	UpstreamCache bool `yaml:"upstream-cache"`
+	// DisablePromptCache forces a fresh upstream prompt cache entry on every attempt.
+	DisablePromptCache bool `yaml:"disable-prompt-cache"`
+	// ServiceTier fills service_tier when the client sends none, auto, or default.
+	ServiceTier string      `yaml:"service-tier"`
+	Models      []modelSpec `yaml:"models"`
 }
 
 type modelSpec struct {
@@ -149,6 +161,7 @@ type modelSpec struct {
 	UseMaxCompletionTokens bool           `yaml:"use-max-completion-tokens,omitempty"`
 	Thinking               map[string]any `yaml:"thinking,omitempty"`
 	Fallback               []string       `yaml:"fallback,omitempty"`
+	ServiceTier            string         `yaml:"service-tier,omitempty"`
 }
 
 type registration struct {
@@ -573,7 +586,13 @@ func normalizeConfig(cfg pluginConfig) (pluginConfig, error) {
 	cfg.FallbackRetry = clampInt(cfg.FallbackRetry, 0, 0, maxFallbackRetries)
 	cfg.StickySeconds = clampInt(cfg.StickySeconds, defaultStickySeconds, 0, maxStickySeconds)
 	cfg.ModelCooldownMinutes = clampInt(cfg.ModelCooldownMinutes, defaultModelCooldownMinutes, 0, maxModelCooldownMinutes)
+	cfg.ModelOutageCooldownMinutes = clampInt(cfg.ModelOutageCooldownMinutes, defaultModelOutageCooldownMinutes, 0, maxModelCooldownMinutes)
 	cfg.StatsFile = strings.TrimSpace(cfg.StatsFile)
+	tier, errTier := normalizeServiceTier(cfg.ServiceTier, false)
+	if errTier != nil {
+		return pluginConfig{}, errTier
+	}
+	cfg.ServiceTier = tier
 
 	headers, errHeaders := normalizeHeaders(cfg.Headers)
 	if errHeaders != nil {
@@ -693,6 +712,11 @@ func normalizeModels(models []modelSpec) ([]modelSpec, error) {
 		model.Alias = alias
 		model.DisplayName = strings.TrimSpace(model.DisplayName)
 		model.Fallback = normalizeFallback(name, model.Fallback)
+		tier, errTier := normalizeServiceTier(model.ServiceTier, true)
+		if errTier != nil {
+			return nil, fmt.Errorf("model %s: %w", name, errTier)
+		}
+		model.ServiceTier = tier
 		out = append(out, model)
 	}
 	return out, nil
@@ -780,6 +804,25 @@ func (c pluginConfig) modelCooldown() time.Duration {
 	return time.Duration(minutes) * time.Minute
 }
 
+// modelOutageCooldown is the shorter skip used when a refusal was not proven on
+// another account. It never exceeds the full model cooldown, so a disabled full
+// cooldown disables both.
+func (c pluginConfig) modelOutageCooldown() time.Duration {
+	full := c.modelCooldown()
+	if full <= 0 {
+		return 0
+	}
+	minutes := defaultModelOutageCooldownMinutes
+	if c.ModelOutageCooldownMinutes != nil {
+		minutes = *c.ModelOutageCooldownMinutes
+	}
+	outage := time.Duration(minutes) * time.Minute
+	if outage > full {
+		return full
+	}
+	return outage
+}
+
 func currentConfig() pluginConfig {
 	runtimeMu.Lock()
 	defer runtimeMu.Unlock()
@@ -822,7 +865,10 @@ func configFields() []pluginapi.ConfigField {
 		{Name: "free-models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model names, not aliases, that may also use free and other non-Plus Codex accounts. Other models keep plus-preference. No effect when plus-preference is off."},
 		{Name: "sticky-seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "Sticky session lifetime in seconds. Default 300."},
 		{Name: "model-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token for one model after the upstream says that model is not supported for a ChatGPT account. Other models stay available. 0 disables. Default 1440. Maximum 10080. The skip is saved beside stats-file and survives restart."},
+		{Name: "model-outage-cooldown-minutes", Type: pluginapi.ConfigFieldTypeInteger, Description: "Minutes to skip an account and its access token for one model after a refusal that no other account proved, capped by model-cooldown-minutes; 0 remembers nothing and the default is 5."},
 		{Name: "stats-file", Type: pluginapi.ConfigFieldTypeString, Description: "JSON file for hourly request and token buckets kept for 90 days. Empty disables persistence."},
+		{Name: "service-tier", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"", "priority", "ultrafast"}, Description: "Force a speed tier: set service_tier when the client sends none, auto, or default. priority is Fast; fast is stored as priority. A client tier such as priority, ultrafast, or flex is kept. A model service-tier overrides this; off disables it for that model. Empty disables."},
+		{Name: "disable-prompt-cache", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Force an upstream prompt-cache miss: a random prompt_cache_key and a request tag at the end of the system text on every attempt. Default false."},
 		{Name: "models", Type: pluginapi.ConfigFieldTypeArray, Description: "Upstream model name plus optional client alias. The same alias with different names is one pool. An exact duplicate name and alias is skipped. fallback lists upstream names tried in order when fallback-retry is above 0."},
 	}
 }
@@ -1273,17 +1319,266 @@ type attemptResult struct {
 	modelMissing bool
 }
 
-func postModel(cfg pluginConfig, prepared preparedCall, token, model string, stream bool) (hostHTTPResult, int, []byte, error) {
-	body, errBody := rewriteModel(prepared.payload, prepared.spanStart, prepared.spanEnd, model)
-	if errBody != nil {
-		return hostHTTPResult{}, 0, nil, errBody
+// modelFormat returns the provider format the host thinking pipeline expects.
+func modelFormat(path string) string {
+	if path == "/responses" {
+		return "codex"
 	}
+	return "openai"
+}
+
+// buildModelBody rewrites the model to its bare name and converts a thinking
+// suffix through the host pipeline. Local validation never fails a request: a
+// rejected suffix falls back to the user-defined apply, then to the bare body.
+func buildModelBody(prepared preparedCall, model string) ([]byte, error) {
+	bare, suffix := splitSuffix(model)
+	body, errBody := rewriteModel(prepared.payload, prepared.spanStart, prepared.spanEnd, bare)
+	if errBody != nil {
+		return nil, errBody
+	}
+	if suffix == "" {
+		return body, nil
+	}
+	format := modelFormat(prepared.path)
+	applied, errThinking := thinking.ApplyThinking(body, model, format, format, format)
+	if errThinking != nil {
+		applied, errThinking = thinking.ApplyThinkingWithModelInfo(body, nil, model, format, format, format, &registry.ModelInfo{ID: bare, UserDefined: true})
+		if errThinking != nil {
+			return body, nil
+		}
+	}
+	return applied, nil
+}
+
+// normalizeServiceTier lowercases a configured tier and stores fast as
+// priority. off is only valid on a model, where it disables the plugin tier.
+func normalizeServiceTier(raw string, allowOff bool) (string, error) {
+	tier := strings.ToLower(strings.TrimSpace(raw))
+	switch tier {
+	case "", "priority", "ultrafast":
+		return tier, nil
+	case "fast":
+		return "priority", nil
+	case "off":
+		if allowOff {
+			return tier, nil
+		}
+	}
+	return "", fmt.Errorf("invalid service-tier %q", raw)
+}
+
+// serviceTierFor returns the forced tier for an upstream model name. The first
+// model entry with that name and a tier wins; otherwise the plugin tier applies.
+func (c pluginConfig) serviceTierFor(model string) string {
+	bare, _ := splitSuffix(model)
+	for _, spec := range c.Models {
+		if spec.ServiceTier == "" || !strings.EqualFold(spec.Name, bare) {
+			continue
+		}
+		if spec.ServiceTier == "off" {
+			return ""
+		}
+		return spec.ServiceTier
+	}
+	return c.ServiceTier
+}
+
+// applyServiceTier sets service_tier when the body has none, auto, or default.
+// Any other client tier is kept, and an empty tier leaves the body unchanged.
+func applyServiceTier(body []byte, tier string) ([]byte, error) {
+	if tier == "" {
+		return body, nil
+	}
+	current := gjson.GetBytes(body, "service_tier")
+	if current.Exists() && current.Type != gjson.Null {
+		switch strings.ToLower(strings.TrimSpace(current.String())) {
+		case "", "auto", "default":
+		default:
+			return body, nil
+		}
+	}
+	return sjson.SetBytes(body, "service_tier", tier)
+}
+
+// promptCacheTag returns a fresh 32-character lowercase hex tag.
+func promptCacheTag() (string, error) {
+	var raw [16]byte
+	if _, errRead := rand.Read(raw[:]); errRead != nil {
+		return "", errRead
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+// applyPromptCacheMiss makes one upstream attempt start a new prompt cache
+// entry. The upstream ignores prompt_cache_options, so the same tag goes into
+// the top-level prompt_cache_key and at the end of the system text. Each call
+// returns a new tag, which is why every attempt gets its own cache entry.
+func applyPromptCacheMiss(path string, body []byte) ([]byte, error) {
+	tag, errTag := promptCacheTag()
+	if errTag != nil {
+		return nil, errTag
+	}
+	tagged, errKey := sjson.SetBytes(body, "prompt_cache_key", tag)
+	if errKey != nil {
+		return nil, errKey
+	}
+	tagText := "\n\n[request " + tag + "]"
+	if path == "/responses" {
+		instructions := gjson.GetBytes(tagged, "instructions")
+		switch {
+		case instructions.Type == gjson.String && instructions.String() != "":
+			tagged, errKey = sjson.SetBytes(tagged, "instructions", instructions.String()+tagText)
+		case instructions.Type == gjson.String || !instructions.Exists():
+			tagged, errKey = sjson.SetBytes(tagged, "instructions", "[request "+tag+"]")
+		}
+		if errKey != nil {
+			return nil, errKey
+		}
+		return tagged, nil
+	}
+	index, text := -1, ""
+	messages := gjson.GetBytes(tagged, "messages")
+	if !messages.IsArray() {
+		return tagged, nil
+	}
+	messages.ForEach(func(key, value gjson.Result) bool {
+		role := value.Get("role")
+		if role.Type != gjson.String || (role.String() != "system" && role.String() != "developer") {
+			return true
+		}
+		content := value.Get("content")
+		if content.Type != gjson.String {
+			return true
+		}
+		index = int(key.Int())
+		text = content.String()
+		return false
+	})
+	if index < 0 {
+		return tagged, nil
+	}
+	tagged, errKey = sjson.SetBytes(tagged, "messages."+strconv.Itoa(index)+".content", text+tagText)
+	if errKey != nil {
+		return nil, errKey
+	}
+	return tagged, nil
+}
+
+// postUpstream sends one built body and reads the body of a non-2xx stream reply.
+func postUpstream(cfg pluginConfig, prepared preparedCall, token string, body []byte, stream bool) (hostHTTPResult, int, []byte) {
 	base := strings.TrimSuffix(cfg.BaseURL, "/")
 	resp, errDo := hostDo(prepared.callbackID, base+prepared.path, upstreamHeaders(cfg, prepared.client, prepared.session, token, stream), body, stream)
 	if errDo != nil {
-		return hostHTTPResult{}, http.StatusBadGateway, []byte(errDo.Error()), nil
+		return hostHTTPResult{}, http.StatusBadGateway, []byte(errDo.Error())
 	}
-	return resp, resp.status(), resp.body(), nil
+	status := resp.status()
+	respBody := resp.body()
+	if stream && (status < 200 || status >= 300) {
+		if id := resp.streamID(); id != "" {
+			if len(respBody) == 0 {
+				respBody = readStreamBody(prepared.callbackID, id)
+			} else {
+				_ = closeHostStream(pluginabi.MethodHostHTTPStreamClose, prepared.callbackID, id, "")
+			}
+		}
+	}
+	return resp, status, respBody
+}
+
+// postModel builds one attempt body and sends it. The built body is returned so
+// an effort retry can keep every field the first attempt had.
+func postModel(cfg pluginConfig, prepared preparedCall, token, model string, stream bool) (hostHTTPResult, int, []byte, []byte, error) {
+	body, errBody := buildModelBody(prepared, model)
+	if errBody != nil {
+		return hostHTTPResult{}, 0, nil, nil, errBody
+	}
+	tiered, errTier := applyServiceTier(body, cfg.serviceTierFor(model))
+	if errTier != nil {
+		return hostHTTPResult{}, 0, nil, nil, errTier
+	}
+	body = tiered
+	if cfg.DisablePromptCache {
+		tagged, errCache := applyPromptCacheMiss(prepared.path, body)
+		if errCache != nil {
+			return hostHTTPResult{}, 0, nil, nil, errCache
+		}
+		body = tagged
+	}
+	resp, status, respBody := postUpstream(cfg, prepared, token, body, stream)
+	return resp, status, respBody, body, nil
+}
+
+// effortRetryTarget reads an upstream reasoning-effort rejection and returns the
+// level to retry with, using the host clamp rule and the upstream's own list.
+func effortRetryTarget(body []byte) (string, bool) {
+	var reply struct {
+		Error struct {
+			Param   string `json:"param"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(body, &reply) != nil {
+		return "", false
+	}
+	if reply.Error.Param != "reasoning.effort" && reply.Error.Param != "reasoning_effort" {
+		return "", false
+	}
+	if reply.Error.Code != "unsupported_value" && reply.Error.Code != "invalid_value" {
+		return "", false
+	}
+	quoted := quotedTokens(reply.Error.Message)
+	if len(quoted) == 0 {
+		return "", false
+	}
+	rejected := quoted[0]
+	var supported []string
+	if idx := strings.Index(strings.ToLower(reply.Error.Message), "supported values are:"); idx >= 0 {
+		supported = quotedTokens(reply.Error.Message[idx+len("supported values are:"):])
+	}
+	target, ok := thinking.ClampLevelToSupported(rejected, supported)
+	if !ok {
+		if thinking.HasLevel(supported, "medium") {
+			target = "medium"
+		} else {
+			target, ok = thinking.ClampLevelToSupported("medium", supported)
+			if !ok {
+				return "", false
+			}
+		}
+	}
+	if target == "" || strings.EqualFold(target, rejected) {
+		return "", false
+	}
+	return target, true
+}
+
+// quotedTokens returns the single- or double-quoted tokens in text.
+func quotedTokens(text string) []string {
+	var out []string
+	for i := 0; i < len(text); i++ {
+		quote := text[i]
+		if quote != '\'' && quote != '"' {
+			continue
+		}
+		end := strings.IndexByte(text[i+1:], quote)
+		if end < 0 {
+			break
+		}
+		out = append(out, text[i+1:i+1+end])
+		i += end + 1
+	}
+	return out
+}
+
+// effortRetryBody rebuilds the first attempt body with the clamped effort.
+func effortRetryBody(body []byte, model, format, target string) ([]byte, bool) {
+	bare, _ := splitSuffix(model)
+	applied, errApply := thinking.ApplyThinkingWithModelInfo(body, nil, bare+"("+target+")", format, format, format, &registry.ModelInfo{ID: bare, UserDefined: true})
+	if errApply != nil {
+		return nil, false
+	}
+	return applied, true
 }
 
 // runAttempts sends the primary model first. Fallback names are tried only after
@@ -1365,6 +1660,21 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 	var lastBody []byte
 	var lastResp hostHTTPResult
 	modelMissing := false
+	var refusals []attempt
+	proven := map[string]struct{}{}
+	// A refusal is only proven when the same phase got a non-refused 2xx for the
+	// same base model on another attempt. Unproven refusals get the outage skip.
+	settleRefusals := func() {
+		full := cfg.modelCooldown()
+		outage := cfg.modelOutageCooldown()
+		for _, item := range refusals {
+			d := outage
+			if _, ok := proven[baseModel(item.model)]; ok {
+				d = full
+			}
+			markModelCooldown(item.index, item.token, item.model, d, cfg.StatsFile)
+		}
+	}
 	for _, at := range prepared.attempts {
 		if spent.skip(at) {
 			continue
@@ -1376,15 +1686,25 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 		tokens = append(tokens, at.token)
 		started := nowFn()
 		markUsed(at.index, started)
-		resp, status, body, errPost := postModel(cfg, prepared, at.token, at.model, stream)
+		resp, status, body, sentBody, errPost := postModel(cfg, prepared, at.token, at.model, stream)
 		if errPost != nil {
+			settleRefusals()
 			return attemptResult{rewrite: errPost}
 		}
+		if status == http.StatusBadRequest {
+			if target, ok := effortRetryTarget(body); ok {
+				if retryBody, okBuild := effortRetryBody(sentBody, at.model, modelFormat(prepared.path), target); okBuild {
+					resp, status, body = postUpstream(cfg, prepared, at.token, retryBody, stream)
+				}
+			}
+		}
 		if status >= 200 && status < 300 {
-			refused := chatgptModelUnsupported(body)
+			refused := chatgptModelRefused(body)
 			if refused {
-				markModelCooldown(at.index, at.token, at.model, cfg.modelCooldown(), cfg.StatsFile)
+				refusals = append(refusals, at)
 				spent.markModel(at)
+			} else {
+				proven[baseModel(at.model)] = struct{}{}
 			}
 			if stream && resp.streamID() == "" {
 				lastStatus = http.StatusBadGateway
@@ -1403,6 +1723,7 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 			if cfg.RotationMode == "round-robin" && !demoted {
 				pinRoundRobin(at.index, refused)
 			}
+			settleRefusals()
 			return attemptResult{
 				success: true,
 				resp:    resp,
@@ -1414,15 +1735,6 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 				email:   at.email,
 			}
 		}
-		if stream {
-			if id := resp.streamID(); id != "" {
-				if len(body) == 0 {
-					body = readStreamBody(prepared.callbackID, id)
-				} else {
-					_ = closeHostStream(pluginabi.MethodHostHTTPStreamClose, prepared.callbackID, id, "")
-				}
-			}
-		}
 		if status != 0 {
 			lastStatus = status
 		}
@@ -1430,10 +1742,11 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 		lastBody = body
 		noteRequest(false, 0, 0, 0, at.email)
 		if clientAborted(status, body) || clientRejected(status, body) {
+			settleRefusals()
 			return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, email: at.email, noted: true}
 		}
 		if chatgptModelUnsupported(body) {
-			markModelCooldown(at.index, at.token, at.model, cfg.modelCooldown(), cfg.StatsFile)
+			refusals = append(refusals, at)
 		}
 		if modelUnavailable(body) {
 			modelMissing = true
@@ -1446,6 +1759,7 @@ func performAttempts(cfg pluginConfig, prepared preparedCall, stream bool, spent
 			pinRoundRobin(at.index, true)
 		}
 	}
+	settleRefusals()
 	return attemptResult{resp: lastResp, status: lastStatus, body: lastBody, tokens: tokens, noted: len(tokens) > 0, modelMissing: modelMissing}
 }
 
@@ -1499,6 +1813,101 @@ func clientAborted(status int, body []byte) bool {
 func chatgptModelUnsupported(body []byte) bool {
 	text := strings.ToLower(string(body))
 	return strings.Contains(text, "model is not supported") && strings.Contains(text, "chatgpt account")
+}
+
+// refusalFieldPaths are the only 2xx JSON fields that may carry a refusal.
+// Reply content such as choices[].message.content is never matched.
+var refusalFieldPaths = [][]string{
+	{"detail"},
+	{"message"},
+	{"error", "message"},
+	{"error", "detail"},
+	{"response", "error", "message"},
+}
+
+// chatgptModelRefused reports a refusal in a 2xx body. JSON objects and complete
+// SSE data lines are checked field by field. Anything else, such as an error
+// chunk, keeps the plain substring check.
+func chatgptModelRefused(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if trimmed[0] == '{' {
+		obj := map[string]any{}
+		if json.Unmarshal(trimmed, &obj) != nil {
+			return false
+		}
+		return refusalInObject(obj)
+	}
+	if trimmed[0] == '[' || trimmed[0] == '"' {
+		return false
+	}
+	if objects, sawData := sseRefusalObjects(trimmed); sawData {
+		for _, obj := range objects {
+			if refusalInObject(obj) {
+				return true
+			}
+		}
+		return false
+	}
+	return chatgptModelUnsupported(body)
+}
+
+// sseRefusalObjects parses every data: line that holds a JSON object. sawData is
+// true for an SSE chunk even when the last line is still incomplete.
+func sseRefusalObjects(body []byte) (objects []map[string]any, sawData bool) {
+	for len(body) > 0 {
+		line := body
+		if idx := bytes.IndexByte(body, '\n'); idx >= 0 {
+			line = body[:idx]
+			body = body[idx+1:]
+		} else {
+			body = nil
+		}
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		sawData = true
+		payload := bytes.TrimSpace(line[len("data:"):])
+		if len(payload) == 0 || payload[0] != '{' {
+			continue
+		}
+		var obj map[string]any = map[string]any{}
+		if json.Unmarshal(payload, &obj) == nil {
+			objects = append(objects, obj)
+		}
+	}
+	return objects, sawData
+}
+
+func refusalInObject(obj map[string]any) bool {
+	for _, path := range refusalFieldPaths {
+		value, ok := nestedField(obj, path)
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok && chatgptModelUnsupported([]byte(text)) {
+			return true
+		}
+	}
+	return false
+}
+
+func nestedField(obj map[string]any, path []string) (any, bool) {
+	var current any = obj
+	for _, key := range path {
+		node, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = node[key]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
 }
 
 // modelUnavailable reports an upstream refusal of the model itself, not of the request.
@@ -2032,7 +2441,7 @@ func openStream(executorStreamID string, cfg pluginConfig, prepared preparedCall
 		if len(used) > 0 {
 			token = used[len(used)-1]
 		}
-		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, result.model, cfg.modelCooldown(), cfg.StatsFile, cfg.RotationMode)
+		go forwardStream(callbackID, result.resp.streamID(), executorStreamID, protocol, used, result.email, result.index, token, result.model, cfg.modelOutageCooldown(), cfg.StatsFile, cfg.RotationMode)
 		return okEnvelope(map[string]any{
 			"headers": responseHeaders(result.resp, "text/event-stream"),
 		})
@@ -2077,7 +2486,7 @@ func forwardStream(callbackID, httpStreamID, executorStreamID, protocol string, 
 		if len(scan) > 16384 {
 			scan = append([]byte(nil), scan[len(scan)-16384:]...)
 		}
-		if chatgptModelUnsupported(scan) {
+		if chatgptModelRefused(scan) {
 			cooledStream = true
 			markModelCooldown(index, token, model, cooldown, statsFile)
 			if rotation == "round-robin" {
@@ -2307,8 +2716,6 @@ func metaString(meta map[string]any, key string) string {
 	return strings.TrimSpace(value)
 }
 
-var plusFileCache sync.Map
-
 // loadEligible returns every enabled Codex account that can serve a request now,
 // and whether at least one enabled Plus account exists. Plus-preference is applied
 // later per upstream model name. hasEnabledPlus counts cooling and unavailable
@@ -2397,19 +2804,15 @@ func accountToken(callbackID, index, known string) (string, error) {
 	return strings.TrimSpace(token), nil
 }
 
+// tokenFromPath reads the access token and plan straight from the auth file on
+// every call. Reading the file costs about 25 microseconds; the host auth.get
+// fallback costs about 9 ms per account, which made every request wait for all
+// auth files. A token is never served from memory, so a rewrite that keeps the
+// same mtime and size is still seen.
 func tokenFromPath(path string) (string, bool, bool) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", false, false
-	}
-	info, errStat := os.Stat(path)
-	cacheKey := ""
-	if errStat == nil {
-		cacheKey = path + "\x00" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "\x00" + strconv.FormatInt(info.Size(), 10)
-		if value, ok := plusFileCache.Load(cacheKey); ok {
-			cached := value.(cachedPlan)
-			return "", cached.plus, false
-		}
 	}
 	data, errRead := os.ReadFile(path)
 	if errRead != nil || len(bytes.TrimSpace(data)) == 0 {
@@ -2419,14 +2822,7 @@ func tokenFromPath(path string) (string, bool, bool) {
 	if !known {
 		return "", false, false
 	}
-	if cacheKey != "" {
-		plusFileCache.Store(cacheKey, cachedPlan{plus: plus})
-	}
 	return token, plus, true
-}
-
-type cachedPlan struct {
-	plus bool
 }
 
 func readAuth(callbackID, index string) (string, bool, error) {
@@ -2541,15 +2937,6 @@ func onlyPlusBearers(accounts []account) []account {
 // plusBearer reports whether the access token that will be sent is a Plus bearer.
 func plusBearer(item account) bool {
 	return strings.EqualFold(jwtChatGPTPlan(item.token), "plus") || (!looksLikeJWT(item.token) && item.plus)
-}
-
-func anyPlus(accounts []account) bool {
-	for _, item := range accounts {
-		if item.plus {
-			return true
-		}
-	}
-	return false
 }
 
 // freeModel reports whether the upstream model name may use accounts that
@@ -2751,7 +3138,7 @@ func rotateAccounts(in []account, start int) []account {
 	return out
 }
 
-func stickyOrderLocked(cfg pluginConfig, primary []account, session string, now time.Time) []account {
+func stickyOrderLocked(_ pluginConfig, primary []account, session string, now time.Time) []account {
 	if runtime.sticky == nil {
 		runtime.sticky = map[string]stickyBind{}
 	}

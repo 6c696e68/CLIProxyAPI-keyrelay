@@ -54,6 +54,7 @@ plugins:
       plus-preference: prefer
       sticky-seconds: 300
       model-cooldown-minutes: 1440
+      model-outage-cooldown-minutes: 5
       stats-file: ""
       models:
         - name: "gpt-5.4"
@@ -79,24 +80,31 @@ plugins:
 | `free-models` | Upstream model names, not aliases, that may also use free and other non-Plus Codex accounts. Other models keep `plus-preference`. No effect when `plus-preference` is `off`. Default empty. |
 | `sticky-seconds` | Sticky session lifetime. Default `300`. Maximum `86400`. |
 | `model-cooldown-minutes` | After the upstream says a model is not supported for a ChatGPT account, skip that account and that access token for that model only, for this many minutes. Other models keep using the account. `0` disables the skip. Default `1440` (1 day). Maximum `10080`. When `stats-file` is set, the skip is saved in `stats-file + ".cooldowns.json"` and survives restart. The file stores a token hash and the model name, not the access token. Rows from older versions have no model and are dropped on load. |
+| `model-outage-cooldown-minutes` | Shorter skip after a model refusal that no other account proved during the same request phase. Default `5`. Never longer than `model-cooldown-minutes`, so `model-cooldown-minutes: 0` disables both. `0` remembers nothing beyond the current request. Saved in the same sidecar file. |
 | `stats-file` | JSON file of hourly buckets kept for 90 days. Empty does not write a file. Reloading replaces in-memory model cooldowns with that file's sidecar, and an empty value clears them. |
+| `disable-prompt-cache` | Force an upstream prompt-cache miss on every attempt. Default `false`. |
+| `service-tier` | Force a speed tier: `priority` (Fast) or `ultrafast`. `fast` is stored as `priority`. Empty disables. Default empty. A row `service-tier` overrides it, and a row `off` disables it for that upstream name. |
 | `models` | Rows of upstream model name, optional alias, optional fallback names, and optional OpenAI model fields. |
+
+With `disable-prompt-cache: true`, every upstream attempt sets a new random `prompt_cache_key` and appends `[request <key>]` to the end of the system text, so the upstream never reads a cache entry written by an earlier request. Upstream writes still happen; they are just never read again. The tag must sit at the end of the system text, and `prompt_cache_options` is ignored by the upstream, so the key and the tag always change together. This raises latency and Codex quota use on long threads, because each attempt pays the full uncached prompt again. `false` leaves request bodies byte-identical to a build without this field, including any `prompt_cache_key` the client sent.
+
+With `service-tier` set, every upstream attempt sets `service_tier` when the client sent none, `auto`, `default`, or `null`. A client tier such as `priority`, `ultrafast`, or `flex` is kept. The tier follows the upstream name actually sent, so a fallback name uses its own row `service-tier`, then the plugin value. A thinking suffix does not change the lookup. Codex Desktop omits `service_tier` for custom providers (openai/codex#53649), so this is the server-side way to give those clients Fast. The ChatGPT backend echoes `auto` or `default` even when it served Fast, so measure speed, not the response field. Fast and Ultrafast spend more Codex account quota. Empty leaves request bodies unchanged.
 
 ## Models
 
 With `prefix: vippro` and alias `gpt-5.4`, clients call `vippro/gpt-5.4`. The upstream model name is the row `name`, not the alias. An empty prefix claims the alias itself.
 
-A thinking suffix such as `(high)` is accepted on the client model and copied onto the upstream name.
+A thinking suffix such as `(high)` is accepted on the client model. The host thinking pipeline converts it to `reasoning_effort` for Chat Completions or `reasoning.effort` for Responses, and the upstream receives the bare model name. A suffix overrides any effort already in the body. Requests without a suffix are unchanged. Local validation never fails a request: a suffix the embedded registry rejects is applied through the host user-defined path and judged by the upstream.
 
 Several rows with the same alias are one catalog model. The plugin rotates those upstream names across requests. One request's `request-retry` budget stays on the name chosen for that request. An exact repeat of the same `name` and `alias` keeps the first row and does not fail registration. A row with an alias and an empty name is rejected. A blank name row is skipped.
 
 Optional row fields follow the OpenAI-compatible model object: `display-name`, `max-context-length`, `force-mapping`, `image`, `input-modalities`, `output-modalities`, `is-compat`, `use-max-completion-tokens`, and `thinking`. The catalog receives `max-context-length` and the modality lists. `force-mapping`, `image`, `is-compat`, and `use-max-completion-tokens` are stored and not advertised. If `thinking` is omitted, the row inherits the canonical model's levels, including `xhigh` and `max` when that model supports them. An explicit `thinking` object wins even when `levels` is absent. A pool of several upstream names advertises the alias, not the first name. Calling a bare upstream name pins that name.
 
-`fallback` is an ordered list of upstream names. The row's own name and repeats are dropped. With `fallback-retry` above `0`, the plugin first tries the row `name` on the selected accounts. When every one of those attempts fails with a model refusal (the ChatGPT model-not-supported error, `model_not_found`, or "model ... does not exist"), or every account is in model cooldown, it sends the fallback names instead. A thinking suffix such as `(high)` stays attached. Fallback calls may use accounts in model cooldown, because that cooldown only means the primary model was refused.
+`fallback` is an ordered list of upstream names. The row's own name and repeats are dropped. With `fallback-retry` above `0`, the plugin first tries the row `name` on the selected accounts. When every one of those attempts fails with a model refusal (the ChatGPT model-not-supported error, `model_not_found`, or "model ... does not exist"), or every account is in model cooldown, it sends the fallback names instead. A thinking suffix such as `(high)` is converted by the same host pipeline on fallback names. Fallback calls may use accounts in model cooldown, because that cooldown only means the primary model was refused. A refusal earns the full `model-cooldown-minutes` only when another account in the same request phase returns a non-refused 2xx for the same base model; otherwise it earns the shorter `model-outage-cooldown-minutes`.
 
 Fallback only changes the `model` value in the request. Response bytes and stream bytes are passed through unchanged, so the response `model` field shows the fallback name. Fallback never starts after a 2xx response, including a 2xx stream that carries an error, because the client may already have bytes. Other errors such as 429 or 5xx keep the primary model. A Responses request that carries `previous_response_id` or encrypted reasoning from another model may still be refused by the fallback model.
 
-A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls, except client errors (see Upstream response). Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for that model, without its thinking suffix, for `model-cooldown-minutes`, including when the error arrives inside a 2xx stream. A cooled account is still skipped for that model only, so a fallback name may use it unless it is cooled for the fallback name too.
+A non-2xx response tries the next selected account and keeps that same model, up to `request-retry` extra calls, except client errors (see Upstream response). Stream error bytes are copied as-is. The ChatGPT model-not-supported error cools that account and access token for that model, without its thinking suffix. It uses the full `model-cooldown-minutes` only when another account answered the same base model with a non-refused 2xx in the same phase; a refusal inside a 2xx stream has no such proof and uses the shorter `model-outage-cooldown-minutes`. A cooled account is still skipped for that model only, so a fallback name may use it unless it is cooled for the fallback name too.
 
 ## Accounts
 
@@ -140,16 +148,18 @@ Sticky is recorded for the account that actually succeeded. Repeating a successf
 
 ## Upstream response
 
-A 2xx body or stream is returned as the base URL sent it. The plugin does not read a 2xx body to switch accounts or models.
+A 2xx body or stream is returned as the base URL sent it. The plugin does not read a 2xx body to switch accounts or models. It only reads the refusal error fields to decide a cooldown.
 
 Chat streams pass each upstream line through `ConvertOpenAIResponseToOpenAI`. Responses streams are the original bytes. The request is `POST {base-url}/chat/completions` or `POST {base-url}/responses` with `Authorization: Bearer` set to the selected Codex access token. Stream requests also send `Accept: text/event-stream` and `Cache-Control: no-cache`.
 
 A non-2xx response tries the next account with the same model, up to `1 + request-retry` calls. The last upstream error body is returned unchanged.
 
-- Model refusal: the error `model is not supported` with `ChatGPT account` cools that account index and that access token for that model until `model-cooldown-minutes` elapse. Later requests for that model do not select either one. The same match inside a 2xx stream body cools them after that stream is opened. `0` still switches accounts inside the current request and does not remember the cooldown. When `stats-file` is set, active cooldowns are reloaded after restart.
+- Model refusal: the error `model is not supported` with `ChatGPT account` cools that account index and that access token for that model, and later requests for that model do not select either one. The full `model-cooldown-minutes` applies only when another account returned a non-refused 2xx for the same base model in the same request phase; otherwise the shorter `model-outage-cooldown-minutes` applies. A refusal inside a 2xx stream has no proof and uses the outage cooldown. On a 2xx body only the error fields `detail`, `message`, `error.message`, `error.detail`, and `response.error.message` count, so a successful reply that quotes the phrase never cools an account. `0` still switches accounts inside the current request and does not remember the cooldown. When `stats-file` is set, active cooldowns are reloaded after restart.
 - Client errors: a 400, 404, 409, 413, 415 or 422 whose body is not a model refusal blames the request, not the account. It is returned at once, with no further account, no penalty, and no change to the round-robin pin. `model_not_found` and "model ... does not exist" bodies still count as model refusals.
 - Soft penalty: a failed attempt demotes the account in memory only, so a restart clears it. A 429 penalizes the account until `error.resets_in_seconds`, else `error.resets_at` (unix seconds), else `Retry-After` (seconds or HTTP date), else 10 minutes, clamped to 30 seconds through 7 days. A 401 penalizes that access token for 10 minutes. A 402 or 403 penalizes the account for 10 minutes. A 5xx, 408, transport error or missing stream id carries no penalty. Penalized accounts are demoted, not removed. A 2xx clears the penalty that was set before that attempt started.
 - Within one request, an account that returned 429, 401, 402, 403 or a model refusal is not sent to again. Repeats after a 5xx or transport error stay allowed.
+
+A 400 whose `error.param` is `reasoning.effort` or `reasoning_effort` and whose `error.code` is `unsupported_value` or `invalid_value` is an effort rejection. The plugin reads the rejected value and the upstream `Supported values are:` list, clamps with the host standard-level rule, and resends once to the same account and token. A non-standard value such as `auto` uses `medium` when the list allows it. The first 400 adds no penalty, cooldown, or spent mark, and the retry result follows the normal rules.
 
 ## Protocols
 

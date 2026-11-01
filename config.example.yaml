@@ -1300,6 +1300,13 @@ plugins:
     #   plus-preference: prefer
     #   sticky-seconds: 300
     #   model-cooldown-minutes: 1440
+    #   # Short cooldown for a refusal that no other account proved. Default 5.
+    #   model-outage-cooldown-minutes: 5
+    #   # Force an upstream prompt-cache miss on every attempt. Default false.
+    #   disable-prompt-cache: false
+    #   # Force Fast: set service_tier when the client sends none, auto, or default.
+    #   # priority | ultrafast | empty (off). A model row service-tier overrides it; "off" disables it.
+    #   service-tier: ""
     #   models:
     #     - name: "gpt-5.4"
     #       alias: "gpt-5.4"

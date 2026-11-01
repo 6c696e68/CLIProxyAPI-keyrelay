@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -13,8 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -826,7 +831,7 @@ models:
 	if len(calls) != 1 {
 		t.Fatalf("calls = %d", len(calls))
 	}
-	const want = `{"temperature":0.2,"model":"gpt-5.4(high)","messages":[{"content":"model"}]}`
+	const want = `{"temperature":0.2,"model":"gpt-5.4","messages":[{"content":"model"}],"reasoning_effort":"high"}`
 	if string(calls[0].Body) != want {
 		t.Fatalf("body = %s", calls[0].Body)
 	}
@@ -1715,7 +1720,9 @@ func TestPlusFileCacheDoesNotReuseToken(t *testing.T) {
 			gets++
 		}
 	}
-	if gets < 1 || len(calls) != 2 || bearer(t, calls[1]) != "Bearer "+second {
+	// The file is read on every request, so a rewrite with the same mtime and
+	// size is seen without the per-account host auth.get round trip.
+	if gets != 0 || len(calls) != 2 || bearer(t, calls[0]) != "Bearer "+first || bearer(t, calls[1]) != "Bearer "+second {
 		t.Fatalf("gets=%d second bearer = %s", gets, bearer(t, calls[1]))
 	}
 }
@@ -2981,7 +2988,7 @@ models:
 		if len(calls) != 3 || bearer(t, calls[2]) != "Bearer "+tokenA {
 			t.Fatalf("calls=%d", len(calls))
 		}
-		if requestModel(t, calls[0]) != "primary-model(high)" || requestModel(t, calls[1]) != "primary-model(high)" || requestModel(t, calls[2]) != "other-model(high)" {
+		if requestModel(t, calls[0]) != "primary-model" || requestModel(t, calls[1]) != "primary-model" || requestModel(t, calls[2]) != "other-model" {
 			t.Fatalf("models = %s %s %s", calls[0].Body, calls[1].Body, calls[2].Body)
 		}
 		if string(resp.Payload) != `{"ok":true,"model":"other-model"}` {
@@ -3231,7 +3238,7 @@ func TestModelCooldownIsPerModel(t *testing.T) {
 		execModel(t, "model-a(high)")
 		execModel(t, "model-a(low)")
 		calls := f.httpCalls(t)
-		if len(calls) != 3 || bearer(t, calls[2]) != "Bearer "+tokenB || requestModel(t, calls[2]) != "model-a(low)" {
+		if len(calls) != 3 || bearer(t, calls[2]) != "Bearer "+tokenB || requestModel(t, calls[2]) != "model-a" {
 			t.Fatalf("suffix cooldown calls = %d", len(calls))
 		}
 		if !cooled("1", tokenA, "model-a(medium)", now) {
@@ -3308,6 +3315,782 @@ func TestModelCooldownIsPerModel(t *testing.T) {
 			t.Fatal("stream refusal cooled the wrong model")
 		}
 	})
+}
+
+func TestRefusalOnEveryAccountUsesOutageCooldown(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 10, 31, 11, 10, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	const refusal = `{"detail":"The 'primary-model' model is not supported when using Codex with a ChatGPT account."}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["fallback-model"]
+`)
+	mustExec(t, "openai", "primary-model", []byte(`{"model":"primary-model"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 3 || requestModel(t, calls[2]) != "fallback-model" {
+		t.Fatalf("first request calls=%d", len(calls))
+	}
+	want := now.Add(5 * time.Minute)
+	for _, index := range []string{"1", "2"} {
+		runtimeMu.Lock()
+		until := runtime.cooldownIndex[cooldownKey(index, "primary-model")]
+		runtimeMu.Unlock()
+		if !until.Equal(want) {
+			t.Fatalf("account %s cooldown until %v, want %v", index, until, want)
+		}
+	}
+	now = now.Add(6 * time.Minute)
+	mustExec(t, "openai", "primary-model", []byte(`{"model":"primary-model"}`))
+	calls = f.httpCalls(t)
+	last := calls[len(calls)-1]
+	if requestModel(t, last) != "primary-model" || bearer(t, last) != "Bearer "+tokenA {
+		t.Fatalf("after outage cooldown model=%s bearer=%s", requestModel(t, last), bearer(t, last))
+	}
+}
+
+func TestRefusalWithSuccessElsewhereUsesFullCooldown(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 10, 31, 11, 30, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	const refusal = `{"detail":"The 'primary-model' model is not supported when using Codex with a ChatGPT account."}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+model-cooldown-minutes: 60
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 || requestModel(t, calls[0]) != "primary-model" || requestModel(t, calls[1]) != "primary-model" {
+		t.Fatalf("calls=%d", len(calls))
+	}
+	runtimeMu.Lock()
+	until := runtime.cooldownIndex[cooldownKey("1", "primary-model")]
+	_, tokenCooled := runtime.cooldownToken[cooldownKey(tokenKey(tokenA), "primary-model")]
+	runtimeMu.Unlock()
+	if want := now.Add(60 * time.Minute); !until.Equal(want) {
+		t.Fatalf("proven cooldown until %v, want %v", until, want)
+	}
+	if !tokenCooled {
+		t.Fatal("proven cooldown missed the token")
+	}
+	if cooled("2", tokenB, "primary-model", now) {
+		t.Fatal("successful account was cooled")
+	}
+	if !cooled("1", tokenA, "primary-model(low)", now) {
+		t.Fatal("cooldown missed the thinking suffix")
+	}
+	now = now.Add(61 * time.Minute)
+	if cooled("1", tokenA, "primary-model", now) {
+		t.Fatal("proven cooldown outlived model-cooldown-minutes")
+	}
+}
+
+func TestStreamRefusalUsesOutageCooldown(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.streamFinished = make(chan struct{})
+	f.codex("1", tokenA, "plus", nil)
+	const refusal = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
+	f.scripts = []httpScript{{status: http.StatusOK, streamID: "http-stream-refusal", chunks: []readChunk{{payload: []byte("data: " + refusal + "\n\n"), done: true}}}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+model-cooldown-minutes: 1440
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	req := execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+	req.StreamID = "exec-stream-refusal"
+	callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+	waitCh(t, f.streamFinished, "stream refusal close")
+	runtimeMu.Lock()
+	until := runtime.cooldownIndex[cooldownKey("1", "gpt-6-astra")]
+	runtimeMu.Unlock()
+	if want := now.Add(5 * time.Minute); !until.Equal(want) {
+		t.Fatalf("stream refusal cooldown until %v, want %v", until, want)
+	}
+}
+
+func TestRefusalTextInSuccessfulReplyDoesNotCool(t *testing.T) {
+	now := time.Date(2026, 10, 31, 12, 30, 0, 0, time.UTC)
+	const phrase = "The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."
+	const yml = `
+enabled: true
+plus-preference: off
+request-retry: 0
+model-cooldown-minutes: 60
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`
+	t.Run("json reply content", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		body := `{"id":"x","choices":[{"index":0,"message":{"role":"assistant","content":"` + phrase + `"},"finish_reason":"stop"}]}`
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(body)}}
+		mustConfigure(t, yml)
+		mustExec(t, "openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+		if cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("reply content cooled the account")
+		}
+	})
+	t.Run("stream delta content", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.streamFinished = make(chan struct{})
+		f.codex("1", tokenA, "plus", nil)
+		chunk := `data: {"choices":[{"index":0,"delta":{"content":"` + phrase + `"}}]}` + "\n\n"
+		f.scripts = []httpScript{{status: http.StatusOK, streamID: "http-reply", chunks: []readChunk{{payload: []byte(chunk), done: true}}}}
+		mustConfigure(t, yml)
+		req := execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+		req.StreamID = "exec-reply"
+		callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+		waitCh(t, f.streamFinished, "reply stream close")
+		if cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("stream reply content cooled the account")
+		}
+	})
+	t.Run("error field still detected", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"detail":"` + phrase + `"}`)}}
+		mustConfigure(t, yml)
+		mustExec(t, "openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`))
+		if !cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("error field refusal was not detected")
+		}
+	})
+}
+
+func TestOutageCooldownExpiryRetriesPrimary(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 10, 31, 13, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	const refusal = `{"detail":"The 'primary-model' model is not supported when using Codex with a ChatGPT account."}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusBadRequest, body: []byte(refusal)},
+		{status: http.StatusOK, body: []byte(`{"ok":true,"model":"fallback-model"}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["fallback-model"]
+`)
+	mustExec(t, "openai", "primary-model", []byte(`{"model":"primary-model"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 3 || requestModel(t, calls[2]) != "fallback-model" {
+		t.Fatalf("first request calls=%d", len(calls))
+	}
+	now = now.Add(6 * time.Minute)
+	mustExec(t, "openai", "primary-model", []byte(`{"model":"primary-model"}`))
+	calls = f.httpCalls(t)
+	if len(calls) != 4 {
+		t.Fatalf("second request calls=%d", len(calls))
+	}
+	last := calls[len(calls)-1]
+	if requestModel(t, last) != "primary-model" || bearer(t, last) != "Bearer "+tokenA {
+		t.Fatalf("after expiry model=%s bearer=%s", requestModel(t, last), bearer(t, last))
+	}
+}
+
+func TestOutageCooldownConfig(t *testing.T) {
+	const refusal = `{"detail":"The 'gpt-6-astra' model is not supported when using Codex with a ChatGPT account."}`
+	const modelYML = "models:\n  - {name: gpt-6-astra, alias: gpt-6-astra}\n"
+	now := time.Date(2026, 10, 31, 14, 0, 0, 0, time.UTC)
+
+	t.Run("unset defaults to five minutes", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(refusal)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\n"+modelYML)
+		cfg := currentConfig()
+		if cfg.ModelOutageCooldownMinutes == nil || *cfg.ModelOutageCooldownMinutes != 5 {
+			t.Fatalf("model-outage-cooldown-minutes = %v", cfg.ModelOutageCooldownMinutes)
+		}
+		if got := cfg.modelOutageCooldown(); got != 5*time.Minute {
+			t.Fatalf("outage cooldown = %s", got)
+		}
+		callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`)))
+		if !cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("default outage cooldown did not apply")
+		}
+	})
+	t.Run("zero remembers nothing", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(refusal)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\nmodel-outage-cooldown-minutes: 0\n"+modelYML)
+		callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`)))
+		if cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("outage 0 remembered the refusal")
+		}
+	})
+	t.Run("above the maximum is clamped", func(t *testing.T) {
+		setup(t)
+		mustConfigure(t, "enabled: true\nmodel-outage-cooldown-minutes: 20000\n")
+		cfg := currentConfig()
+		if cfg.ModelOutageCooldownMinutes == nil || *cfg.ModelOutageCooldownMinutes != maxModelCooldownMinutes {
+			t.Fatalf("clamped outage = %v", cfg.ModelOutageCooldownMinutes)
+		}
+	})
+	t.Run("full cooldown zero disables the outage", func(t *testing.T) {
+		f := setup(t)
+		nowFn = func() time.Time { return now }
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusBadRequest, body: []byte(refusal)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\nmodel-cooldown-minutes: 0\n"+modelYML)
+		if got := currentConfig().modelOutageCooldown(); got != 0 {
+			t.Fatalf("outage cooldown with full 0 = %s", got)
+		}
+		callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-6-astra", []byte(`{"model":"gpt-6-astra"}`)))
+		if cooled("1", tokenA, "gpt-6-astra", now) {
+			t.Fatal("full cooldown 0 remembered the refusal")
+		}
+	})
+	t.Run("schema lists the field", func(t *testing.T) {
+		setup(t)
+		for _, field := range configFields() {
+			if field.Name != "model-outage-cooldown-minutes" {
+				continue
+			}
+			if field.Type != pluginapi.ConfigFieldTypeInteger || strings.TrimSpace(field.Description) == "" {
+				t.Fatalf("field = %+v", field)
+			}
+			return
+		}
+		t.Fatal("model-outage-cooldown-minutes missing from the schema")
+	})
+}
+
+func TestThinkingSuffixChatSetsReasoningEffort(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)","messages":[{"role":"user","content":"hi"}]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || calls[0].URL != defaultBaseURL+"/chat/completions" {
+		t.Fatalf("calls = %#v", calls)
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "primary-model" || body.ReasoningEffort != "high" {
+		t.Fatalf("body = %s", calls[0].Body)
+	}
+}
+
+func TestThinkingSuffixResponsesSetsReasoningEffort(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai-response", "primary-model(high)", []byte(`{"model":"primary-model(high)","input":"hi"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || calls[0].URL != defaultBaseURL+"/responses" {
+		t.Fatalf("calls = %#v", calls)
+	}
+	var body struct {
+		Model     string `json:"model"`
+		Reasoning struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "primary-model" || body.Reasoning.Effort != "high" {
+		t.Fatalf("body = %s", calls[0].Body)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(calls[0].Body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["reasoning_effort"]; ok {
+		t.Fatalf("top-level reasoning_effort = %s", calls[0].Body)
+	}
+}
+
+func TestThinkingSuffixOverridesBodyEffort(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)","reasoning_effort":"low","messages":[]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "primary-model" || body.ReasoningEffort != "high" {
+		t.Fatalf("body = %s", calls[0].Body)
+	}
+}
+
+func TestThinkingBudgetSuffixUsesHostConversion(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	want, ok := thinking.ConvertBudgetToLevel(8192)
+	if !ok {
+		t.Fatal("thinking.ConvertBudgetToLevel(8192) rejected the budget")
+	}
+	mustExec(t, "openai", "primary-model(8192)", []byte(`{"model":"primary-model(8192)","messages":[]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "primary-model" || body.ReasoningEffort != want {
+		t.Fatalf("body = %s, want reasoning_effort %q", calls[0].Body, want)
+	}
+}
+
+func TestNoThinkingSuffixLeavesBodyUnchanged(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 0
+models:
+  - name: upstream-model
+    alias: client-model
+`)
+	chat := []byte(`{"model":"client-model","reasoning_effort":"low","temperature":0.3,"messages":[{"role":"user","content":"hi"}]}`)
+	_, start, end, errModel := extractModel(chat)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	wantChat, errRewrite := rewriteModel(chat, start, end, "upstream-model")
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	mustExec(t, "openai", "client-model", chat)
+	responses := []byte(`{"model":"client-model","reasoning":{"effort":"low"},"input":"hi","temperature":0.3}`)
+	_, start, end, errModel = extractModel(responses)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	wantResponses, errRewrite := rewriteModel(responses, start, end, "upstream-model")
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	mustExec(t, "openai-response", "client-model", responses)
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if string(calls[0].Body) != string(wantChat) {
+		t.Fatalf("chat body = %s, want %s", calls[0].Body, wantChat)
+	}
+	if string(calls[1].Body) != string(wantResponses) {
+		t.Fatalf("responses body = %s, want %s", calls[1].Body, wantResponses)
+	}
+}
+
+func TestThinkingSuffixFallbackSendsBareName(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusNotFound, body: []byte(`{"error":{"code":"model_not_found"}}`)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 0
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+	mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)","messages":[]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(calls[1].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "other-model" || body.ReasoningEffort != "high" {
+		t.Fatalf("fallback body = %s", calls[1].Body)
+	}
+}
+
+func TestSuffixLevelRejectedLocallyStillSent(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	const model = "gpt-6-astra(minimal)"
+	payload := []byte(`{"model":"gpt-6-astra(minimal)","messages":[]}`)
+	mustExec(t, "openai", model, payload)
+	calls := f.httpCalls(t)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	bare, _ := splitSuffix(model)
+	_, start, end, errModel := extractModel(payload)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	rewritten, errRewrite := rewriteModel(payload, start, end, bare)
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	want, errApply := thinking.ApplyThinkingWithModelInfo(rewritten, nil, model, "openai", "openai", "openai", &registry.ModelInfo{ID: bare, UserDefined: true})
+	if errApply != nil {
+		t.Fatal(errApply)
+	}
+	if string(calls[0].Body) != string(want) {
+		t.Fatalf("body = %s, want %s", calls[0].Body, want)
+	}
+}
+
+func TestUpstreamUnsupportedEffortRetriesClamped(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	const unsupported = `{"error":{"message":"Unsupported value: 'minimal' is not supported with the 'gpt-6-astra' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_value"}}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(unsupported)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	payload := []byte(`{"model":"primary-model","reasoning_effort":"minimal","messages":[{"role":"user","content":"hi"}]}`)
+	resp := mustExec(t, "openai", "primary-model", payload)
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenA {
+		t.Fatalf("bearers = %s %s", bearer(t, calls[0]), bearer(t, calls[1]))
+	}
+	_, start, end, errModel := extractModel(payload)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	today, errRewrite := rewriteModel(payload, start, end, "primary-model")
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	if string(calls[0].Body) != string(today) {
+		t.Fatalf("first body = %s, want %s", calls[0].Body, today)
+	}
+	var retry struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+	}
+	if err := json.Unmarshal(calls[1].Body, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.Model != "primary-model" || retry.ReasoningEffort != "low" {
+		t.Fatalf("retry body = %s", calls[1].Body)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("payload = %s", resp.Payload)
+	}
+	if gotIndex, gotToken := penaltyCounts(); gotIndex+gotToken != 0 {
+		t.Fatalf("penalties = %d/%d", gotIndex, gotToken)
+	}
+	if cooledAny("1", tokenA, now) {
+		t.Fatal("effort retry cooled the account")
+	}
+}
+
+func TestUpstreamInvalidEffortRetriesMedium(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	const invalid = `{
+  "error": {
+    "message": "Invalid value: 'auto'. Supported values are: 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', and 'max'.",
+    "type": "invalid_request_error",
+    "param": "reasoning.effort",
+    "code": "invalid_value"
+  }
+}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(invalid)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai-response", "primary-model", []byte(`{"model":"primary-model","reasoning":{"effort":"auto","summary":"auto"},"input":"hi"}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	var retry struct {
+		Model     string `json:"model"`
+		Reasoning struct {
+			Effort  string `json:"effort"`
+			Summary string `json:"summary"`
+		} `json:"reasoning"`
+	}
+	if err := json.Unmarshal(calls[1].Body, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.Model != "primary-model" || retry.Reasoning.Effort != "medium" || retry.Reasoning.Summary != "auto" {
+		t.Fatalf("retry body = %s", calls[1].Body)
+	}
+}
+
+func TestEffortRetryOnlyOnce(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 11, 1, 9, 30, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	const unsupported = `{"error":{"message":"Unsupported value: 'minimal' is not supported with the 'primary-model' model. Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.","type":"invalid_request_error","param":"reasoning.effort","code":"unsupported_value"}}`
+	f.scripts = []httpScript{
+		{status: http.StatusBadRequest, body: []byte(unsupported)},
+		{status: http.StatusBadRequest, body: []byte(unsupported)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+fallback-retry: 1
+models:
+  - name: primary-model
+    alias: primary-model
+    fallback: ["other-model"]
+`)
+	env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "primary-model", []byte(`{"model":"primary-model","reasoning_effort":"minimal","messages":[]}`)))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusBadRequest || env.Error.Message != unsupported {
+		t.Fatalf("client error = %+v", env.Error)
+	}
+	for _, call := range calls {
+		if requestModel(t, call) != "primary-model" {
+			t.Fatalf("fallback ran: %s", call.Body)
+		}
+	}
+	if gotIndex, gotToken := penaltyCounts(); gotIndex+gotToken != 0 {
+		t.Fatalf("penalties = %d/%d", gotIndex, gotToken)
+	}
+	if cooledAny("1", tokenA, now) {
+		t.Fatal("rejected effort cooled the account")
+	}
+}
+
+func TestThinkingSuffixStreamPath(t *testing.T) {
+	f := setup(t)
+	f.streamFinished = make(chan struct{})
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, streamID: "http-stream", chunks: []readChunk{{payload: []byte("data: {\"ok\":true}\n"), done: true}}}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	req := execReq("openai", "primary-model(high)", []byte(`{"model":"primary-model(high)","stream":true,"messages":[]}`))
+	req.StreamID = "exec-stream"
+	callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+	waitCh(t, f.streamFinished, "thinking stream close")
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || calls[0].URL != defaultBaseURL+"/chat/completions" {
+		t.Fatalf("calls = %#v", calls)
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+		Stream          bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Model != "primary-model" || body.ReasoningEffort != "high" || !body.Stream {
+		t.Fatalf("body = %s", calls[0].Body)
+	}
+}
+
+func TestThinkingSuffixAutoAndNoneUseHostOutput(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: gpt-6-astra
+    alias: gpt-6-astra
+`)
+	expected := func(payload []byte, model, format string) []byte {
+		t.Helper()
+		bare, suffix := splitSuffix(model)
+		_, start, end, errModel := extractModel(payload)
+		if errModel != nil {
+			t.Fatal(errModel)
+		}
+		body, errRewrite := rewriteModel(payload, start, end, bare)
+		if errRewrite != nil {
+			t.Fatal(errRewrite)
+		}
+		if suffix == "" {
+			return body
+		}
+		applied, errApply := thinking.ApplyThinking(body, model, format, format, format)
+		if errApply != nil {
+			applied, errApply = thinking.ApplyThinkingWithModelInfo(body, nil, model, format, format, format, &registry.ModelInfo{ID: bare, UserDefined: true})
+			if errApply != nil {
+				t.Fatal(errApply)
+			}
+		}
+		return applied
+	}
+	cases := []struct {
+		format  string
+		model   string
+		payload []byte
+	}{
+		{"openai", "gpt-6-astra(auto)", []byte(`{"model":"gpt-6-astra(auto)","messages":[]}`)},
+		{"openai", "gpt-6-astra(none)", []byte(`{"model":"gpt-6-astra(none)","messages":[]}`)},
+		{"openai-response", "gpt-6-astra(auto)", []byte(`{"model":"gpt-6-astra(auto)","input":"hi"}`)},
+		{"openai-response", "gpt-6-astra(none)", []byte(`{"model":"gpt-6-astra(none)","input":"hi"}`)},
+	}
+	for i, tc := range cases {
+		mustExec(t, tc.format, tc.model, tc.payload)
+		calls := f.httpCalls(t)
+		if len(calls) != i+1 {
+			t.Fatalf("case %d calls = %d", i, len(calls))
+		}
+		format := "openai"
+		if tc.format == "openai-response" {
+			format = "codex"
+		}
+		want := expected(tc.payload, tc.model, format)
+		if string(calls[i].Body) != string(want) {
+			t.Fatalf("case %d body = %s, want %s", i, calls[i].Body, want)
+		}
+	}
 }
 
 func TestRateLimitDelay(t *testing.T) {
@@ -3750,5 +4533,539 @@ func TestPriorityTiersDoNotLeakIntoTails(t *testing.T) {
 		if got := priorityAtLeast(pool, []account{{index: "x", priority: 1}}); len(got) != 2 {
 			t.Fatalf("anchor at tier 1 = %+v", got)
 		}
+	})
+}
+
+func promptCacheKeyOK(t *testing.T, key string) {
+	t.Helper()
+	raw, errDecode := hex.DecodeString(key)
+	if errDecode != nil || len(raw) != 16 || key != strings.ToLower(key) {
+		t.Fatalf("prompt_cache_key = %q, want 32 lowercase hex characters", key)
+	}
+}
+
+func TestDisablePromptCacheOffKeepsBody(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: upstream-model
+    alias: client-model
+`)
+	chat := []byte(`{"model":"client-model","prompt_cache_key":"client-key","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`)
+	_, start, end, errModel := extractModel(chat)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	wantChat, errRewrite := rewriteModel(chat, start, end, "upstream-model")
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	mustExec(t, "openai", "client-model", chat)
+	responses := []byte(`{"model":"client-model","prompt_cache_key":"client-key","instructions":"base","input":"hi"}`)
+	_, start, end, errModel = extractModel(responses)
+	if errModel != nil {
+		t.Fatal(errModel)
+	}
+	wantResponses, errRewrite := rewriteModel(responses, start, end, "upstream-model")
+	if errRewrite != nil {
+		t.Fatal(errRewrite)
+	}
+	mustExec(t, "openai-response", "client-model", responses)
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if !bytes.Equal(calls[0].Body, wantChat) {
+		t.Fatalf("chat body = %s, want %s", calls[0].Body, wantChat)
+	}
+	if !bytes.Equal(calls[1].Body, wantResponses) {
+		t.Fatalf("responses body = %s, want %s", calls[1].Body, wantResponses)
+	}
+	if got := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String(); got != "client-key" {
+		t.Fatalf("client key = %q, want client-key", got)
+	}
+}
+
+func TestDisablePromptCacheResponsesOverwritesKey(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+	const instructions = "You are a helpful assistant."
+	payload := []byte(`{"model":"upstream-model","prompt_cache_key":"client-key","instructions":"You are a helpful assistant.","input":"hi"}`)
+	mustExec(t, "openai-response", "upstream-model", payload)
+	mustExec(t, "openai-response", "upstream-model", payload)
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	keys := make([]string, 0, len(calls))
+	for _, call := range calls {
+		var body struct {
+			PromptCacheKey string `json:"prompt_cache_key"`
+			Instructions   string `json:"instructions"`
+		}
+		if err := json.Unmarshal(call.Body, &body); err != nil {
+			t.Fatal(err)
+		}
+		promptCacheKeyOK(t, body.PromptCacheKey)
+		if body.PromptCacheKey == "client-key" {
+			t.Fatalf("client key kept: %s", call.Body)
+		}
+		if want := instructions + "\n\n[request " + body.PromptCacheKey + "]"; body.Instructions != want {
+			t.Fatalf("instructions = %q, want %q", body.Instructions, want)
+		}
+		keys = append(keys, body.PromptCacheKey)
+	}
+	if keys[0] == keys[1] {
+		t.Fatalf("both attempts share one key: %s", keys[0])
+	}
+}
+
+func TestDisablePromptCacheResponsesWithoutInstructions(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+		mustExec(t, "openai-response", "upstream-model", []byte(`{"model":"upstream-model","input":"hi"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		key := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+		promptCacheKeyOK(t, key)
+		if want := "[request " + key + "]"; gjson.GetBytes(calls[0].Body, "instructions").String() != want {
+			t.Fatalf("body = %s, want instructions %q", calls[0].Body, want)
+		}
+	})
+	t.Run("empty string", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+		mustExec(t, "openai-response", "upstream-model", []byte(`{"model":"upstream-model","instructions":"","input":"hi"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		key := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+		promptCacheKeyOK(t, key)
+		if want := "[request " + key + "]"; gjson.GetBytes(calls[0].Body, "instructions").String() != want {
+			t.Fatalf("body = %s, want instructions %q", calls[0].Body, want)
+		}
+	})
+	t.Run("non-string instructions are left alone", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+		mustExec(t, "openai-response", "upstream-model", []byte(`{"model":"upstream-model","instructions":["a","b"],"input":"hi"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		promptCacheKeyOK(t, gjson.GetBytes(calls[0].Body, "prompt_cache_key").String())
+		if got := gjson.GetBytes(calls[0].Body, "instructions").Raw; got != `["a","b"]` {
+			t.Fatalf("instructions = %s", got)
+		}
+	})
+}
+
+func TestDisablePromptCacheChatSystemMessage(t *testing.T) {
+	config := `
+enabled: true
+plus-preference: off
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`
+	t.Run("system message gets the tag", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, config)
+		mustExec(t, "openai", "upstream-model", []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"first"},{"role":"system","content":"base"},{"role":"user","content":"last"}]}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		key := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+		promptCacheKeyOK(t, key)
+		want := "base\n\n[request " + key + "]"
+		if got := gjson.GetBytes(calls[0].Body, "messages.1.content").String(); got != want {
+			t.Fatalf("system content = %q, want %q", got, want)
+		}
+		if got := gjson.GetBytes(calls[0].Body, "messages.0.content").String(); got != "first" {
+			t.Fatalf("user content = %q", got)
+		}
+		if got := gjson.GetBytes(calls[0].Body, "messages.2.content").String(); got != "last" {
+			t.Fatalf("user content = %q", got)
+		}
+	})
+	t.Run("developer message gets the tag", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, config)
+		mustExec(t, "openai", "upstream-model", []byte(`{"model":"upstream-model","messages":[{"role":"developer","content":"base"}]}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		key := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+		promptCacheKeyOK(t, key)
+		if want := "base\n\n[request " + key + "]"; gjson.GetBytes(calls[0].Body, "messages.0.content").String() != want {
+			t.Fatalf("body = %s, want %q", calls[0].Body, want)
+		}
+	})
+	t.Run("no system message keeps messages", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, config)
+		mustExec(t, "openai", "upstream-model", []byte(`{"model":"upstream-model","messages":[{"role":"user","content":"hi"}]}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		key := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+		promptCacheKeyOK(t, key)
+		if got := gjson.GetBytes(calls[0].Body, "messages").Raw; got != `[{"role":"user","content":"hi"}]` {
+			t.Fatalf("messages = %s", got)
+		}
+	})
+	t.Run("array system content is left alone", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, config)
+		mustExec(t, "openai", "upstream-model", []byte(`{"model":"upstream-model","messages":[{"role":"system","content":[{"type":"text","text":"base"}]}]}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		promptCacheKeyOK(t, gjson.GetBytes(calls[0].Body, "prompt_cache_key").String())
+		if got := gjson.GetBytes(calls[0].Body, "messages.0.content.#").Int(); got != 1 {
+			t.Fatalf("array content changed: %s", calls[0].Body)
+		}
+	})
+}
+
+func TestDisablePromptCacheConfig(t *testing.T) {
+	t.Run("default is false", func(t *testing.T) {
+		setup(t)
+		if currentConfig().DisablePromptCache {
+			t.Fatal("default enabled the prompt cache miss")
+		}
+	})
+	t.Run("yaml decodes and reloads", func(t *testing.T) {
+		setup(t)
+		mustConfigure(t, "enabled: true\ndisable-prompt-cache: true\nmodels:\n  - {name: upstream-model, alias: upstream-model}\n")
+		if !currentConfig().DisablePromptCache {
+			t.Fatal("disable-prompt-cache: true did not apply")
+		}
+		mustConfigure(t, "enabled: true\ndisable-prompt-cache: false\nmodels:\n  - {name: upstream-model, alias: upstream-model}\n")
+		if currentConfig().DisablePromptCache {
+			t.Fatal("disable-prompt-cache: false did not apply")
+		}
+	})
+	t.Run("schema lists the field", func(t *testing.T) {
+		for _, field := range configFields() {
+			if field.Name != "disable-prompt-cache" {
+				continue
+			}
+			if field.Type != pluginapi.ConfigFieldTypeBoolean || strings.TrimSpace(field.Description) == "" {
+				t.Fatalf("field = %+v", field)
+			}
+			return
+		}
+		t.Fatal("disable-prompt-cache missing from the schema")
+	})
+}
+
+func TestDisablePromptCacheThinkingSuffix(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+disable-prompt-cache: true
+models:
+  - name: primary-model
+    alias: primary-model
+`)
+	mustExec(t, "openai", "primary-model(high)", []byte(`{"model":"primary-model(high)","messages":[{"role":"user","content":"hi"}]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 1 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	var body struct {
+		Model           string `json:"model"`
+		ReasoningEffort string `json:"reasoning_effort"`
+		PromptCacheKey  string `json:"prompt_cache_key"`
+	}
+	if err := json.Unmarshal(calls[0].Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	promptCacheKeyOK(t, body.PromptCacheKey)
+	if body.Model != "primary-model" || body.ReasoningEffort != "high" {
+		t.Fatalf("body = %s", calls[0].Body)
+	}
+}
+
+func TestDisablePromptCacheFreshPerAttempt(t *testing.T) {
+	f := setup(t)
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, time.UTC)
+	nowFn = func() time.Time { return now }
+	f.codex("1", tokenA, "plus", nil)
+	f.codex("2", tokenB, "plus", nil)
+	f.scripts = []httpScript{
+		{status: http.StatusInternalServerError, body: []byte(`{"error":{"message":"boom"}}`)},
+		{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+	}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+rotation-mode: fill-first
+request-retry: 1
+disable-prompt-cache: true
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+	mustExec(t, "openai", "upstream-model", []byte(`{"model":"upstream-model","messages":[{"role":"system","content":"base"},{"role":"user","content":"hi"}]}`))
+	calls := f.httpCalls(t)
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d", len(calls))
+	}
+	if bearer(t, calls[0]) == bearer(t, calls[1]) {
+		t.Fatalf("both attempts used one account: %s", bearer(t, calls[0]))
+	}
+	first := gjson.GetBytes(calls[0].Body, "prompt_cache_key").String()
+	second := gjson.GetBytes(calls[1].Body, "prompt_cache_key").String()
+	promptCacheKeyOK(t, first)
+	promptCacheKeyOK(t, second)
+	if first == second {
+		t.Fatalf("both attempts share one key: %s", first)
+	}
+	if want := "base\n\n[request " + first + "]"; gjson.GetBytes(calls[0].Body, "messages.0.content").String() != want {
+		t.Fatalf("first body = %s, want %q", calls[0].Body, want)
+	}
+	if want := "base\n\n[request " + second + "]"; gjson.GetBytes(calls[1].Body, "messages.0.content").String() != want {
+		t.Fatalf("second body = %s, want %q", calls[1].Body, want)
+	}
+}
+
+func TestServiceTierForced(t *testing.T) {
+	const cfgYAML = `
+enabled: true
+plus-preference: off
+request-retry: 0
+service-tier: priority
+models:
+  - name: upstream-model
+    alias: client-model
+`
+	cases := []struct {
+		name    string
+		format  string
+		payload string
+		want    string
+	}{
+		{"responses without tier", "openai-response", `{"model":"client-model","input":"hi"}`, "priority"},
+		{"chat without tier", "openai", `{"model":"client-model","messages":[{"role":"user","content":"hi"}]}`, "priority"},
+		{"auto is replaced", "openai-response", `{"model":"client-model","service_tier":"auto","input":"hi"}`, "priority"},
+		{"default is replaced", "openai-response", `{"model":"client-model","service_tier":"default","input":"hi"}`, "priority"},
+		{"null is replaced", "openai-response", `{"model":"client-model","service_tier":null,"input":"hi"}`, "priority"},
+		{"client ultrafast is kept", "openai-response", `{"model":"client-model","service_tier":"ultrafast","input":"hi"}`, "ultrafast"},
+		{"client flex is kept", "openai", `{"model":"client-model","service_tier":"flex","messages":[{"role":"user","content":"hi"}]}`, "flex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t)
+			f.codex("1", tokenA, "plus", nil)
+			f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+			mustConfigure(t, cfgYAML)
+			mustExec(t, tc.format, "client-model", []byte(tc.payload))
+			calls := f.httpCalls(t)
+			if len(calls) != 1 {
+				t.Fatalf("calls = %d", len(calls))
+			}
+			if got := gjson.GetBytes(calls[0].Body, "service_tier").String(); got != tc.want {
+				t.Fatalf("service_tier = %q, want %q; body %s", got, tc.want, calls[0].Body)
+			}
+			if requestModel(t, calls[0]) != "upstream-model" {
+				t.Fatalf("model not rewritten: %s", calls[0].Body)
+			}
+		})
+	}
+}
+
+func TestServiceTierUnsetKeepsBody(t *testing.T) {
+	f := setup(t)
+	f.codex("1", tokenA, "plus", nil)
+	f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+	mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+models:
+  - name: upstream-model
+    alias: upstream-model
+`)
+	payload := []byte(`{"model":"upstream-model","input":"hi"}`)
+	mustExec(t, "openai-response", "upstream-model", payload)
+	calls := f.httpCalls(t)
+	if len(calls) != 1 || !bytes.Equal(calls[0].Body, payload) {
+		t.Fatalf("body changed without service-tier: %s", calls[0].Body)
+	}
+}
+
+func TestServiceTierPerModel(t *testing.T) {
+	const unsupported = `{"detail":"The 'requested-model' MODEL IS NOT SUPPORTED when using Codex with a ChatGPT account."}`
+	t.Run("model tier overrides and off disables", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+service-tier: priority
+models:
+  - {name: fast-model, alias: fast-model, service-tier: ultrafast}
+  - {name: slow-model, alias: slow-model, service-tier: "off"}
+  - {name: plain-model, alias: plain-model}
+`)
+		mustExec(t, "openai-response", "fast-model", []byte(`{"model":"fast-model","input":"hi"}`))
+		mustExec(t, "openai-response", "slow-model", []byte(`{"model":"slow-model","input":"hi"}`))
+		mustExec(t, "openai-response", "plain-model(high)", []byte(`{"model":"plain-model(high)","input":"hi"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 3 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		if got := gjson.GetBytes(calls[0].Body, "service_tier").String(); got != "ultrafast" {
+			t.Fatalf("fast-model tier = %q", got)
+		}
+		if gjson.GetBytes(calls[1].Body, "service_tier").Exists() {
+			t.Fatalf("slow-model tier set: %s", calls[1].Body)
+		}
+		if got := gjson.GetBytes(calls[2].Body, "service_tier").String(); got != "priority" {
+			t.Fatalf("suffixed plain-model tier = %q; body %s", got, calls[2].Body)
+		}
+	})
+	t.Run("fallback model uses its own tier", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusBadRequest, body: []byte(unsupported)},
+			{status: http.StatusOK, body: []byte(`{"ok":true}`)},
+		}
+		mustConfigure(t, `
+enabled: true
+plus-preference: off
+request-retry: 0
+fallback-retry: 1
+models:
+  - {name: primary-model, alias: primary-model, service-tier: ultrafast, fallback: [backup-model]}
+  - {name: backup-model, alias: backup-model, service-tier: priority}
+`)
+		mustExec(t, "openai-response", "primary-model", []byte(`{"model":"primary-model","input":"hi"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		if requestModel(t, calls[0]) != "primary-model" || gjson.GetBytes(calls[0].Body, "service_tier").String() != "ultrafast" {
+			t.Fatalf("primary body = %s", calls[0].Body)
+		}
+		if requestModel(t, calls[1]) != "backup-model" || gjson.GetBytes(calls[1].Body, "service_tier").String() != "priority" {
+			t.Fatalf("fallback body = %s", calls[1].Body)
+		}
+	})
+}
+
+func TestServiceTierConfig(t *testing.T) {
+	t.Run("fast is stored as priority", func(t *testing.T) {
+		setup(t)
+		mustConfigure(t, "enabled: true\nservice-tier: FAST\nmodels:\n  - {name: m, alias: m, service-tier: Ultrafast}\n")
+		cfg := currentConfig()
+		if cfg.ServiceTier != "priority" || cfg.Models[0].ServiceTier != "ultrafast" {
+			t.Fatalf("tiers = %q %q", cfg.ServiceTier, cfg.Models[0].ServiceTier)
+		}
+	})
+	t.Run("invalid values are rejected", func(t *testing.T) {
+		for _, yml := range []string{
+			"enabled: true\nservice-tier: turbo\n",
+			"enabled: true\nservice-tier: \"off\"\n",
+			"enabled: true\nmodels:\n  - {name: m, alias: m, service-tier: turbo}\n",
+		} {
+			if _, err := decodeConfig([]byte(yml)); err == nil {
+				t.Fatalf("accepted %q", yml)
+			}
+		}
+	})
+	t.Run("schema lists the field", func(t *testing.T) {
+		for _, field := range configFields() {
+			if field.Name == "service-tier" {
+				if field.Type != pluginapi.ConfigFieldTypeEnum || len(field.EnumValues) != 3 {
+					t.Fatalf("field = %+v", field)
+				}
+				return
+			}
+		}
+		t.Fatal("service-tier missing from the schema")
 	})
 }
