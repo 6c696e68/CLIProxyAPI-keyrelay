@@ -764,3 +764,97 @@ func (h *mockPluginUsageHost) ExecutePluginExecutorStream(ctx context.Context, p
 	h.lastOptions = opts
 	return h.streamResult, nil
 }
+
+func runRoutedPluginStream(t *testing.T, pluginID, protocol string, payloads []string) usage.Record {
+	t.Helper()
+	plugin := newCapturePluginExecutorUsagePlugin(pluginID)
+	registerUsagePluginForTest(t, "test-"+pluginID, plugin)
+	chunks := make(chan coreexecutor.StreamChunk, len(payloads))
+	for _, payload := range payloads {
+		chunks <- coreexecutor.StreamChunk{Payload: []byte(payload)}
+	}
+	close(chunks)
+	mockHost := &mockPluginUsageHost{streamResult: &coreexecutor.StreamResult{Chunks: chunks}}
+	mockHost.hasRouters = true
+	mockHost.route = func(ctx context.Context, req pluginapi.ModelRouteRequest) (pluginapi.ModelRouteResponse, bool) {
+		return pluginapi.ModelRouteResponse{Handled: true, TargetKind: pluginapi.ModelRouteTargetExecutor, Target: pluginID}, true
+	}
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, nil)
+	handler.SetModelRouterHost(mockHost)
+	dataChan, _, errChan := handler.ExecuteStreamWithAuthManager(context.Background(), protocol, "vippro/gpt-6-astra", []byte(`{"model":"vippro/gpt-6-astra","stream":true}`), "")
+	for range dataChan {
+	}
+	for err := range errChan {
+		if err != nil {
+			t.Fatalf("stream error = %+v", err)
+		}
+	}
+	return plugin.waitRecord(t)
+}
+
+func TestHandlerPluginExecutorStreamResponsesSSERecordsTTFTAndSplitUsage(t *testing.T) {
+	completed := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"1 2 3\"}]}],\"usage\":{\"input_tokens\":120,\"output_tokens\":7,\"total_tokens\":127}}}\n\n"
+	cut := len(completed) / 2
+	record := runRoutedPluginStream(t, "ttft-responses-plugin", "openai-response", []string{
+		": keep-alive\n\n",
+		"event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"service_tier\":\"auto\"}}\n\n",
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"1 2 3\"}\n\n",
+		completed[:cut],
+		completed[cut:],
+	})
+	if record.TTFT <= 0 {
+		t.Fatalf("record.TTFT = %v, want > 0", record.TTFT)
+	}
+	if record.Failed {
+		t.Fatalf("record.Failed = true for a completed stream")
+	}
+	if record.Detail.InputTokens != 120 || record.Detail.OutputTokens != 7 || record.Detail.TotalTokens != 127 {
+		t.Fatalf("record.Detail = %+v, want input=120 output=7 total=127", record.Detail)
+	}
+}
+
+func TestHandlerPluginExecutorStreamResponsesErrorEventIsFailure(t *testing.T) {
+	record := runRoutedPluginStream(t, "error-responses-plugin", "openai-response", []string{
+		": keep-alive\n\n",
+		"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\",\"plan_type\":\"plus\"},\"sequence_number\":0}\n\n",
+	})
+	if !record.Failed {
+		t.Fatalf("record.Failed = false, want true for an in-stream usage_limit_reached error")
+	}
+	if record.Detail.OutputTokens != 0 {
+		t.Fatalf("record.Detail = %+v, want no tokens", record.Detail)
+	}
+}
+
+func TestHandlerPluginExecutorStreamResponsesFailedEventIsFailure(t *testing.T) {
+	record := runRoutedPluginStream(t, "failed-responses-plugin", "openai-response", []string{
+		"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_2\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
+	})
+	if !record.Failed {
+		t.Fatalf("record.Failed = false, want true for response.failed")
+	}
+}
+
+func TestHandlerPluginExecutorStreamChatRecordsTTFT(t *testing.T) {
+	record := runRoutedPluginStream(t, "ttft-chat-plugin", "openai", []string{
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: {\"choices\":[],\"usage\":{\"prompt_tokens\":15,\"completion_tokens\":25,\"total_tokens\":40}}\n\n",
+		"data: [DONE]\n\n",
+	})
+	if record.TTFT <= 0 || record.Failed {
+		t.Fatalf("record TTFT=%v failed=%v", record.TTFT, record.Failed)
+	}
+	if record.Detail.OutputTokens != 25 {
+		t.Fatalf("record.Detail = %+v", record.Detail)
+	}
+}
+
+func TestHandlerPluginExecutorStreamChatErrorChunkIsFailure(t *testing.T) {
+	record := runRoutedPluginStream(t, "error-chat-plugin", "openai", []string{
+		"data: {\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"The usage limit has been reached\"}}\n\n",
+		"data: [DONE]\n\n",
+	})
+	if !record.Failed {
+		t.Fatalf("record.Failed = false, want true for a chat error chunk")
+	}
+}

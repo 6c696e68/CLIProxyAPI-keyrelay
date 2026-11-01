@@ -105,16 +105,27 @@ func ObservePluginExecutorStreamTTFT(protocol string, reporter *UsageReporter, p
 		return
 	}
 	reporter.RecordFirstPacket()
+	observe := ObserveChatTokenEvent
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "claude":
-		ObserveClaudeTokenEvent(reporter, payload)
+		observe = ObserveClaudeTokenEvent
 	case "gemini", "antigravity", "interactions", "interactions-response":
-		ObserveGeminiTokenEvent(reporter, payload)
+		observe = ObserveGeminiTokenEvent
 	case "codex", "openai-response":
-		ObserveResponsesTokenEvent(reporter, payload)
-	default:
-		ObserveChatTokenEvent(reporter, payload)
+		observe = ObserveResponsesTokenEvent
 	}
+	observe(reporter, payload)
+	if reporter.IsTTFTSet() || bytes.IndexByte(payload, '\n') < 0 {
+		return
+	}
+	// A plugin chunk is often raw SSE holding several events, each written as
+	// "event: ..." plus "data: {...}". The detectors read one payload, so also
+	// check every line until the first token event sets TTFT.
+	IterateStreamLines(payload, func(line []byte) {
+		if !reporter.IsTTFTSet() {
+			observe(reporter, line)
+		}
+	})
 }
 
 func parseClaudePayloadUsage(payload []byte) usage.Detail {

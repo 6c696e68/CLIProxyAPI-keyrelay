@@ -68,6 +68,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
 		reporter.SetTranslatedReasoningEffort(req.Payload, entryProtocol)
+		reporter.StartResponseTTFT()
 	}
 	streamResult, errStream := host.ExecutePluginExecutorStream(execCtx, executorPluginID, req, opts)
 	if errStream != nil {
@@ -150,9 +151,20 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		completionOutcome := pluginapi.RequestCompletionSucceeded
 		completionStatus := http.StatusOK
 		var completionErr error
-		var streamUsage helps.StreamUsageBuffer
+		observer := newPluginStreamObserver(responseProtocol, reporter)
+		streamUsage := &observer.usage
 		defer func() {
+			observer.flush()
 			completionOutcome, completionStatus, completionErr = streamDeliveryCompletion(ctx, completionOutcome, completionStatus, completionErr)
+			// An upstream error event arrives inside an HTTP 200 stream. Record the
+			// turn as failed so it is not counted as a success with zero tokens.
+			if completionOutcome == pluginapi.RequestCompletionSucceeded || completionOutcome == pluginapi.RequestCompletionCanceled {
+				if failure, failed := observer.streamFailure(); failed {
+					completionOutcome = pluginapi.RequestCompletionFailed
+					completionStatus = failure.StatusCode
+					completionErr = failure.Error
+				}
+			}
 			lifecycle.complete(completionOutcome, completionStatus, completionErr)
 			if reporter != nil && !nestedTracker.hasNestedExecution() {
 				if completionOutcome != pluginapi.RequestCompletionSucceeded && completionErr != nil {
@@ -221,7 +233,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 			if len(chunk.Payload) == 0 {
 				continue
 			}
-			observePluginExecutorStreamUsage(responseProtocol, chunk.Payload, &streamUsage)
+			observer.observe(chunk.Payload)
 			payload := cloneBytes(chunk.Payload)
 			if streamInterceptorsActive {
 				chunkReq := pluginapi.StreamChunkInterceptRequest{
