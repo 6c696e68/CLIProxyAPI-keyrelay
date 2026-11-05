@@ -2178,7 +2178,7 @@ func hasDisabledInvalidGrantFailure(auth *Auth) bool {
 	if !isDisabled {
 		return false
 	}
-	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code)) {
+	if auth.LastError != nil && (isInvalidGrantResultError(auth.LastError) || isInvalidGrantErrorMessage(auth.LastError.Message) || isInvalidGrantErrorMessage(auth.LastError.Code) || isRevokedRefreshTokenResultError(auth.LastError)) {
 		return true
 	}
 	return false
@@ -2304,6 +2304,42 @@ func isInvalidGrantResultError(err *Error) bool {
 		return false
 	}
 	if !isInvalidGrantErrorMessage(err.Code) && !isInvalidGrantErrorMessage(err.Message) {
+		return false
+	}
+	status := statusCodeFromResult(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
+}
+
+func isRevokedRefreshTokenErrorMessage(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "refresh_token_invalidated") || strings.Contains(lower, "refresh_token_expired")
+}
+
+// isRevokedRefreshTokenError reports whether the refresh failed because the
+// refresh token was permanently invalidated upstream. Such a credential cannot
+// recover without a new login and must not be refreshed again.
+func isRevokedRefreshTokenError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if !isRevokedRefreshTokenErrorMessage(err.Error()) {
+		return false
+	}
+	status := statusCodeFromError(err)
+	if status == http.StatusBadRequest || status == http.StatusUnauthorized || status == 0 {
+		return true
+	}
+	return false
+}
+
+func isRevokedRefreshTokenResultError(err *Error) bool {
+	if err == nil {
+		return false
+	}
+	if !isRevokedRefreshTokenErrorMessage(err.Code) && !isRevokedRefreshTokenErrorMessage(err.Message) {
 		return false
 	}
 	status := statusCodeFromResult(err)

@@ -993,6 +993,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		shouldReschedule := false
 		isDisabled := false
 		shouldUnschedule := false
+		var revokedAuth *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
@@ -1001,6 +1002,36 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			}
 			if hasUnauthorizedAuthFailure(current) && !forceRefresh {
 				m.mu.Unlock()
+				return nil, err
+			}
+			if isRevokedRefreshTokenError(err) {
+				// Upstream permanently invalidated the refresh token. Disable the
+				// credential so it is neither selected nor refreshed until a new login.
+				current.Generation++
+				current.UpdatedAt = now
+				current.Disabled = true
+				current.Unavailable = true
+				current.Status = StatusDisabled
+				current.NextRefreshAfter = time.Time{}
+				current.NextRetryAfter = time.Time{}
+				current.RefreshFailures = 0
+				if current.Metadata == nil {
+					current.Metadata = make(map[string]any)
+				}
+				current.Metadata["disabled"] = true
+				current.StatusMessage = "disabled (refresh token invalidated)"
+				current.LastError = &Error{Code: "refresh_token_invalidated", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				m.auths[id] = current
+				if m.scheduler != nil {
+					m.scheduler.upsertAuth(current.Clone())
+				}
+				revokedAuth = current.Clone()
+				m.mu.Unlock()
+				m.queueRefreshUnschedule(id)
+				if errPersist := m.persist(context.WithoutCancel(ctx), revokedAuth); errPersist != nil {
+					log.Warnf("persist disabled revoked auth %s (%s) failed: %v", revokedAuth.Provider, revokedAuth.ID, errPersist)
+				}
+				log.Warnf("refresh token rejected for %s (%s), auth disabled: %s", revokedAuth.Provider, revokedAuth.ID, safeErrorDiagnosticForLog(err))
 				return nil, err
 			}
 			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
