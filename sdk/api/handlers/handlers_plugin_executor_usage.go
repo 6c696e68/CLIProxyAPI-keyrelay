@@ -152,3 +152,7 @@ func (o *pluginStreamObserver) streamFailure() (*interfaces.ErrorMessage, bool) 
 	}
 	return o.failure, true
 }
+
+func observePluginExecutorStreamTTFT(protocol string, reporter *helps.UsageReporter, payload []byte) {
+	helps.ObservePluginExecutorStreamTTFT(protocol, reporter, payload)
+}

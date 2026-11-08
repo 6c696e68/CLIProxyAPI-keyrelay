@@ -243,34 +243,81 @@ func TestClusterBalanceMalformedRegistrationEndsSubscriberBeforeReady(t *testing
 	}
 }
 
-func TestCancelableTransportClosesSockets(t *testing.T) {
-	transport := &cancelableTransport{}
-	tracked, trackedPeer := net.Pipe()
-	defer func() { _ = trackedPeer.Close() }()
-	if errTrack := transport.track(tracked); errTrack != nil {
-		t.Fatalf("track before cancel: %v", errTrack)
-	}
-	readDone := make(chan error, 1)
-	go func() {
-		_, errRead := tracked.Read(make([]byte, 1))
-		readDone <- errRead
-	}()
-	transport.cancel()
-	select {
-	case errRead := <-readDone:
-		if errRead == nil {
-			t.Fatal("blocked read returned no error after cancel")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("cancel did not unblock a read without deadline")
-	}
+type blockingOuterCloseConn struct {
+	net.Conn
+	enteredClose     chan struct{}
+	enterOnce        sync.Once
+	underlyingClosed chan struct{}
+}
 
-	late, latePeer := net.Pipe()
-	defer func() { _ = latePeer.Close() }()
-	if errTrack := transport.track(late); !errors.Is(errTrack, context.Canceled) {
-		t.Fatalf("track after cancel error = %v, want context.Canceled", errTrack)
+func (c *blockingOuterCloseConn) NetConn() net.Conn {
+	return c.Conn
+}
+
+func (c *blockingOuterCloseConn) Close() error {
+	if c.enteredClose != nil {
+		c.enterOnce.Do(func() { close(c.enteredClose) })
 	}
-	if _, errWrite := late.Write([]byte{1}); errWrite == nil {
-		t.Fatal("socket dialed after cancel was not closed")
+	<-c.underlyingClosed
+	return c.Conn.Close()
+}
+
+type trackingUnderlyingConn struct {
+	net.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *trackingUnderlyingConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return c.Conn.Close()
+}
+
+func TestCancelableConnClosesUnderlyingTransportWhenCloseRacesCancel(t *testing.T) {
+	for _, mode := range []string{"pre-canceled", "after-wrap", "during-close"} {
+		t.Run(mode, func(t *testing.T) {
+			for range 32 {
+				local, peer := net.Pipe()
+				t.Cleanup(func() {
+					_ = local.Close()
+					_ = peer.Close()
+				})
+				underlying := &trackingUnderlyingConn{Conn: local, closed: make(chan struct{})}
+				enteredClose := make(chan struct{})
+				outer := &blockingOuterCloseConn{
+					Conn:             underlying,
+					enteredClose:     enteredClose,
+					underlyingClosed: underlying.closed,
+				}
+
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if mode == "pre-canceled" {
+					cancel()
+				}
+				wrapped := newPluginSyncCancelableConn(ctx, outer)
+				if mode == "after-wrap" {
+					cancel()
+				}
+
+				done := make(chan error, 1)
+				go func() {
+					done <- wrapped.Close()
+				}()
+				if mode == "during-close" {
+					<-enteredClose
+					cancel()
+				}
+				select {
+				case errClose := <-done:
+					if errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+						t.Fatalf("close error = %v", errClose)
+					}
+				case <-time.After(500 * time.Millisecond):
+					_ = underlying.Close()
+					t.Fatal("Close blocked because underlying transport was not closed before outer Close")
+				}
+			}
+		})
 	}
 }

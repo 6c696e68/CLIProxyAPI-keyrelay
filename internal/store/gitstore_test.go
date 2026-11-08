@@ -1798,13 +1798,21 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	if errOpen != nil {
 		t.Fatalf("open repository before corruption: %v", errOpen)
 	}
+	repoClosed := false
 	defer func() {
-		if errClose := repo.Close(); errClose != nil {
-			t.Errorf("close corrupted repository: %v", errClose)
+		if !repoClosed {
+			if errClose := repo.Close(); errClose != nil {
+				t.Errorf("close repository before corruption: %v", errClose)
+			}
 		}
 	}()
 	if errRepack := repo.RepackObjects(&git.RepackConfig{}); errRepack != nil {
 		t.Fatalf("repack repository objects: %v", errRepack)
+	}
+	errClose := repo.Close()
+	repoClosed = true
+	if errClose != nil {
+		t.Fatalf("close repacked repository: %v", errClose)
 	}
 	objectsDir := filepath.Join(repoDir, ".git", "objects")
 	objectEntries, errReadDir := os.ReadDir(objectsDir)
@@ -1832,16 +1840,16 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 	}
 	// Verify with a fresh handle, as production does: since go-git v6 alpha.5 the handle
 	// that ran the repack keeps objects and pack state in memory and misses the corruption.
-	verifyRepo, errVerifyOpen := git.PlainOpen(repoDir)
-	if errVerifyOpen != nil {
-		t.Fatalf("open repository after corruption: %v", errVerifyOpen)
+	corruptedRepo, errOpenCorrupted := git.PlainOpen(repoDir)
+	if errOpenCorrupted != nil {
+		t.Fatalf("open corrupted repository: %v", errOpenCorrupted)
 	}
 	defer func() {
-		if errClose := verifyRepo.Close(); errClose != nil {
-			t.Errorf("close verification repository: %v", errClose)
+		if errCloseCorrupted := corruptedRepo.Close(); errCloseCorrupted != nil {
+			t.Errorf("close corrupted repository: %v", errCloseCorrupted)
 		}
 	}()
-	if errVerify := verifyRepositoryHead(verifyRepo); !isRepositoryCorruptionError(errVerify) {
+	if errVerify := verifyRepositoryHead(corruptedRepo); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
 	}
 }
