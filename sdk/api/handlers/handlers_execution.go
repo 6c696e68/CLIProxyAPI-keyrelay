@@ -48,8 +48,7 @@ func (h *BaseAPIHandler) executeWithAuthManagerFormats(ctx context.Context, entr
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
-	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, mappingResult, gateErr := h.resolveKeyShopRequestModel(ctx, modelName, rawJSON)
 	if gateErr != nil {
 		h.recordKeyShopGateDenial(ctx, entryProtocol, modelName, false, gateErr)
 		return nil, nil, gateErr
@@ -135,8 +134,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 func (h *BaseAPIHandler) executeCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, execOptions modelExecutionOptions) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	originalRequestedModel := modelName
-	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, mappingResult, gateErr := h.resolveKeyShopRequestModel(ctx, modelName, rawJSON)
 	if gateErr != nil {
 		h.recordKeyShopGateDenial(ctx, handlerType, modelName, false, gateErr)
 		return nil, nil, gateErr
@@ -255,7 +253,7 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(execCtx, lifecycle.requestID(), responseProtocol, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
-	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(originalRequestedModel))
+	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(execCtx, originalRequestedModel))
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }
@@ -293,7 +291,7 @@ func (h *BaseAPIHandler) countWithPluginExecutor(ctx context.Context, handlerTyp
 	passthroughHeaders := executionPassthroughHeaders(h.CurrentConfig(), execOptions.InternalSource)
 	responseHeaders := downstreamHeadersFromExecutor(rawResponseHeaders, passthroughHeaders)
 	body, responseHeaders := h.applyResponseInterceptors(ctx, lifecycle.requestID(), handlerType, modelName, originalRequestedModel, opts, rawResponseHeaders, responseHeaders, opts.OriginalRequest, req.Payload, resp.Payload, http.StatusOK, execOptions.SkipInterceptorPluginID, passthroughHeaders)
-	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(originalRequestedModel))
+	body = rewriteMappedResponseBody(body, h.mappingResultForOriginal(ctx, originalRequestedModel))
 	lifecycle.complete(pluginapi.RequestCompletionSucceeded, http.StatusOK, nil)
 	return body, responseHeaders, nil
 }

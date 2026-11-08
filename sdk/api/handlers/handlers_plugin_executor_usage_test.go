@@ -858,3 +858,35 @@ func TestHandlerPluginExecutorStreamChatErrorChunkIsFailure(t *testing.T) {
 		t.Fatalf("record.Failed = false, want true for a chat error chunk")
 	}
 }
+
+// A chat-completions plugin executor (ch-relay-vippro) emits one bare JSON event
+// per chunk and leaves SSE framing to the client writer, so its chunks carry no
+// "data:" prefix and no newline. The observer must treat each complete event as
+// its own line; buffering them glued the whole stream into one invalid line and
+// silently dropped token usage.
+func TestHandlerPluginExecutorStreamChatBareJSONChunksKeepUsage(t *testing.T) {
+	record := runRoutedPluginStream(t, "bare-chat-plugin", "openai", []string{
+		`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":null}]}`,
+		`{"object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}`,
+		`{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":5,"total_tokens":12}}`,
+	})
+	if record.Failed {
+		t.Fatalf("record.Failed = true, want false")
+	}
+	if record.Detail.InputTokens != 7 || record.Detail.OutputTokens != 5 || record.Detail.TotalTokens != 12 {
+		t.Fatalf("record.Detail = %+v, want prompt=7 completion=5 total=12", record.Detail)
+	}
+}
+
+// The same bare JSON event can be split across two chunks by transport framing.
+func TestHandlerPluginExecutorStreamChatBareJSONSplitEventKeepsUsage(t *testing.T) {
+	full := `{"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}`
+	cut := len(full) / 2
+	record := runRoutedPluginStream(t, "bare-split-chat-plugin", "openai", []string{
+		full[:cut],
+		full[cut:],
+	})
+	if record.Detail.InputTokens != 9 || record.Detail.OutputTokens != 4 || record.Detail.TotalTokens != 13 {
+		t.Fatalf("record.Detail = %+v, want prompt=9 completion=4 total=13", record.Detail)
+	}
+}

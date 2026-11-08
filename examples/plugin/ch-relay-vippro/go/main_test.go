@@ -5069,3 +5069,196 @@ func TestServiceTierConfig(t *testing.T) {
 		t.Fatal("service-tier missing from the schema")
 	})
 }
+
+func TestFallbackBaseURLConfig(t *testing.T) {
+	const models = "models:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+	cfg, err := decodeConfig([]byte("enabled: true\n" + models))
+	if err != nil {
+		t.Fatalf("config without the key: %v", err)
+	}
+	if cfg.FallbackBaseURL != "" {
+		t.Fatalf("default fallback-base-url = %q", cfg.FallbackBaseURL)
+	}
+	cfg, err = decodeConfig([]byte("enabled: true\nfallback-base-url: \"  \"\n" + models))
+	if err != nil {
+		t.Fatalf("empty fallback: %v", err)
+	}
+	if cfg.FallbackBaseURL != "" {
+		t.Fatalf("empty fallback-base-url = %q", cfg.FallbackBaseURL)
+	}
+	cfg, err = decodeConfig([]byte("enabled: true\nbase-url: https://main.example/v1\nfallback-base-url: https://fallback.example/v1/\n" + models))
+	if err != nil {
+		t.Fatalf("valid fallback: %v", err)
+	}
+	if cfg.FallbackBaseURL != "https://fallback.example/v1" {
+		t.Fatalf("fallback-base-url = %q", cfg.FallbackBaseURL)
+	}
+	cfg, err = decodeConfig([]byte("enabled: true\nbase-url: https://main.example/v1/\nfallback-base-url: https://main.example/v1\n" + models))
+	if err != nil {
+		t.Fatalf("equal fallback: %v", err)
+	}
+	if cfg.FallbackBaseURL != "" {
+		t.Fatalf("equal fallback was kept: %q", cfg.FallbackBaseURL)
+	}
+	for _, bad := range []string{
+		"fallback-base-url: http://fallback.example/v1\n",
+		"fallback-base-url: https://user:pass@fallback.example/v1\n",
+		"fallback-base-url: https://fallback.example/v1?q=1\n",
+		"fallback-base-url: ftp://fallback.example/v1\n",
+	} {
+		_, err := decodeConfig([]byte(bad))
+		if err == nil || !strings.Contains(err.Error(), "invalid fallback-base-url") {
+			t.Fatalf("accepted %q: %v", bad, err)
+		}
+	}
+	for _, field := range configFields() {
+		if field.Name == "fallback-base-url" {
+			if field.Type != pluginapi.ConfigFieldTypeString {
+				t.Fatalf("field = %+v", field)
+			}
+			return
+		}
+	}
+	t.Fatal("fallback-base-url missing from the schema")
+}
+
+func TestFallbackBaseURL(t *testing.T) {
+	const model = "models:\n  - {name: gpt-5.4, alias: gpt-5.4}\n"
+	const configured = "enabled: true\nbase-url: https://main.example/v1\nfallback-base-url: https://fallback.example/v1\nplus-preference: off\nrequest-retry: 0\n"
+	exec := func(t *testing.T) rpcEnv {
+		t.Helper()
+		env, _ := callEnv(t, pluginabi.MethodExecutorExecute, execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`)))
+		return env
+	}
+
+	t.Run("empty fallback sends once", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusServiceUnavailable, body: []byte(`{"error":"unavailable"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, "enabled: true\nplus-preference: off\nrequest-retry: 0\n"+model)
+		env := exec(t)
+		if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusServiceUnavailable {
+			t.Fatalf("503 = %+v", env.Error)
+		}
+		if calls := f.httpCalls(t); len(calls) != 1 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+	})
+
+	t.Run("503 falls back to the second base", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusServiceUnavailable, body: []byte(`{"error":"unavailable"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, configured+model)
+		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 2 {
+			t.Fatalf("calls = %d", len(calls))
+		}
+		if calls[0].URL != "https://main.example/v1/chat/completions" || !strings.HasPrefix(calls[1].URL, "https://fallback.example/v1/") {
+			t.Fatalf("urls = %s %s", calls[0].URL, calls[1].URL)
+		}
+		if bearer(t, calls[0]) != "Bearer "+tokenA || bearer(t, calls[1]) != "Bearer "+tokenA {
+			t.Fatalf("bearers = %s %s", bearer(t, calls[0]), bearer(t, calls[1]))
+		}
+		if !bytes.Equal(calls[0].Body, calls[1].Body) {
+			t.Fatalf("body changed: %s then %s", calls[0].Body, calls[1].Body)
+		}
+	})
+
+	t.Run("404 falls back", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{{status: http.StatusNotFound, body: []byte(`{"error":"not found"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustConfigure(t, configured+model)
+		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || !strings.HasPrefix(calls[1].URL, "https://fallback.example/v1/") {
+			t.Fatalf("urls = %#v", calls)
+		}
+	})
+
+	t.Run("transport error falls back", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		mustConfigure(t, configured+model)
+		previous := hostCallOverride
+		var mu sync.Mutex
+		attempts := 0
+		hostCallOverride = func(method string, payload []byte) (json.RawMessage, error) {
+			if method == pluginabi.MethodHostHTTPDo {
+				mu.Lock()
+				attempts++
+				n := attempts
+				mu.Unlock()
+				if n == 1 {
+					return nil, errString("connection refused")
+				}
+			}
+			return previous(method, payload)
+		}
+		f.scripts = []httpScript{{status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+		mustExec(t, "openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		calls := f.httpCalls(t)
+		if len(calls) != 1 || !strings.HasPrefix(calls[0].URL, "https://fallback.example/v1/") {
+			t.Fatalf("fallback calls = %#v", calls)
+		}
+	})
+
+	t.Run("client errors and 429 do not fall back", func(t *testing.T) {
+		for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusTooManyRequests} {
+			f := setup(t)
+			f.codex("1", tokenA, "plus", nil)
+			f.scripts = []httpScript{{status: status, body: []byte(`{"error":"no"}`)}, {status: http.StatusOK, body: []byte(`{"ok":true}`)}}
+			mustConfigure(t, configured+model)
+			env := exec(t)
+			if env.OK || env.Error == nil || env.Error.HTTPStatus != status {
+				t.Fatalf("%d = %+v", status, env.Error)
+			}
+			if calls := f.httpCalls(t); len(calls) != 1 || !strings.HasPrefix(calls[0].URL, "https://main.example/v1/") {
+				t.Fatalf("%d calls = %#v", status, calls)
+			}
+		}
+	})
+
+	t.Run("stream 502 falls back and closes the primary stream", func(t *testing.T) {
+		f := setup(t)
+		f.codex("1", tokenA, "plus", nil)
+		f.scripts = []httpScript{
+			{status: http.StatusBadGateway, body: []byte(`{"error":"bad gateway"}`), streamID: "http-primary"},
+			{status: http.StatusOK, streamID: "http-fallback", chunks: []readChunk{{payload: []byte("data: {\"ok\":true}\n"), done: true}}},
+		}
+		mustConfigure(t, configured+model)
+		req := execReq("openai", "gpt-5.4", []byte(`{"model":"gpt-5.4"}`))
+		req.StreamID = "exec-fallback"
+		f.streamFinished = make(chan struct{})
+		callOK(t, pluginabi.MethodExecutorExecuteStream, req)
+		waitCh(t, f.streamFinished, "fallback stream")
+		calls := f.httpCalls(t)
+		if len(calls) != 2 || calls[0].RPC != pluginabi.MethodHostHTTPDoStream || calls[1].RPC != pluginabi.MethodHostHTTPDoStream {
+			t.Fatalf("calls = %#v", calls)
+		}
+		if !strings.HasPrefix(calls[0].URL, "https://main.example/v1/") || !strings.HasPrefix(calls[1].URL, "https://fallback.example/v1/") {
+			t.Fatalf("urls = %s %s", calls[0].URL, calls[1].URL)
+		}
+		if closed := streamCloseIDs(t, f); closed["http-primary"] != 1 {
+			t.Fatalf("primary stream close = %#v", closed)
+		}
+	})
+}
+
+func streamCloseIDs(t *testing.T, f *fakeHost) map[string]int {
+	t.Helper()
+	closed := make(map[string]int)
+	for _, call := range f.snapshot() {
+		if call.method != pluginabi.MethodHostHTTPStreamClose {
+			continue
+		}
+		var ref hostStreamRef
+		if err := json.Unmarshal(call.payload, &ref); err != nil {
+			t.Fatalf("decode stream close: %v", err)
+		}
+		closed[ref.StreamID]++
+	}
+	return closed
+}

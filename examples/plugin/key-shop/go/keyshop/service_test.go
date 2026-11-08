@@ -427,7 +427,7 @@ func TestPagesShowRequestLimitAccounting(t *testing.T) {
 	}
 	for _, snippet := range []string{
 		"Request limit",
-		"Request limit reached. Ask the administrator to raise the limit.",
+		"Request limit reached. Ask the administrator to raise it.",
 		"RequestQuotaUsed",
 		"RequestSuccessCount",
 		"RequestFailureCount",

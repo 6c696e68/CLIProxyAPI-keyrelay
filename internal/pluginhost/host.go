@@ -300,6 +300,7 @@ func (h *Host) KeyShopResolveModel(ctx context.Context, secret, model, bodyModel
 		Result struct {
 			Mode    string `json:"Mode"`
 			Allowed bool   `json:"Allowed"`
+			Limited bool   `json:"Limited"`
 			Model   string `json:"Model"`
 		} `json:"result"`
 	}
@@ -314,6 +315,7 @@ func (h *Host) KeyShopResolveModel(ctx context.Context, secret, model, bodyModel
 		Loaded:  true,
 		Mode:    mode,
 		Allowed: env.Result.Allowed,
+		Limited: env.Result.Limited,
 		Model:   env.Result.Model,
 	}, nil
 }

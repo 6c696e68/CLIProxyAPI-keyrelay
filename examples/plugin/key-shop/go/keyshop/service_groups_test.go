@@ -409,3 +409,35 @@ func TestResolveModelMatrix(t *testing.T) {
 		t.Fatalf("operator key: %+v", got)
 	}
 }
+
+func TestResolveModelReportsLimitedGroup(t *testing.T) {
+	svc := testService(t)
+	group := createGroupVia(t, svc, "limited", "vippro/gpt-6-sol")
+	_, limitedSecret := createKeyIn(t, svc, group)
+	_, allSecret := createKeyIn(t, svc, AllModelsGroupID)
+	_, legacySecret, err := svc.store.Create(CreateInput{Label: "legacy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolve := func(secret, model string) resolveModelResult {
+		t.Helper()
+		raw := call(t, svc, "keyshop.resolve_model", string(mustJSON(t, map[string]string{
+			"Secret": secret, "Model": model, "BodyModel": model,
+		})))
+		var res resolveModelResult
+		decodeResult(t, raw, &res)
+		return res
+	}
+	if got := resolve(allSecret, "anything-at-all"); got.Limited || !got.Allowed || got.Mode != "group" {
+		t.Fatalf("all-models group must not report Limited: %+v", got)
+	}
+	if got := resolve(limitedSecret, "vippro/gpt-6-sol"); !got.Limited || !got.Allowed || got.Mode != "group" {
+		t.Fatalf("limited group must report Limited: %+v", got)
+	}
+	if got := resolve(limitedSecret, "not-in-group"); !got.Limited || got.Allowed || got.Mode != "group" {
+		t.Fatalf("limited group denial must report Limited: %+v", got)
+	}
+	if got := resolve(legacySecret, "vippro/gpt-6-sol"); got.Limited || got.Mode != "legacy" {
+		t.Fatalf("legacy key must not report Limited: %+v", got)
+	}
+}

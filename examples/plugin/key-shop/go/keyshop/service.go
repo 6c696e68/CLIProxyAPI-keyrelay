@@ -280,6 +280,9 @@ func groupAllowsAny(group Group, candidates ...string) bool {
 type resolveModelResult struct {
 	Mode    string `json:"Mode"`
 	Allowed bool   `json:"Allowed"`
+	// Limited is a positive signal that the key's group has a model list.
+	// An old host that ignores it keeps the legacy mapped path.
+	Limited bool   `json:"Limited"`
 	Model   string `json:"Model"`
 }
 
@@ -325,16 +328,16 @@ func (s *Service) resolveModel(payload []byte) (resolveModelResult, error) {
 	}
 	rewritten, okMatch := group.Resolve(requested)
 	if !okMatch {
-		return resolveModelResult{Mode: "group", Allowed: false}, nil
+		return resolveModelResult{Mode: "group", Allowed: false, Limited: true}, nil
 	}
 	body := strings.TrimSpace(req.BodyModel)
 	if body != "" && !strings.EqualFold(body, requested) {
 		bodyRewritten, bodyOK := group.Resolve(body)
 		if !bodyOK || bodyRewritten != rewritten {
-			return resolveModelResult{Mode: "group", Allowed: false}, nil
+			return resolveModelResult{Mode: "group", Allowed: false, Limited: true}, nil
 		}
 	}
-	return resolveModelResult{Mode: "group", Allowed: true, Model: rewritten}, nil
+	return resolveModelResult{Mode: "group", Allowed: true, Limited: true, Model: rewritten}, nil
 }
 
 type listModelsEntry struct {

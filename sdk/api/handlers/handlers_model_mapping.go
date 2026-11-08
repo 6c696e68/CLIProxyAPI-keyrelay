@@ -8,6 +8,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
+	"golang.org/x/net/context"
 )
 
 func (h *BaseAPIHandler) applyConfiguredModelMapping(modelName string, rawJSON []byte) (string, []byte, modelmapping.Result) {
@@ -46,7 +47,12 @@ func rewriteMappedStreamPayload(payload []byte, result modelmapping.Result) []by
 	return coreauth.RewriteResponseModel(payload, result.Original)
 }
 
-func (h *BaseAPIHandler) mappingResultForOriginal(originalRequestedModel string) modelmapping.Result {
+func (h *BaseAPIHandler) mappingResultForOriginal(ctx context.Context, originalRequestedModel string) modelmapping.Result {
+	// The authoritative key-shop group path never ran the global mapping, so there
+	// is nothing to echo back and the raw client model must stay in the response.
+	if keyShopAuthoritativeFromContext(ctx) {
+		return modelmapping.Result{}
+	}
 	_, _, result := h.applyConfiguredModelMapping(originalRequestedModel, nil)
 	return result
 }

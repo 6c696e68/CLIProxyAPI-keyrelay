@@ -51,6 +51,14 @@ func (o *pluginStreamObserver) observe(chunk []byte) {
 		o.observeLine(o.carry[:idx+1])
 		o.carry = o.carry[idx+1:]
 	}
+	// A chat-completions plugin executor emits one bare JSON event per chunk and
+	// leaves the SSE framing to the client writer, so those chunks never carry a
+	// newline. Flush such an event as its own line; buffering it would glue the
+	// whole stream into one invalid line and lose the usage record.
+	if trimmed := bytes.TrimSpace(o.carry); len(trimmed) > 0 && gjson.ValidBytes(trimmed) {
+		o.observeLine(o.carry)
+		o.carry = nil
+	}
 	if len(o.carry) == 0 {
 		o.carry = nil
 	}

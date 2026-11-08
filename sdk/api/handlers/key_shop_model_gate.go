@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/modelmapping"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -26,10 +27,13 @@ type keyShopPolicySource interface {
 
 // KeyShopResolveResult is the key-shop resolve_model response.
 // Loaded is false when the plugin is not loaded; the caller keeps the legacy YAML policy.
+// Limited is true only when the key's group has a model list. A missing field from an
+// old plugin keeps the legacy mapped path, so the host never guesses all-models.
 type KeyShopResolveResult struct {
 	Loaded  bool
 	Mode    string
 	Allowed bool
+	Limited bool
 	Model   string
 }
 
@@ -53,11 +57,12 @@ type keyShopGateStateKey struct{}
 // The pointer is stored on the context so PrepareStreamModelRoute, StreamRouteModel,
 // and execution share it. Denial is recorded once, by the execution path.
 type keyShopGateState struct {
-	mu        sync.Mutex
-	evaluated bool
-	secret    string
-	decision  keyShopGateDecision
-	noted     bool
+	mu            sync.Mutex
+	evaluated     bool
+	authoritative bool
+	secret        string
+	decision      keyShopGateDecision
+	noted         bool
 }
 
 type keyShopGateDecision struct {
@@ -100,6 +105,120 @@ func (h *BaseAPIHandler) applyKeyShopModelGate(ctx context.Context, modelName st
 	return ctx, nextName, nextBody, errMsg
 }
 
+// resolveKeyShopRequestModel applies the key-shop group decision before the global
+// model mapping for a grouped ck_ key. A limited group owns the client-visible name,
+// so routing.model-mapping must not rewrite it. Legacy keys, all-models groups,
+// groups that do not admit the raw name, and a missing plugin keep the legacy order:
+// mapping first, then the gate on the mapped name. The returned mapping result is
+// zero on the authoritative group path so response echo keeps the client model.
+func (h *BaseAPIHandler) resolveKeyShopRequestModel(ctx context.Context, modelName string, rawJSON []byte) (context.Context, string, []byte, modelmapping.Result, *interfaces.ErrorMessage) {
+	secret := keyShopSecret(headersFromContext(ctx))
+	if !strings.HasPrefix(secret, "ck_") {
+		mappedName, mappedBody, result := h.applyConfiguredModelMapping(modelName, rawJSON)
+		return ctx, mappedName, mappedBody, result, nil
+	}
+	state, ctx := keyShopGateStateFrom(ctx)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	var probe keyShopRawResolution
+	if !state.evaluated {
+		state.secret = secret
+		probe = h.resolveKeyShopRaw(ctx, secret, modelName, rawJSON)
+		if decision, authoritative := probe.authoritative(modelName, rawJSON); authoritative {
+			state.decision = decision
+			state.authoritative = true
+			state.evaluated = true
+			nextName, nextBody, errMsg := decision.apply(modelName, rawJSON)
+			return ctx, nextName, nextBody, modelmapping.Result{}, errMsg
+		}
+	}
+	if state.evaluated && state.authoritative {
+		nextName, nextBody, errMsg := state.decision.apply(modelName, rawJSON)
+		return ctx, nextName, nextBody, modelmapping.Result{}, errMsg
+	}
+	mappedName, mappedBody, result := h.applyConfiguredModelMapping(modelName, rawJSON)
+	if !state.evaluated {
+		state.decision = h.evaluateKeyShopMappedDecision(ctx, secret, modelName, rawJSON, mappedName, mappedBody, probe)
+		state.evaluated = true
+	}
+	nextName, nextBody, errMsg := state.decision.apply(mappedName, mappedBody)
+	return ctx, nextName, nextBody, result, errMsg
+}
+
+// keyShopRawResolution is the plugin's answer for the raw client model.
+type keyShopRawResolution struct {
+	resolved KeyShopResolveResult
+	ok       bool
+}
+
+func (h *BaseAPIHandler) resolveKeyShopRaw(ctx context.Context, secret, modelName string, rawJSON []byte) keyShopRawResolution {
+	resolver, ok := h.interceptorHost().(keyShopModelResolver)
+	if !ok || resolver == nil {
+		return keyShopRawResolution{}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resolved, err := resolver.KeyShopResolveModel(ctx, secret, modelName, keyShopBodyModel(rawJSON))
+	if err != nil {
+		return keyShopRawResolution{}
+	}
+	return keyShopRawResolution{resolved: resolved, ok: true}
+}
+
+// authoritative reports that a limited group admitted the raw client model, so its
+// rewrite (or keep) wins over the global mapping for this request. Limited must be
+// set explicitly: an old plugin omits it, and its all-models reply must stay on the
+// legacy mapped path.
+func (p keyShopRawResolution) authoritative(modelName string, rawJSON []byte) (keyShopGateDecision, bool) {
+	if !p.ok || !p.resolved.Loaded || !p.resolved.Limited || !strings.EqualFold(strings.TrimSpace(p.resolved.Mode), "group") || !p.resolved.Allowed {
+		return keyShopGateDecision{}, false
+	}
+	if keyShopResolvedModelUnchanged(modelName, keyShopBodyModel(rawJSON), p.resolved.Model) {
+		return keyShopGateDecision{kind: "keep"}, true
+	}
+	return keyShopGateDecision{kind: "rewrite", model: p.resolved.Model}, true
+}
+
+// evaluateKeyShopMappedDecision keeps the legacy mapped-name gate for the fallback
+// paths. It reuses the raw probe where the answer is already known so a plain
+// denial still costs one resolve_model call per request.
+func (h *BaseAPIHandler) evaluateKeyShopMappedDecision(ctx context.Context, secret, rawModel string, rawJSON []byte, mappedModel string, mappedBody []byte, probe keyShopRawResolution) keyShopGateDecision {
+	if probe.ok && probe.resolved.Loaded && strings.EqualFold(strings.TrimSpace(probe.resolved.Mode), "group") {
+		if !probe.resolved.Allowed && keyShopSameModelRequest(rawModel, rawJSON, mappedModel, mappedBody) {
+			return keyShopGateDecision{kind: "deny"}
+		}
+	}
+	return h.evaluateKeyShopGate(ctx, secret, mappedModel, mappedBody)
+}
+
+func keyShopSameModelRequest(rawModel string, rawJSON []byte, mappedModel string, mappedBody []byte) bool {
+	return strings.EqualFold(strings.TrimSpace(rawModel), strings.TrimSpace(mappedModel)) &&
+		strings.EqualFold(keyShopBodyModel(rawJSON), keyShopBodyModel(mappedBody))
+}
+
+func keyShopBodyModel(rawJSON []byte) string {
+	if len(rawJSON) == 0 || !gjson.GetBytes(rawJSON, "model").Exists() {
+		return ""
+	}
+	return strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
+}
+
+// keyShopAuthoritativeFromContext reports that the cached decision was made on the
+// raw client model and must not be re-mapped.
+func keyShopAuthoritativeFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	state, ok := ctx.Value(keyShopGateStateKey{}).(*keyShopGateState)
+	if !ok || state == nil {
+		return false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.authoritative
+}
+
 func (d keyShopGateDecision) apply(modelName string, rawJSON []byte) (string, []byte, *interfaces.ErrorMessage) {
 	switch d.kind {
 	case "deny":
@@ -115,10 +234,7 @@ func (d keyShopGateDecision) apply(modelName string, rawJSON []byte) (string, []
 }
 
 func (h *BaseAPIHandler) evaluateKeyShopGate(ctx context.Context, secret, modelName string, rawJSON []byte) keyShopGateDecision {
-	bodyModel := ""
-	if gjson.GetBytes(rawJSON, "model").Exists() {
-		bodyModel = strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-	}
+	bodyModel := keyShopBodyModel(rawJSON)
 	host := h.interceptorHost()
 	if resolver, ok := host.(keyShopModelResolver); ok && resolver != nil {
 		resolved, err := resolver.KeyShopResolveModel(ctx, secret, modelName, bodyModel)

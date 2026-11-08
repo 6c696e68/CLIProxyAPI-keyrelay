@@ -205,7 +205,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 						return
 					}
 					if len(leftover) > 0 {
-						leftover = rewriteMappedStreamPayload(leftover, h.mappingResultForOriginal(originalRequestedModel))
+						leftover = rewriteMappedStreamPayload(leftover, h.mappingResultForOriginal(ctx, originalRequestedModel))
 						select {
 						case dataChan <- leftover:
 						case <-done:
@@ -286,7 +286,7 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 					continue
 				}
 			}
-			payload = rewriteMappedStreamPayload(payload, h.mappingResultForOriginal(originalRequestedModel))
+			payload = rewriteMappedStreamPayload(payload, h.mappingResultForOriginal(ctx, originalRequestedModel))
 			select {
 			case dataChan <- payload:
 				if streamInterceptorsActive && streamChunkPayloadIncludesHistory(interceptorHost) {
@@ -313,8 +313,7 @@ func (h *BaseAPIHandler) executeStreamWithAuthManagerFormats(ctx context.Context
 	originalRequestedModel := modelName
 	// Speech-only models are reachable solely through the speech entry protocol.
 	execOptions.AllowSpeechModel = isModelExecutionSpeechProtocol(entryProtocol)
-	modelName, rawJSON, mappingResult := h.applyConfiguredModelMapping(modelName, rawJSON)
-	ctx, modelName, rawJSON, gateErr := h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, mappingResult, gateErr := h.resolveKeyShopRequestModel(ctx, modelName, rawJSON)
 	if gateErr != nil {
 		h.recordKeyShopGateDenial(ctx, entryProtocol, modelName, true, gateErr)
 		errChan := make(chan *interfaces.ErrorMessage, 1)

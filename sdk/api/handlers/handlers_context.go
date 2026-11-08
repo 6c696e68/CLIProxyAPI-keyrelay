@@ -96,8 +96,7 @@ func (h *BaseAPIHandler) PrepareStreamModelRoute(ctx context.Context, handlerTyp
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	modelName, rawJSON, _ = h.applyConfiguredModelMapping(modelName, rawJSON)
-	ctx, modelName, rawJSON, _ = h.applyKeyShopModelGate(ctx, modelName, rawJSON)
+	ctx, modelName, rawJSON, _, _ = h.resolveKeyShopRequestModel(ctx, modelName, rawJSON)
 	decision := h.applyModelRouter(ctx, handlerType, modelName, rawJSON, true, modelExecutionOptions{})
 	ctx = context.WithValue(ctx, preparedModelRouteContextKey{}, decision)
 	ctx = context.WithValue(ctx, preparedModelRouteModelContextKey{}, strings.TrimSpace(modelName))
@@ -135,17 +134,18 @@ func PreparedStreamProviderRoute(ctx context.Context) (string, string) {
 }
 
 // StreamRouteModel is the model for auth, passthrough, and compaction checks after PrepareStreamModelRoute.
-// A plugin provider target wins; otherwise the key-shop rewrite of the mapped client model is used.
+// A plugin provider target wins; otherwise the key-shop group decision (raw client name
+// first) or the key-shop rewrite of the mapped client model is used.
 func (h *BaseAPIHandler) StreamRouteModel(ctx context.Context, clientModel string) string {
-	mapped, raw, _ := h.applyConfiguredModelMapping(clientModel, nil)
 	if _, target := PreparedStreamProviderRoute(ctx); target != "" {
 		return target
 	}
-	if _, rewritten, _, gateErr := h.applyKeyShopModelGate(ctx, mapped, raw); gateErr == nil && strings.TrimSpace(rewritten) != "" {
-		return strings.TrimSpace(rewritten)
+	_, resolved, _, _, gateErr := h.resolveKeyShopRequestModel(ctx, clientModel, nil)
+	if gateErr == nil && strings.TrimSpace(resolved) != "" {
+		return strings.TrimSpace(resolved)
 	}
-	if strings.TrimSpace(mapped) != "" {
-		return mapped
+	if mapped, _, _ := h.applyConfiguredModelMapping(clientModel, nil); strings.TrimSpace(mapped) != "" {
+		return strings.TrimSpace(mapped)
 	}
 	return strings.TrimSpace(clientModel)
 }

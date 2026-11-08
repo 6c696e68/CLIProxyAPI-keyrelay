@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
 
@@ -119,7 +121,7 @@ func TestKeyShopModelGateDeniesStreamAndCount(t *testing.T) {
 
 func TestKeyShopModelGateGroupAliasRewriteKeepsSuffix(t *testing.T) {
 	handler := NewBaseAPIHandlers(nil, nil)
-	host := &keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Model: "vippro/gpt-6-sol(high)"}}
+	host := &keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Limited: true, Model: "vippro/gpt-6-sol(high)"}}
 	handler.SetPluginHost(host)
 	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", "gpt-6-sol(high)", []byte(`{"model":"gpt-6-sol(high)"}`), "")
 	if !host.called || host.model != "gpt-6-sol(high)" || host.body != "gpt-6-sol(high)" {
@@ -132,7 +134,7 @@ func TestKeyShopModelGateGroupAliasRewriteKeepsSuffix(t *testing.T) {
 
 func TestKeyShopModelGateGroupDeny(t *testing.T) {
 	handler := NewBaseAPIHandlers(nil, nil)
-	host := &keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: false}}
+	host := &keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: false, Limited: true}}
 	host.yaml = []byte("model_access_mode: custom\nmodels:\n  - name: gpt-5.5\n")
 	handler.SetPluginHost(host)
 	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", "gpt-5.5", []byte(`{"model":"gpt-5.5"}`), "")
@@ -203,7 +205,7 @@ func TestKeyShopModelGateAllModelsKeepsDifferingBody(t *testing.T) {
 
 func TestPreparedStreamRouteUsesGroupUpstreamName(t *testing.T) {
 	handler := NewBaseAPIHandlers(nil, nil)
-	handler.SetPluginHost(&keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Model: "vippro/gpt-6-sol(high)"}})
+	handler.SetPluginHost(&keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Limited: true, Model: "vippro/gpt-6-sol(high)"}})
 	calls := 0
 	seen := ""
 	router := &handlerModelRouterTestHost{hasRouters: true}
@@ -246,7 +248,7 @@ func (h *websocketDenialHost) NoteKeyShopRejection(_ context.Context, secret, re
 
 func TestResponsesWebsocketGateDenialRecordsOnce(t *testing.T) {
 	handler := NewBaseAPIHandlers(nil, nil)
-	host := &websocketDenialHost{keyShopResolveHost: keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: false}}}
+	host := &websocketDenialHost{keyShopResolveHost: keyShopResolveHost{result: KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: false, Limited: true}}}
 	handler.SetPluginHost(host)
 	body := []byte(`{"model":"gpt-6-sol","stream":true}`)
 	ctx := keyShopContext(t, "ck_customer")
@@ -259,6 +261,242 @@ func TestResponsesWebsocketGateDenialRecordsOnce(t *testing.T) {
 	}
 	if host.notes != 1 || len(host.rows) != 1 {
 		t.Fatalf("denial notes = %d rejected rows = %d, want 1 and 1 quota unit", host.notes, len(host.rows))
+	}
+	if host.id == "" || strings.HasPrefix(host.id, "gate-") {
+		t.Fatalf("denial id = %q, want the lifecycle request id", host.id)
+	}
+}
+
+// keyShopGroupHost resolves through a function so tests can model a real group.
+type keyShopGroupHost struct {
+	keyShopGateHost
+	resolve func(model, bodyModel string) (KeyShopResolveResult, error)
+	calls   []string
+	notes   int
+	secret  string
+	id      string
+	code    string
+	status  int
+}
+
+func (h *keyShopGroupHost) KeyShopResolveModel(_ context.Context, secret, model, bodyModel string) (KeyShopResolveResult, error) {
+	h.calls = append(h.calls, model)
+	h.secret = secret
+	return h.resolve(model, bodyModel)
+}
+
+func (h *keyShopGroupHost) NoteKeyShopRejection(_ context.Context, secret, requestID, code string, status int) {
+	h.notes++
+	h.secret = secret
+	h.id = requestID
+	h.code = code
+	h.status = status
+}
+
+// limitedGroupResolver mimics Group.Resolve for client alias -> upstream entries.
+func limitedGroupResolver(aliases map[string]string) func(model, bodyModel string) (KeyShopResolveResult, error) {
+	resolveOne := func(name string) (string, bool) {
+		name = strings.TrimSpace(name)
+		base, suffix := name, ""
+		if open := strings.LastIndex(name, "("); open > 0 && strings.HasSuffix(name, ")") {
+			base, suffix = name[:open], name[open:]
+		}
+		upstream, ok := aliases[strings.ToLower(base)]
+		if !ok {
+			return "", false
+		}
+		return upstream + suffix, true
+	}
+	return func(model, bodyModel string) (KeyShopResolveResult, error) {
+		requested := strings.TrimSpace(model)
+		if requested == "" {
+			requested = strings.TrimSpace(bodyModel)
+		}
+		upstream, ok := resolveOne(requested)
+		if !ok {
+			return KeyShopResolveResult{Loaded: true, Mode: "group", Limited: true}, nil
+		}
+		if body := strings.TrimSpace(bodyModel); body != "" && !strings.EqualFold(body, requested) {
+			bodyUpstream, bodyOK := resolveOne(body)
+			if !bodyOK || bodyUpstream != upstream {
+				return KeyShopResolveResult{Loaded: true, Mode: "group", Limited: true}, nil
+			}
+		}
+		return KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Limited: true, Model: upstream}, nil
+	}
+}
+
+func assertRoutedModel(t *testing.T, errMsg *interfaces.ErrorMessage, want string) {
+	t.Helper()
+	if errMsg == nil {
+		t.Fatalf("expected a provider routing error naming %q", want)
+	}
+	if errMsg.StatusCode == http.StatusForbidden {
+		t.Fatalf("model %q was denied: %+v", want, errMsg)
+	}
+	if !strings.Contains(errMsg.Error.Error(), want) {
+		t.Fatalf("routed model error = %v, want it to name %q", errMsg.Error, want)
+	}
+}
+
+func TestKeyShopGroupAuthorizesRawNameBeforeGlobalMapping(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []config.ModelMappingRule{{Match: "*5.5", Target: "gpt-6-luna", Mode: config.ModelMappingModeWildcard}},
+	}, nil)
+	host := &keyShopGroupHost{resolve: limitedGroupResolver(map[string]string{
+		"vippro/claude-opus-5.5": "kr/claude-opus-5.5-thinking",
+	})}
+	handler.SetPluginHost(host)
+	const raw = "vippro/claude-opus-5.5(high)"
+	const want = "kr/claude-opus-5.5-thinking(high)"
+	body := []byte(`{"model":"vippro/claude-opus-5.5(high)","stream":true}`)
+
+	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+	assertRoutedModel(t, errMsg, want)
+	if strings.Contains(errMsg.Error.Error(), "gpt-6-luna") {
+		t.Fatalf("global mapping overrode the group: %v", errMsg.Error)
+	}
+
+	_, _, errMsg = handler.ExecuteCountWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+	assertRoutedModel(t, errMsg, want)
+
+	_, _, errChan := handler.ExecuteStreamWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+	assertRoutedModel(t, <-errChan, want)
+
+	ctx := keyShopContext(t, "ck_customer")
+	ctx, _ = handler.PrepareStreamModelRoute(ctx, "openai-response", raw, body)
+	if got := handler.StreamRouteModel(ctx, raw); got != want {
+		t.Fatalf("stream route model = %q, want %q", got, want)
+	}
+	if result := handler.mappingResultForOriginal(ctx, raw); result.Changed {
+		t.Fatalf("authoritative group path applied a mapping echo: %+v", result)
+	}
+	_, _, errChan = handler.ExecuteStreamWithAuthManager(ctx, "openai-response", raw, body, "")
+	assertRoutedModel(t, <-errChan, want)
+
+	if len(host.calls) == 0 {
+		t.Fatal("resolver was not consulted")
+	}
+	for _, seen := range host.calls {
+		if seen != raw {
+			t.Fatalf("resolver saw %q, want only the raw client model %q", seen, raw)
+		}
+	}
+}
+
+func TestKeyShopGroupKeepDecisionDoesNotGetRemapped(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []config.ModelMappingRule{{Match: "*5.5", Target: "gpt-6-luna", Mode: config.ModelMappingModeWildcard}},
+	}, nil)
+	host := &keyShopGroupHost{resolve: limitedGroupResolver(map[string]string{
+		"kr/claude-opus-5.5": "kr/claude-opus-5.5",
+	})}
+	handler.SetPluginHost(host)
+	const raw = "kr/claude-opus-5.5"
+	body := []byte(`{"model":"kr/claude-opus-5.5","stream":true}`)
+	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+	assertRoutedModel(t, errMsg, raw)
+	ctx, _ := handler.PrepareStreamModelRoute(keyShopContext(t, "ck_customer"), "openai-response", raw, body)
+	if got := handler.StreamRouteModel(ctx, raw); got != raw {
+		t.Fatalf("stream route model = %q, want the raw group name %q", got, raw)
+	}
+	_, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai-response", raw, body, "")
+	assertRoutedModel(t, <-errChan, raw)
+}
+
+func TestKeyShopAllModelsAndLegacyKeysStillUseGlobalMapping(t *testing.T) {
+	cases := map[string]func(model, bodyModel string) (KeyShopResolveResult, error){
+		"all-models": func(model, _ string) (KeyShopResolveResult, error) {
+			return KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Model: strings.TrimSpace(model)}, nil
+		},
+		"legacy": func(string, string) (KeyShopResolveResult, error) {
+			return KeyShopResolveResult{Loaded: true, Mode: "legacy"}, nil
+		},
+	}
+	const raw = "vippro/claude-opus-5.5"
+	const want = "gpt-6-luna"
+	for name, resolve := range cases {
+		t.Run(name, func(t *testing.T) {
+			handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+				ModelMapping: []config.ModelMappingRule{{Match: "*5.5", Target: want, Mode: config.ModelMappingModeWildcard}},
+			}, nil)
+			host := &keyShopGroupHost{resolve: resolve}
+			handler.SetPluginHost(host)
+			body := []byte(`{"model":"vippro/claude-opus-5.5"}`)
+			_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+			assertRoutedModel(t, errMsg, want)
+			ctx, _ := handler.PrepareStreamModelRoute(keyShopContext(t, "ck_customer"), "openai-response", raw, body)
+			if got := handler.StreamRouteModel(ctx, raw); got != want {
+				t.Fatalf("stream route model = %q, want %q", got, want)
+			}
+			if result := handler.mappingResultForOriginal(ctx, raw); !result.Changed || result.Original != raw {
+				t.Fatalf("mapped path lost its mapping echo: %+v", result)
+			}
+		})
+	}
+}
+
+func TestKeyShopOldPluginResolveResultStillUsesGlobalMapping(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []config.ModelMappingRule{{Match: "*5.5", Target: "gpt-6-luna", Mode: config.ModelMappingModeWildcard}},
+	}, nil)
+	// An old plugin sends no Limited field and keeps the requested model, which is
+	// how an all-models group answers. That reply must not become authoritative.
+	host := &keyShopGroupHost{resolve: func(model, _ string) (KeyShopResolveResult, error) {
+		return KeyShopResolveResult{Loaded: true, Mode: "group", Allowed: true, Model: strings.TrimSpace(model)}, nil
+	}}
+	handler.SetPluginHost(host)
+	const raw = "vippro/claude-opus-5.5"
+	body := []byte(`{"model":"vippro/claude-opus-5.5"}`)
+	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", raw, body, "")
+	assertRoutedModel(t, errMsg, "gpt-6-luna")
+	ctx, _ := handler.PrepareStreamModelRoute(keyShopContext(t, "ck_customer"), "openai-response", raw, body)
+	if got := handler.StreamRouteModel(ctx, raw); got != "gpt-6-luna" {
+		t.Fatalf("stream route model = %q, want the mapped name", got)
+	}
+}
+
+func TestKeyShopGroupFallsBackToMappedAlias(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []config.ModelMappingRule{{Match: "vippro/gpt-6-astra", Target: "gpt-6-astra"}},
+	}, nil)
+	host := &keyShopGroupHost{resolve: limitedGroupResolver(map[string]string{
+		"gpt-6-astra": "vippro/gpt-6-astra",
+	})}
+	handler.SetPluginHost(host)
+	const want = "vippro/gpt-6-astra"
+	_, _, errMsg := handler.ExecuteWithAuthManager(keyShopContext(t, "ck_customer"), "openai", "vippro/gpt-6-astra", []byte(`{"model":"vippro/gpt-6-astra"}`), "")
+	assertRoutedModel(t, errMsg, want)
+	foundMapped := false
+	for _, seen := range host.calls {
+		if seen == "gpt-6-astra" {
+			foundMapped = true
+		}
+	}
+	if !foundMapped {
+		t.Fatalf("resolver never saw the mapped alias: %v", host.calls)
+	}
+}
+
+func TestKeyShopGroupDeniesUnknownModelOnce(t *testing.T) {
+	handler := NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		ModelMapping: []config.ModelMappingRule{{Match: "vippro/gpt-6-astra", Target: "gpt-6-astra"}},
+	}, nil)
+	host := &keyShopGroupHost{resolve: limitedGroupResolver(map[string]string{
+		"gpt-6-astra": "vippro/gpt-6-astra",
+	})}
+	handler.SetPluginHost(host)
+	const raw = "vippro/not-in-group"
+	body := []byte(`{"model":"vippro/not-in-group","stream":true}`)
+	ctx, _ := handler.PrepareStreamModelRoute(keyShopContext(t, "ck_customer"), "openai-response", raw, body)
+	_ = handler.StreamRouteModel(ctx, raw)
+	_, _, errChan := handler.ExecuteStreamWithAuthManager(ctx, "openai-response", raw, body, "")
+	assertModelNotAllowed(t, <-errChan)
+	if len(host.calls) != 1 {
+		t.Fatalf("resolver calls = %v, want one raw probe", host.calls)
+	}
+	if host.notes != 1 {
+		t.Fatalf("denial notes = %d, want 1", host.notes)
 	}
 	if host.id == "" || strings.HasPrefix(host.id, "gate-") {
 		t.Fatalf("denial id = %q, want the lifecycle request id", host.id)

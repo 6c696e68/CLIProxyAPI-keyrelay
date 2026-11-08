@@ -128,6 +128,7 @@ type pluginConfig struct {
 	Enabled                    bool              `yaml:"enabled"`
 	Priority                   int               `yaml:"priority"`
 	BaseURL                    string            `yaml:"base-url"`
+	FallbackBaseURL            string            `yaml:"fallback-base-url"`
 	Prefix                     string            `yaml:"prefix"`
 	Headers                    map[string]string `yaml:"headers"`
 	RequestRetry               *int              `yaml:"request-retry"`
@@ -554,6 +555,20 @@ func normalizeConfig(cfg pluginConfig) (pluginConfig, error) {
 		return pluginConfig{}, errURL
 	}
 	cfg.BaseURL = parsed
+
+	fallback := strings.TrimSpace(cfg.FallbackBaseURL)
+	if fallback != "" {
+		parsedFallback, errFallback := validateUpstreamURL(fallback, "fallback-base-url")
+		if errFallback != nil {
+			return pluginConfig{}, errFallback
+		}
+		if parsedFallback == parsed {
+			parsedFallback = ""
+		}
+		fallback = parsedFallback
+	}
+	cfg.FallbackBaseURL = fallback
+
 	cfg.Prefix = normalizePrefix(cfg.Prefix)
 
 	mode := strings.ToLower(strings.TrimSpace(cfg.RotationMode))
@@ -623,18 +638,22 @@ func clampInt(value *int, fallback, minValue, maxValue int) *int {
 }
 
 func validateBaseURL(raw string) (string, error) {
+	return validateUpstreamURL(raw, "base-url")
+}
+
+func validateUpstreamURL(raw, field string) (string, error) {
 	parsed, errParse := url.Parse(raw)
 	if errParse != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return "", fmt.Errorf("invalid base-url")
+		return "", fmt.Errorf("invalid %s", field)
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "https":
 	case "http":
 		if !privateBaseHost(parsed.Hostname()) {
-			return "", fmt.Errorf("invalid base-url")
+			return "", fmt.Errorf("invalid %s", field)
 		}
 	default:
-		return "", fmt.Errorf("invalid base-url")
+		return "", fmt.Errorf("invalid %s", field)
 	}
 	return strings.TrimRight(raw, "/"), nil
 }
@@ -856,6 +875,7 @@ func configFields() []pluginapi.ConfigField {
 	return []pluginapi.ConfigField{
 		{Name: "enabled", Type: pluginapi.ConfigFieldTypeBoolean, Description: "When false, the plugin claims no models and the executor rejects requests."},
 		{Name: "base-url", Type: pluginapi.ConfigFieldTypeString, Description: "HTTPS OpenAI-compatible base URL. Empty uses the built-in default."},
+		{Name: "fallback-base-url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional second HTTPS OpenAI-compatible base URL. Used only when the main upstream returns 404 or a 5xx status, or the connection fails. Empty disables."},
 		{Name: "prefix", Type: pluginapi.ConfigFieldTypeString, Description: "Client model prefix. A value that still contains a slash claims nothing."},
 		{Name: "headers", Type: pluginapi.ConfigFieldTypeObject, Description: "Extra upstream headers. $NAME copies a client header. $CPA-SESSION-ID uses the executor session."},
 		{Name: "request-retry", Type: pluginapi.ConfigFieldTypeInteger, Description: "Extra attempts on the next account with the same upstream model. 0 sends once. Default 3. Maximum 32. The management panel rejects values outside 0 to 32. The plugin still clamps them so it stays registered."},
@@ -1465,9 +1485,26 @@ func applyPromptCacheMiss(path string, body []byte) ([]byte, error) {
 }
 
 // postUpstream sends one built body and reads the body of a non-2xx stream reply.
+// A configured fallback base gets the same body and headers once when the primary
+// fails with a transport error, 404, or 5xx.
 func postUpstream(cfg pluginConfig, prepared preparedCall, token string, body []byte, stream bool) (hostHTTPResult, int, []byte) {
-	base := strings.TrimSuffix(cfg.BaseURL, "/")
-	resp, errDo := hostDo(prepared.callbackID, base+prepared.path, upstreamHeaders(cfg, prepared.client, prepared.session, token, stream), body, stream)
+	headers := upstreamHeaders(cfg, prepared.client, prepared.session, token, stream)
+	resp, status, respBody := postToBase(prepared, cfg.BaseURL, headers, body, stream)
+	if cfg.FallbackBaseURL == "" || !fallbackEligible(status) {
+		return resp, status, respBody
+	}
+	return postToBase(prepared, cfg.FallbackBaseURL, headers, body, stream)
+}
+
+// fallbackEligible reports a primary failure the fallback base may handle.
+func fallbackEligible(status int) bool {
+	return status == http.StatusNotFound || status >= http.StatusInternalServerError
+}
+
+// postToBase sends one built body to a base URL and reads the body of a non-2xx
+// stream reply.
+func postToBase(prepared preparedCall, base string, headers http.Header, body []byte, stream bool) (hostHTTPResult, int, []byte) {
+	resp, errDo := hostDo(prepared.callbackID, strings.TrimSuffix(base, "/")+prepared.path, headers, body, stream)
 	if errDo != nil {
 		return hostHTTPResult{}, http.StatusBadGateway, []byte(errDo.Error())
 	}
