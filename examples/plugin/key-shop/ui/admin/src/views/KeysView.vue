@@ -90,6 +90,16 @@ function groupLabel(id: string) {
 function reasons(key: KeyRecord) {
   return [key.requestLimitReached ? 'Request limit' : '', key.tokenLimitReached ? 'Token limit' : ''].filter(Boolean).join(' · ')
 }
+function tokenPercent(key: KeyRecord): number {
+  if (!key.tokenLimit) return 0
+  return Math.min(100, Math.round((key.tokensUsed / key.tokenLimit) * 100))
+}
+function tokenTone(key: KeyRecord): string {
+  const percent = tokenPercent(key)
+  if (percent >= 100) return 'bad'
+  if (percent >= 80) return 'warn'
+  return ''
+}
 
 function load() {
   return runLoad(async () => {
@@ -285,14 +295,14 @@ watch(partner, () => {
       <template v-else>
         <div class="table-shell only-desktop">
           <div class="table-scroll">
-            <table class="data-table">
+            <table class="data-table keys">
               <caption class="sr-only">Customer keys</caption>
               <thead>
                 <tr>
                   <th class="check-col">
                     <span class="check-icon-only"><AppCheckbox :checked="selection.pageChecked(pageIds)" label="Select this page" @toggle="selection.togglePage(pageIds)" /></span>
                   </th>
-                  <th>Key</th><th>Customer</th><th>Group</th><th>Partner</th><th>Status</th><th class="text-right">Requests</th><th>Usage</th><th>Expires</th><th class="actions">Actions</th>
+                  <th>Key</th><th>Customer</th><th>Group</th><th>Status</th><th class="text-right">Requests</th><th>Usage</th><th>Expires</th><th class="actions">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -301,22 +311,21 @@ watch(partner, () => {
                     <span class="check-icon-only"><AppCheckbox :checked="selection.has(key.id)" :label="`Select ${key.label}`" @toggle="selection.toggle(key.id)" /></span>
                   </td>
                   <td><strong class="num clip block max-w-44 text-[13px] font-medium">{{ key.label }}</strong><div class="sub num">{{ key.display }}</div></td>
-                  <td>{{ key.customer || '—' }}</td>
-                  <td>{{ groupLabel(key.groupId) }}</td>
                   <td>
-                    <template v-if="key.partnerId || key.partnerRef">
-                      <span>{{ partnerLabel(key.partnerId) }}</span>
-                      <div v-if="key.partnerRef" class="sub num">{{ key.partnerRef }}</div>
-                    </template>
-                    <span v-else>—</span>
+                    <span class="clip block">{{ key.customer || '—' }}</span>
+                    <div v-if="key.partnerId || key.partnerRef" class="sub clip">{{ partnerLabel(key.partnerId) }}<span v-if="key.partnerRef" class="num"> · {{ key.partnerRef }}</span></div>
                   </td>
+                  <td><span class="group-cell" :class="{ muted: !key.groupId }">{{ groupLabel(key.groupId) }}</span></td>
                   <td><StatusChip interactive :value="key.status" @select="statusTarget = key" /><div v-if="reasons(key)" class="sub text-[var(--warn)]">{{ reasons(key) }}</div></td>
                   <td class="num text-right text-xs">{{ quota(key.requestQuotaUsed, key.requestLimit) }}<div class="sub"><RequestCounts :succeeded="key.requestSuccessCount" :failed="key.requestFailureCount" :canceled="key.requestCanceledCount" :rejected="key.requestRejectedCount" /></div></td>
                   <td class="num usage-cell text-xs">
-                    <template v-if="key.tokenLimit"><span>{{ formatNumber(key.tokensUsed) }}</span><span class="usage-limit">/ {{ formatNumber(key.tokenLimit) }}</span></template>
+                    <template v-if="key.tokenLimit">
+                      {{ formatNumber(key.tokensUsed) }} <span class="usage-limit">/ {{ formatNumber(key.tokenLimit) }}</span>
+                    </template>
                     <template v-else>{{ formatNumber(key.tokensUsed) }} / ∞</template>
+                    <span v-if="key.tokenLimit" class="meter" :class="tokenTone(key)" aria-hidden="true"><i :style="{ width: `${tokenPercent(key)}%` }" /></span>
                   </td>
-                  <td><template v-if="key.expiresAt"><time class="block text-sm" :datetime="key.expiresAt">{{ splitWhen(key.expiresAt).date }}</time><span class="sub">{{ splitWhen(key.expiresAt).time }}</span></template><template v-else>Never</template></td>
+                  <td class="nowrap"><template v-if="key.expiresAt"><time class="block text-sm" :datetime="key.expiresAt">{{ splitWhen(key.expiresAt).date }}</time><span class="sub">{{ splitWhen(key.expiresAt).time }}</span></template><template v-else>Never</template></td>
                   <td class="actions">
                     <div class="flex gap-1">
                       <AppButton small :disabled="acting" @click="openEdit(key)">Edit</AppButton>
@@ -325,7 +334,7 @@ watch(partner, () => {
                     </div>
                   </td>
                 </tr>
-                <tr v-if="!keys.length"><td colspan="10" class="py-10 text-center text-[var(--ink-soft)]">No matching keys.</td></tr>
+                <tr v-if="!keys.length"><td colspan="9" class="py-10 text-center text-[var(--ink-soft)]">No matching keys.</td></tr>
               </tbody>
             </table>
           </div>
@@ -342,8 +351,23 @@ watch(partner, () => {
             <div class="mt-3 grid grid-cols-2 gap-3">
               <div class="kv"><span>Customer</span><strong>{{ key.customer || '—' }}</strong></div>
               <div class="kv"><span>Group</span><strong>{{ groupLabel(key.groupId) }}</strong></div>
+              <div class="kv"><span>Requests</span><strong class="num">{{ quota(key.requestQuotaUsed, key.requestLimit) }}</strong></div>
+              <div class="kv"><span>Expires</span><strong>{{ key.expiresAt ? splitWhen(key.expiresAt).date : 'Never' }}</strong><span v-if="key.expiresAt" class="sub">{{ splitWhen(key.expiresAt).time }}</span></div>
+              <div class="kv col-span-2">
+                <span>Tokens</span>
+                <strong class="num">{{ key.tokenLimit ? `${formatNumber(key.tokensUsed)} / ${formatNumber(key.tokenLimit)}` : `${formatNumber(key.tokensUsed)} / ∞` }}</strong>
+                <span v-if="key.tokenLimit" class="meter" :class="tokenTone(key)" aria-hidden="true"><i :style="{ width: `${tokenPercent(key)}%` }" /></span>
+              </div>
+              <div class="kv col-span-2">
+                <span>Requests breakdown</span>
+                <div class="count-grid">
+                  <span class="tone-good"><b>{{ formatNumber(key.requestSuccessCount) }}</b><em>ok</em></span>
+                  <span class="tone-bad"><b>{{ formatNumber(key.requestFailureCount) }}</b><em>failed</em></span>
+                  <span class="tone-warn"><b>{{ formatNumber(key.requestCanceledCount) }}</b><em>canceled</em></span>
+                  <span><b>{{ formatNumber(key.requestRejectedCount) }}</b><em>rejected</em></span>
+                </div>
+              </div>
               <div v-if="key.partnerId || key.partnerRef" class="kv col-span-2"><span>Partner</span><strong>{{ partnerLabel(key.partnerId) }}<span v-if="key.partnerRef" class="sub num"> · {{ key.partnerRef }}</span></strong></div>
-              <div class="kv col-span-2"><span>Requests</span><strong class="num">{{ quota(key.requestQuotaUsed, key.requestLimit) }}</strong></div>
             </div>
             <div class="mt-3 flex flex-wrap gap-2">
               <AppButton small :disabled="acting" @click="openEdit(key)">Edit</AppButton>

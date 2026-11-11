@@ -4,7 +4,7 @@ import { createLiveAdminService } from './api/live'
 import { MANAGEMENT_STORAGE, panelKey } from './api/http'
 import LoginView from './views/LoginView.vue'
 import WorkspaceView from './views/WorkspaceView.vue'
-import type { ThemeName } from './types'
+import { applyTheme, bootHost, resolveTheme, watchHostTheme, type ThemeName } from './lib/host'
 
 const service = createLiveAdminService()
 const storedKey = sessionStorage.getItem(MANAGEMENT_STORAGE) || panelKey()
@@ -12,12 +12,18 @@ const authed = ref(false)
 const booting = ref(Boolean(storedKey))
 const loading = ref(false)
 const error = ref('')
-const theme = ref<ThemeName>('light')
+const theme = ref<ThemeName>(resolveTheme())
+const embedded = document.documentElement.dataset.embedded === 'true'
 
-function applyTheme(value: ThemeName) {
+function setTheme(value: ThemeName) {
   theme.value = value
-  document.documentElement.dataset.theme = value
-  localStorage.setItem('keyshop.admin.theme', value)
+  applyTheme(value)
+}
+function toggleTheme() {
+  // The panel owns the theme switch while embedded; this path is standalone only.
+  const next: ThemeName = theme.value === 'dark' ? 'light' : 'dark'
+  localStorage.setItem('keyshop.admin.theme', next)
+  setTheme(next)
 }
 async function submit(value: string, remember: boolean) {
   if (loading.value) return
@@ -39,12 +45,17 @@ function logout() {
   sessionStorage.removeItem(MANAGEMENT_STORAGE)
   authed.value = false
 }
-const storedTheme = localStorage.getItem('keyshop.admin.theme')
-if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
-onMounted(async () => {
-  if (!storedKey) return
-  await submit(storedKey, true)
-  booting.value = false
+
+// Keep the panel theme applied before and after mount. The observer covers a
+// panel switch that happens while this page is open.
+setTheme(resolveTheme())
+onMounted(() => {
+  watchHostTheme(setTheme)
+  void (async () => {
+    if (!storedKey) return
+    await submit(storedKey, true)
+    booting.value = false
+  })()
 })
 </script>
 
@@ -55,5 +66,5 @@ onMounted(async () => {
     <p>Checking access</p>
   </main>
   <LoginView v-else-if="!authed" :loading="loading" :error="error" :initial="storedKey" @submit="submit" />
-  <WorkspaceView v-else :service="service" :theme="theme" @logout="logout" @toggle-theme="applyTheme(theme === 'dark' ? 'light' : 'dark')" />
+  <WorkspaceView v-else :service="service" :theme="theme" :embedded="embedded" @logout="logout" @toggle-theme="toggleTheme" />
 </template>

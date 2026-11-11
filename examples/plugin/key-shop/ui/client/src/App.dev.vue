@@ -7,16 +7,19 @@ import { createClientService } from './mock/service'
 import type { Scenario, ThemeName } from './types'
 
 const service = createClientService()
-const authed = ref(Boolean(sessionStorage.getItem('keyshop.prototype.client')))
+const scenarios: Scenario[] = ['ready', 'loading', 'empty', 'error', 'limited']
+const params = new URLSearchParams(window.location.search)
+const paramScenario = params.get('scenario') as Scenario | null
+const authed = ref(Boolean(sessionStorage.getItem('keyshop.prototype.client')) || params.has('scenario') || params.has('preview'))
 const loading = ref(false)
 const error = ref('')
-const scenario = ref<Scenario>('ready')
+const scenario = ref<Scenario>(paramScenario && scenarios.includes(paramScenario) ? paramScenario : 'ready')
 const theme = ref<ThemeName>('light')
 
-function applyTheme(value: ThemeName) {
+function applyTheme(value: ThemeName, persist = true) {
   theme.value = value
   document.documentElement.dataset.theme = value
-  localStorage.setItem('keyshop.client.theme', value)
+  if (persist) localStorage.setItem('keyshop.client.theme', value)
 }
 async function submit(value: string, remember: boolean) {
   loading.value = true
@@ -37,7 +40,11 @@ function logout() {
   authed.value = false
 }
 const storedTheme = localStorage.getItem('keyshop.client.theme')
-if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
+const paramTheme = params.get('theme')
+const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+if (paramTheme === 'dark' || paramTheme === 'light') applyTheme(paramTheme, false)
+else if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
+else applyTheme(prefersDark ? 'dark' : 'light', false)
 </script>
 
 <template>

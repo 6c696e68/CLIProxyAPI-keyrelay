@@ -68,6 +68,31 @@ type Store struct {
 	db  *sql.DB
 	cfg Config
 	mu  sync.Mutex
+
+	// Per-key cache for the session model-usage breakdown: a short TTL keeps
+	// repeated dashboard loads off the aggregation query. It has its own mutex
+	// so cache bookkeeping never contends with store writes.
+	modelUsageMu      sync.Mutex
+	modelUsageCache   map[string]modelUsageEntry
+	modelUsageFlights map[string]*modelUsageFlight
+}
+
+// modelUsageCacheTTL is how long a computed breakdown stays cached per key.
+const modelUsageCacheTTL = 10 * time.Second
+
+// modelUsageCacheMax bounds the cache; when exceeded it is cleared wholesale.
+const modelUsageCacheMax = 512
+
+type modelUsageEntry struct {
+	items     []ModelUsage
+	expiresAt time.Time
+}
+
+// modelUsageFlight lets concurrent loads of one key share a single query.
+type modelUsageFlight struct {
+	done  chan struct{}
+	items []ModelUsage
+	err   error
 }
 
 type Key struct {
@@ -214,6 +239,19 @@ type Session struct {
 	BaseURL  string
 }
 
+// ModelUsage is one aggregated per-model usage entry for a client key.
+type ModelUsage struct {
+	Model           string `json:"model"`
+	Requests        int64  `json:"requests"`
+	InputTokens     int64  `json:"input_tokens"`
+	OutputTokens    int64  `json:"output_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CachedTokens    int64  `json:"cached_tokens"`
+	TotalTokens     int64  `json:"total_tokens"`
+	FirstUsedAt     string `json:"first_used_at"`
+	LastUsedAt      string `json:"last_used_at"`
+}
+
 func Open(cfg Config) (*Store, error) {
 	if cfg.DefaultTTL == 0 {
 		cfg.DefaultTTL = 168 * time.Hour
@@ -279,7 +317,7 @@ func Open(cfg Config) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	cfg.DataFile = path
-	store := &Store{db: db, cfg: cfg}
+	store := &Store{db: db, cfg: cfg, modelUsageCache: map[string]modelUsageEntry{}, modelUsageFlights: map[string]*modelUsageFlight{}}
 	if err := store.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -458,6 +496,9 @@ CREATE INDEX IF NOT EXISTS idx_requests_time ON requests(requested_at DESC, requ
 CREATE INDEX IF NOT EXISTS idx_requests_status_time ON requests(status, requested_at DESC, request_id DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_rejection ON requests(key_id, rejection_code, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_requests_model_time ON requests(model, requested_at DESC);
+-- Covering index for the per-model usage breakdown: lets the session
+-- aggregation read only index entries for one key without touching the table.
+CREATE INDEX IF NOT EXISTS idx_requests_key_model_usage ON requests(key_id, model, status, input_tokens, output_tokens, reasoning_tokens, cached_tokens, billed_tokens, requested_at);
 CREATE INDEX IF NOT EXISTS idx_keys_group ON keys(group_id);
 CREATE INDEX IF NOT EXISTS idx_keys_partner ON keys(partner_id, partner_ref);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_partners_name_live ON partners(name) WHERE deleted_at IS NULL;
@@ -878,6 +919,7 @@ func (s *Store) ResetUsage(id string) (Key, error) {
 	if err != nil {
 		return Key{}, err
 	}
+	s.invalidateModelUsage(id)
 	return s.keyByID(id)
 }
 
@@ -885,6 +927,7 @@ func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`UPDATE keys SET deleted_at=? WHERE id=? AND deleted_at IS NULL`, s.cfg.Now().UTC().Format(time.RFC3339Nano), id)
+	s.invalidateModelUsage(id)
 	return err
 }
 
@@ -1164,7 +1207,11 @@ func (s *Store) Finalize(in FinalizeInput) error {
 	if status != "pending" {
 		return nil
 	}
-	return s.finalizePending(tx, in, keyID, false)
+	if err = s.finalizePending(tx, in, keyID, false); err != nil {
+		return err
+	}
+	s.invalidateModelUsage(keyID)
+	return nil
 }
 
 func (s *Store) finalizeLegacy(tx *sql.Tx, in FinalizeInput) error {
@@ -1176,7 +1223,11 @@ func (s *Store) finalizeLegacy(tx *sql.Tx, in FinalizeInput) error {
 	if err != nil {
 		return err
 	}
-	return s.finalizePending(tx, in, keyID, true)
+	if err = s.finalizePending(tx, in, keyID, true); err != nil {
+		return err
+	}
+	s.invalidateModelUsage(keyID)
+	return nil
 }
 
 func (s *Store) finalizePending(tx *sql.Tx, in FinalizeInput, keyID string, legacy bool) error {
@@ -1413,6 +1464,99 @@ func (s *Store) SessionPage(secret string, limit int, cursor string) (Session, P
 		page.HasMore = true
 	}
 	return Session{Key: key, Requests: reqs}, page, nil
+}
+
+// modelUsageLimit caps how many models the client session breakdown returns.
+const modelUsageLimit = 200
+
+// ModelUsage returns the per-model usage breakdown for one key, cached for up
+// to modelUsageCacheTTL so repeated dashboard loads skip the aggregation. The
+// returned slice is shared between callers and must not be mutated. The cache
+// is invalidated when a request for the key is finalized or its usage is reset.
+func (s *Store) ModelUsage(keyID string) ([]ModelUsage, error) {
+	now := s.cfg.Now()
+	s.modelUsageMu.Lock()
+	if entry, ok := s.modelUsageCache[keyID]; ok && now.Before(entry.expiresAt) {
+		items := entry.items
+		s.modelUsageMu.Unlock()
+		return items, nil
+	}
+	if flight, ok := s.modelUsageFlights[keyID]; ok {
+		// Another goroutine is already computing this key; share its result.
+		s.modelUsageMu.Unlock()
+		<-flight.done
+		return flight.items, flight.err
+	}
+	flight := &modelUsageFlight{done: make(chan struct{})}
+	s.modelUsageFlights[keyID] = flight
+	s.modelUsageMu.Unlock()
+
+	items, err := s.computeModelUsage(keyID)
+
+	s.modelUsageMu.Lock()
+	delete(s.modelUsageFlights, keyID)
+	if err == nil {
+		if len(s.modelUsageCache) >= modelUsageCacheMax {
+			// Bounded size: drop the whole cache instead of tracking ages.
+			s.modelUsageCache = map[string]modelUsageEntry{}
+		}
+		s.modelUsageCache[keyID] = modelUsageEntry{items: items, expiresAt: now.Add(modelUsageCacheTTL)}
+	}
+	s.modelUsageMu.Unlock()
+	// Publish the result before closing the flight so waiters waking on the
+	// channel never race with these writes.
+	flight.items = items
+	flight.err = err
+	close(flight.done)
+	return items, err
+}
+
+// invalidateModelUsage drops the cached breakdown for a key after its request
+// log or usage accounting changed.
+func (s *Store) invalidateModelUsage(keyID string) {
+	if s == nil || keyID == "" {
+		return
+	}
+	s.modelUsageMu.Lock()
+	delete(s.modelUsageCache, keyID)
+	s.modelUsageMu.Unlock()
+}
+
+// computeModelUsage aggregates the retained request log for one key by stored
+// model name. Only rows with a final status (not pending/rejected) count, and
+// only models that were actually billed (SUM(billed_tokens) > 0) are returned,
+// sorted by total billed tokens then model name. The breakdown is built from
+// the retained log, so after pruning or a usage reset it can be lower than
+// the key's tokens_used. The database is opened with a single connection, so
+// reads serialize on it regardless; s.mu keeps store-level ordering.
+func (s *Store) computeModelUsage(keyID string) ([]ModelUsage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`
+SELECT model, COUNT(1), SUM(input_tokens), SUM(output_tokens), SUM(reasoning_tokens), SUM(cached_tokens), SUM(billed_tokens),
+  MIN(requested_at), MAX(requested_at)
+FROM requests
+WHERE key_id=? AND status NOT IN ('pending','rejected')
+GROUP BY model
+HAVING SUM(billed_tokens) > 0
+ORDER BY SUM(billed_tokens) DESC, model ASC
+LIMIT ?`, keyID, modelUsageLimit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]ModelUsage, 0, 32)
+	for rows.Next() {
+		var item ModelUsage
+		var first, last string
+		if err := rows.Scan(&item.Model, &item.Requests, &item.InputTokens, &item.OutputTokens, &item.ReasoningTokens, &item.CachedTokens, &item.TotalTokens, &first, &last); err != nil {
+			return nil, err
+		}
+		item.FirstUsedAt = parseTime(first).UTC().Format(time.RFC3339Nano)
+		item.LastUsedAt = parseTime(last).UTC().Format(time.RFC3339Nano)
+		items = append(items, item)
+	}
+	return items, rows.Err()
 }
 
 func (s *Store) RunSweeper(ctx context.Context) {

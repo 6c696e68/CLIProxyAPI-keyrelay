@@ -1,4 +1,4 @@
-import type { ClientKey, RequestRow, SessionGroup } from '@/types'
+import type { ClientKey, ModelUsageRow, RequestRow, SessionGroup } from '@/types'
 import { asRecord, pick, pickNumber, pickString, pickTime } from './pick'
 
 export function mapKey(raw: unknown): ClientKey {
@@ -60,4 +60,22 @@ export function mapModels(value: unknown): string[] {
   const list = row.data || row.models || value
   if (!Array.isArray(list)) return []
   return list.map((item) => typeof item === 'string' ? item : pickString(asRecord(item), 'id', 'name')).filter(Boolean)
+}
+
+export function mapModelUsage(value: unknown): ModelUsageRow[] {
+  if (!Array.isArray(value)) return []
+  return value.map((item) => {
+    const row = asRecord(item)
+    return {
+      model: pickString(row, 'model', 'Model'),
+      requests: pickNumber(row, 'requests', 'Requests'),
+      inputTokens: pickNumber(row, 'input_tokens', 'InputTokens'),
+      outputTokens: pickNumber(row, 'output_tokens', 'OutputTokens'),
+      reasoningTokens: pickNumber(row, 'reasoning_tokens', 'ReasoningTokens'),
+      cachedTokens: pickNumber(row, 'cached_tokens', 'CachedTokens'),
+      totalTokens: pickNumber(row, 'total_tokens', 'TotalTokens'),
+      firstUsedAt: pickTime(row, 'first_used_at', 'FirstUsedAt') || '',
+      lastUsedAt: pickTime(row, 'last_used_at', 'LastUsedAt') || '',
+    }
+  }).filter((row) => Boolean(row.model))
 }

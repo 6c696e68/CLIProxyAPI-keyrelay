@@ -14,7 +14,13 @@ Shared rules, not shared values:
 
 ## Admin — CPA workbench
 
-Source of truth: `Cli-Proxy-API-Management-Center/src/styles/themes.scss` and `variables.scss`.
+Source of truth: `Cli-Proxy-API-Management-Center/src/styles/themes.scss` and `variables.scss`. The ch-relay-vippro dashboard uses the same admin values, so both plugin pages match the panel.
+
+### Host bridge
+
+- The page is an iframe under the panel's fixed header. `--chrome-top` is measured at boot and on resize: `header-height - 10 - frameTop`, clamped at 0. The app bar reserves that band.
+- Theme follows the panel: `data-theme="dark"` is dark, `white` or absent is light. A `MutationObserver` on the parent `html` element repaints on a live switch.
+- Standalone (dev) falls back to a stored choice, then `prefers-color-scheme`.
 
 ### Color
 
@@ -27,17 +33,17 @@ Source of truth: `Cli-Proxy-API-Management-Center/src/styles/themes.scss` and `v
 | `--bg-float` | `#fffdf9` | `#2a2723` |
 | `--ink` | `#2d2a26` | `#f6f4f1` |
 | `--ink-soft` | `#6d6760` | `#c9c3bb` |
-| `--ink-faint` | `#a29c95` | `#9c958d` |
+| `--ink-faint` | `#8f8880` | `#9c958d` |
 | `--line` | `#e3e1db` | `#3a3530` |
 | `--line-strong` | `#d5d2cb` | `#4a453f` |
-| `--accent` | `#8b8680` | `#8b8680` |
-| `--accent-hover` | `#7f7a74` | `#9a948e` |
-| `--accent-contrast` | `#ffffff` | `#ffffff` |
-| `--good` | `#0f8f68` | `#6ee7b7` |
+| `--accent` | `#8b8680` | `#a6a099` |
+| `--accent-hover` | `#7f7a74` | `#b7b1aa` |
+| `--accent-contrast` | `#fffdf9` | `#151412` |
+| `--good` | `#0f6f52` | `#8ed7b4` |
 | `--good-bg` | `#e7f6f0` | `#14352c` |
-| `--warn` | `#9a5b16` | `#fcd34d` |
+| `--warn` | `#8a5a16` | `#f0d7a4` |
 | `--warn-bg` | `#f8f0e4` | `#3a2d14` |
-| `--bad` | `#a34738` | `#f1b0a6` |
+| `--bad` | `#9d3d30` | `#f1b0a6` |
 | `--bad-bg` | `#f8ebe8` | `#3a221e` |
 
 `--good` is darkened from CPA's `#10b981` on light surfaces so small status text clears 4.5:1. The meter fill may use `#10b981`.
@@ -60,9 +66,10 @@ Source of truth: `Cli-Proxy-API-Management-Center/src/styles/themes.scss` and `v
 - Control radius: 8px
 - Panel radius: 12px
 - Sheet radius: 16px on the leading edge only
-- Sidebar: 216px expanded, 60px collapsed
+- App bar: one sticky row of tabs, 40px tall, 38px on mobile; no sidebar
 - Content max: 1440px
 - Shell gutter: 24px, 16px below 768px
+- Reserved host band: `--chrome-top`, 0 when the page is standalone or already inset
 - Shadow: `0 1px 2px rgb(45 42 38 / 0.06)` on panels; `0 18px 40px rgb(45 42 38 / 0.16)` on overlays
 - Z: sticky 20, dropdown 40, sheet 60, modal 70, toast 80
 

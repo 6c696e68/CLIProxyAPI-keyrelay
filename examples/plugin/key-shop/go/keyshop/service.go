@@ -896,11 +896,41 @@ func (s *Service) session(headers map[string][]string, query map[string][]string
 		}
 	}
 	mode, visible := s.sessionModels(group)
-	return jsonResponse(http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"Key": session.Key, "Requests": session.Requests, "base_url": requestBaseURL(headers),
 		"next_cursor": page.NextCursor, "has_more": page.HasMore, "total": page.Total,
 		"model_access_mode": mode, "models": visible, "group": groupInfo,
-	})
+	}
+	if queryOne(query, "cursor") == "" {
+		// The per-model breakdown rides on the first page only; the client
+		// dashboard keeps it while paging through the request list.
+		usage, errUsage := s.store.ModelUsage(session.Key.ID)
+		if errUsage != nil {
+			return textResponse(http.StatusInternalServerError, "session failed")
+		}
+		resp["model_usage"] = usage
+		resp["model_usage_since"] = modelUsageSince(usage)
+	}
+	return jsonResponse(http.StatusOK, resp)
+}
+
+// modelUsageSince returns the earliest first_used_at across the breakdown, or
+// an empty string when there are no entries.
+func modelUsageSince(items []ModelUsage) string {
+	var earliest time.Time
+	for _, item := range items {
+		t, err := time.Parse(time.RFC3339Nano, item.FirstUsedAt)
+		if err != nil || t.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || t.Before(earliest) {
+			earliest = t
+		}
+	}
+	if earliest.IsZero() {
+		return ""
+	}
+	return earliest.UTC().Format(time.RFC3339Nano)
 }
 
 func clientVisibleModels(models []ModelAccessModel) []string {

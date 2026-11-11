@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppModal from '@/components/ui/AppModal.vue'
 import Icon from '@/components/ui/Icon.vue'
+import ModelUsage from '@/components/ModelUsage.vue'
 import Pager from '@/components/ui/Pager.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
 import { copyText, formatNumber, pageRange, rejectionLabel, splitWhen } from '@/lib/format'
@@ -26,6 +27,8 @@ const requestTotal = computed(() => snapshot.value?.requestTotal ?? 0)
 const requestHasMore = computed(() => Boolean(snapshot.value?.requestHasMore))
 const cached = computed(() => visible.value.reduce((sum, row) => sum + row.cached, 0))
 const unrestricted = computed(() => snapshot.value?.modelAccessMode === 'full' && snapshot.value.models.length === 0)
+const modelUsage = computed(() => snapshot.value?.modelUsage ?? [])
+const modelUsageSince = computed(() => snapshot.value?.modelUsageSince ?? '')
 const initials = computed(() => {
   const words = (snapshot.value?.key.label || 'Key').trim().split(/\s+/)
   return words.slice(0, 2).map((word) => word.charAt(0).toUpperCase()).join('')
@@ -196,6 +199,10 @@ const facts = [
           </div>
         </div>
         <div class="stats"><div v-for="n in 6" :key="n" class="stat"><div class="skel h-4 w-2/3" /><div class="skel mt-2 h-6 w-1/2" /></div></div>
+        <div class="panel grid gap-4">
+          <div class="grid gap-2"><div class="skel h-5 w-1/3" /><div class="skel h-4 w-1/2" /></div>
+          <div class="grid gap-3"><div v-for="n in 4" :key="n" class="skel h-6 w-full" /></div>
+        </div>
       </div>
 
       <div v-if="snapshot" class="stack">
@@ -279,6 +286,9 @@ const facts = [
             <span>Failed, canceled, and rejected calls still count toward the request cap.</span>
           </p>
         </section>
+
+        <!-- Usage by model -->
+        <ModelUsage :rows="modelUsage" :since="modelUsageSince" />
 
         <!-- Models -->
         <section class="panel" aria-labelledby="models-title">

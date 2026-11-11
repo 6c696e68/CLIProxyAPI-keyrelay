@@ -28,7 +28,6 @@
   --shadow: 0 1px 2px rgb(45 42 38 / 0.06);
   --float-shadow: 0 18px 40px rgb(45 42 38 / 0.16);
   --overlay: rgb(28 24 20 / 0.46);
-  --sidebar: 216px;
   --focus: 0 0 0 2px var(--bg-page), 0 0 0 4px #5f5a55;
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
@@ -113,84 +112,53 @@ button:disabled { cursor: not-allowed; }
 }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 
-.shell { display: flex; min-height: 100dvh; background: var(--bg-page); }
-.sidebar {
-  position: sticky;
-  top: 0;
-  display: flex;
-  width: var(--sidebar);
-  height: 100dvh;
-  flex-direction: column;
-  gap: 18px;
-  flex-shrink: 0;
-  padding: 18px 12px;
-  border-right: 1px solid var(--line);
-  background: var(--bg-surface);
-}
-.sidebar.collapsed { width: 60px; padding-inline: 8px; }
-.brand { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 0 6px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 80%, transparent); }
-.brand-mark {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--bg-float);
-  font-size: 12px;
-  font-weight: 750;
-}
-.brand-title { font-size: 14px; font-weight: 750; letter-spacing: -0.02em; }
-.brand-sub { color: var(--ink-soft); font-size: 11px; }
-.nav-group { display: grid; gap: 4px; }
-.nav-label { padding: 8px 10px 2px; color: var(--ink-faint); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; }
-a.nav-item { color: var(--ink-soft); text-decoration: none; }
-.nav-item {
-  display: flex;
-  min-height: 38px;
-  align-items: center;
-  gap: 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  padding: 8px 10px;
-  color: var(--ink-soft);
-  text-align: left;
-}
-.nav-item:hover { background: var(--bg-muted); color: var(--ink); }
-.nav-item.active { background: var(--bg-hover); color: var(--ink); font-weight: 680; }
-.sidebar.collapsed .nav-label, .sidebar.collapsed .brand-copy { display: none; }
-.sidebar.collapsed .nav-text { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
-.sidebar.collapsed .nav-item, .sidebar.collapsed .brand { justify-content: center; }
+.shell { min-height: 100dvh; background: var(--bg-page); }
 
-.workspace { min-width: 0; flex: 1; }
-.topbar {
+/* The panel header floats over the top of this iframe. The sticky app bar keeps
+   its own background in that band so scrolled content never shows through it. */
+.appbar {
   position: sticky;
   top: 0;
   z-index: 20;
+  padding: calc(var(--chrome-top, 0px) + 10px) 24px 0;
+  background: var(--bg-page);
+}
+.appbar-inner {
   display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tabs {
+  display: flex;
+  min-width: 0;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab {
+  display: inline-flex;
+  min-height: 40px;
+  flex: 0 0 auto;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  padding: 16px 24px 0;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
 }
-.float-cluster {
-  display: flex;
-  gap: 4px;
-  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--bg-float) 88%, transparent);
-  padding: 4px;
-  box-shadow: var(--shadow);
-}
-.dock {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 30;
-}
-.content { width: min(1440px, 100%); max-width: 100%; min-width: 0; padding: 8px 24px 96px; }
+.tab:hover { background: var(--bg-muted); color: var(--ink); }
+.tab.active { border-bottom-color: var(--ink); color: var(--ink); font-weight: 720; }
+.appbar-actions { display: flex; flex: 0 0 auto; gap: 4px; padding-bottom: 6px; }
+.appbar-actions .icon-btn { width: 36px; min-width: 36px; }
+
+.content { width: min(1440px, 100%); max-width: 100%; min-width: 0; margin: 0 auto; padding: 20px 24px 64px; }
 .page-kicker { color: var(--ink-soft); font-size: 12px; font-weight: 650; }
 .page-title { margin: 2px 0 0; font-size: 28px; font-weight: 740; letter-spacing: -0.035em; line-height: 1.15; }
 .page-copy { max-width: 62ch; margin: 6px 0 0; color: var(--ink-soft); }
@@ -208,6 +176,13 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .section-copy { margin: 4px 0 0; color: var(--ink-soft); font-size: 13px; }
 
 .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.count-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; margin-top: 4px; }
+.count-grid > span { display: flex; min-width: 0; flex-direction: column; border-radius: 7px; background: var(--bg-muted); padding: 5px 7px; }
+.count-grid b { font-family: var(--font-mono); font-size: 12px; font-weight: 700; }
+.count-grid em { color: var(--ink-faint); font-size: 10px; font-style: normal; font-weight: 650; }
+.count-grid .tone-good b { color: var(--good); }
+.count-grid .tone-bad b { color: var(--bad); }
+.count-grid .tone-warn b { color: var(--warn); }
 .metric { display: flex; min-width: 0; min-height: 112px; flex-direction: column; align-items: flex-start; gap: 8px; }
 .metric-label { display: block; color: var(--ink-soft); font-size: 12px; font-weight: 650; line-height: 1.3; }
 .metric-value { display: block; max-width: 100%; overflow-wrap: anywhere; font-size: 24px; font-weight: 730; letter-spacing: -0.03em; line-height: 1.15; }
@@ -284,6 +259,7 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .table-scroll { overflow-x: auto; }
 .data-table { width: 100%; min-width: 980px; border-collapse: collapse; text-align: left; }
 .data-table.fit { min-width: 720px; }
+.data-table.keys { min-width: 1100px; }
 .data-table.log { min-width: 1080px; }
 .data-table th {
   background: var(--bg-muted);
@@ -294,13 +270,20 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
   letter-spacing: 0.04em;
   white-space: nowrap;
 }
-.data-table td { border-top: 1px solid var(--line); padding: 12px; vertical-align: middle; }
+.data-table td { border-top: 1px solid var(--line); padding: 11px 12px; vertical-align: middle; }
 .data-table tbody tr:hover td { background: color-mix(in srgb, var(--bg-hover) 55%, transparent); }
+.data-table .nowrap { white-space: nowrap; }
+.data-table .actions { text-align: right; }
 .clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { margin-top: 2px; color: var(--ink-faint); font-size: 12px; }
-.usage-cell { white-space: normal; line-height: 1.35; }
-.usage-cell > span { display: block; }
+.usage-cell { white-space: nowrap; line-height: 1.35; }
 .usage-limit { color: var(--ink-soft); }
+.meter { display: block; width: 100%; min-width: 72px; height: 4px; margin-top: 6px; overflow: hidden; border-radius: 99px; background: var(--bg-muted); }
+.meter i { display: block; height: 100%; border-radius: inherit; background: var(--good); }
+.meter.warn i { background: var(--warn); }
+.meter.bad i { background: var(--bad); }
+.group-cell { display: inline-flex; max-width: 100%; align-items: center; gap: 6px; white-space: nowrap; }
+.group-cell.muted { color: var(--ink-faint); }
 
 .card-list { display: grid; gap: 10px; }
 .record {
@@ -425,22 +408,21 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+/* Prototype scenario picker. Dev builds only; it lives in the app bar so it
+   never covers page content. */
 .preview {
-  position: fixed;
-  left: 16px;
-  bottom: 16px;
-  z-index: 75;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   border: 1px dashed var(--line-strong);
   border-radius: 999px;
   background: var(--bg-float);
-  padding: 6px 8px 6px 12px;
+  padding: 2px 6px 2px 10px;
   color: var(--ink-soft);
-  font-size: 12px;
-  box-shadow: var(--shadow);
+  font-size: 11px;
+  font-weight: 650;
 }
+.preview .control { min-height: 28px; padding: 2px 8px; font-size: 12px; }
 .gate { display: grid; min-height: 100dvh; place-items: center; padding: 24px 16px 80px; }
 .boot { display: grid; min-height: 100dvh; place-items: center; align-content: center; gap: 14px; color: var(--ink-soft); }
 .boot p { margin: 0; font-size: 14px; }
@@ -452,11 +434,17 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 767px) {
-  .sidebar { position: fixed; z-index: 50; transform: translateX(-105%); transition: transform 180ms ease; }
-  .sidebar.open { transform: translateX(0); }
-  .content, .topbar { padding-inline: 16px; }
+  .appbar { padding: calc(var(--chrome-top, 0px) + 8px) 16px 0; }
+  .tab { min-height: 38px; padding-inline: 8px; font-size: 12.5px; }
+  .tabs { scroll-snap-type: x proximity; mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent); -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent); }
+  .tab { scroll-snap-align: center; }
+  .appbar-actions .icon-btn { width: 40px; min-width: 40px; }
+  .content { padding: 16px 16px 48px; }
   .page-title { font-size: 26px; }
   .metric-grid, .model-split, .model-manual { grid-template-columns: 1fr; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .metric { min-height: 92px; padding: 14px; }
+  .metric-value { font-size: clamp(18px, 5.2vw, 22px); }
   .btn, .control { min-height: 44px; }
   .switch { min-height: 32px; }
 }
@@ -464,17 +452,14 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 
-.nav-scrim { position: fixed; inset: 0; z-index: 40; border: 0; background: var(--overlay); }
 .only-desktop,
 .only-desktop-flex { display: none; }
 .only-mobile { display: block; }
-.topbar.only-mobile { display: flex; }
 .card-list.only-mobile { display: grid; }
 @media (min-width: 768px) {
   .only-desktop { display: block; }
   .only-desktop-flex { display: inline-flex; }
   .only-mobile,
-  .topbar.only-mobile,
   .card-list.only-mobile { display: none; }
 }
 
@@ -497,9 +482,25 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .preset-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .preset[aria-pressed="true"] { border-color: var(--ink); color: var(--ink); background: var(--bg-float); }
 .chart-frame { width: 100%; min-width: 0; color: var(--ink); }
-.chart-frame svg { display: block; width: 100%; height: 180px; }
-.chart-empty { margin: 24px 0; color: var(--ink-soft); text-align: center; }
-.chart-axis { display: flex; justify-content: space-between; gap: 8px; margin-top: 6px; color: var(--ink-faint); font-size: 11px; }
+.chart-body { display: flex; gap: 10px; }
+.chart-y {
+  display: flex;
+  width: 42px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 180px;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+}
+.chart-plot { position: relative; min-width: 0; flex: 1; height: 180px; }
+.chart-grid { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; }
+.chart-grid i { display: block; border-top: 1px dashed var(--line); }
+.chart-plot svg { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.chart-empty { position: absolute; inset: 0; display: grid; place-items: center; margin: 0; color: var(--ink-soft); font-size: 13px; }
+.chart-axis { display: flex; justify-content: space-between; gap: 8px; margin: 8px 0 0; padding-left: 52px; color: var(--ink-faint); font-size: 11px; }
 .chart-axis span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mix { display: flex; height: 10px; overflow: hidden; border-radius: 99px; background: var(--bg-muted); }
 .mix i { display: block; height: 100%; min-width: 0; }
@@ -527,35 +528,7 @@ a.nav-item { color: var(--ink-soft); text-decoration: none; }
 .text-link { color: var(--ink); font-weight: 680; text-decoration: underline; text-underline-offset: 3px; }
 .text-link-card { color: inherit; text-decoration: none; }
 .data-table tr.clickable:focus-visible td { box-shadow: inset 0 0 0 2px var(--ink); }
-.workspace, .content { overflow-x: clip; }
+.content { overflow-x: clip; }
 
-/* Mobile menu floats bottom-left so it does not cover the host top toolbar. */
-@media (max-width: 767px) {
-  .topbar.only-mobile {
-    position: fixed;
-    top: auto;
-    left: max(16px, env(safe-area-inset-left));
-    bottom: max(16px, env(safe-area-inset-bottom));
-    z-index: 35;
-    width: max-content;
-    max-width: 56px;
-    margin: 0;
-    padding: 0;
-  }
-  .topbar.only-mobile .icon-btn { width: 44px; min-width: 44px; min-height: 44px; }
-  .content { padding-bottom: calc(96px + env(safe-area-inset-bottom)); }
-}
-
-/* Sheet Close floats bottom-right on mobile so the host top toolbar cannot cover it. */
-@media (max-width: 767px) {
-  .sheet-close {
-    position: fixed;
-    right: max(16px, env(safe-area-inset-right));
-    bottom: max(16px, env(safe-area-inset-bottom));
-    z-index: 65;
-    min-width: 72px;
-    min-height: 44px;
-    box-shadow: var(--float-shadow);
-  }
-  .sheet { padding-bottom: calc(88px + env(safe-area-inset-bottom)); }
-}
+/* The embedded app has no floating controls: the app bar owns refresh, and the
+   panel header owns theme and sign-out. Nothing overlaps table or card content. */

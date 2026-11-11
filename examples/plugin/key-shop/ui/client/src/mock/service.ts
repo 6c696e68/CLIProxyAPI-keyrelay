@@ -1,4 +1,4 @@
-import type { ClientQuery, ClientSnapshot, Scenario } from '@/types'
+import type { ClientQuery, ClientSnapshot, ModelUsageRow, Scenario } from '@/types'
 
 const PAGE_SIZE = 5
 
@@ -33,6 +33,20 @@ const requests: ClientSnapshot['requests'] = [
 
 const models = ['codex-latest', 'claude-sonnet-4-5', 'gemini-2.5-pro', 'gpt-5.4-mini', 'gpt-5.4', 'claude-opus-4-1', 'gemini-2.5-flash', 'gpt-5-codex', 'claude-haiku-4-5', 'o3', 'o4-mini', 'gemini-2.5-flash-lite', 'gpt-5.3-codex', 'claude-sonnet-4', 'grok-4', 'llama-4-maverick', 'deepseek-v3', 'mistral-large', 'command-a', 'qwen3-coder']
 
+const modelUsage: ModelUsageRow[] = [
+  { model: 'gpt-5-codex', requests: 482, inputTokens: 812_400_000, outputTokens: 392_480_000, reasoningTokens: 96_400_000, cachedTokens: 402_100_000, totalTokens: 1_204_880_000, firstUsedAt: '2026-09-18T10:04:00', lastUsedAt: '2026-10-18T08:42:00' },
+  { model: 'claude-sonnet-4-5', requests: 302, inputTokens: 4_120_600, outputTokens: 1_982_400, reasoningTokens: 0, cachedTokens: 1_240_900, totalTokens: 6_103_000, firstUsedAt: '2026-09-19T11:20:00', lastUsedAt: '2026-10-18T07:58:00' },
+  { model: 'gemini-2.5-pro', requests: 208, inputTokens: 2_884_100, outputTokens: 1_402_600, reasoningTokens: 318_400, cachedTokens: 604_200, totalTokens: 4_286_700, firstUsedAt: '2026-09-20T08:12:00', lastUsedAt: '2026-10-17T21:14:00' },
+  { model: 'gemini-2.5-flash-preview-thinking-09-2025-extended-context', requests: 121, inputTokens: 1_846_200, outputTokens: 902_400, reasoningTokens: 214_800, cachedTokens: 0, totalTokens: 2_748_600, firstUsedAt: '2026-09-22T15:40:00', lastUsedAt: '2026-10-17T19:02:00' },
+  { model: 'gpt-5.4', requests: 86, inputTokens: 1_204_800, outputTokens: 688_200, reasoningTokens: 142_600, cachedTokens: 402_800, totalTokens: 1_893_000, firstUsedAt: '2026-09-25T09:10:00', lastUsedAt: '2026-10-17T16:02:00' },
+  { model: 'claude-opus-4-1', requests: 54, inputTokens: 684_900, outputTokens: 388_400, reasoningTokens: 128_200, cachedTokens: 214_600, totalTokens: 1_073_300, firstUsedAt: '2026-09-28T13:24:00', lastUsedAt: '2026-10-15T18:33:00' },
+  { model: 'gpt-5-codex(high)', requests: 31, inputTokens: 612_400, outputTokens: 448_900, reasoningTokens: 302_400, cachedTokens: 204_100, totalTokens: 1_061_300, firstUsedAt: '2026-10-02T10:50:00', lastUsedAt: '2026-10-16T11:26:00' },
+  { model: 'o4-mini', requests: 18, inputTokens: 244_600, outputTokens: 121_800, reasoningTokens: 84_200, cachedTokens: 42_600, totalTokens: 366_400, firstUsedAt: '2026-10-06T17:08:00', lastUsedAt: '2026-10-14T09:52:00' },
+  { model: 'gemini-2.5-flash-lite', requests: 9, inputTokens: 96_400, outputTokens: 42_100, reasoningTokens: 0, cachedTokens: 18_400, totalTokens: 138_500, firstUsedAt: '2026-10-09T12:36:00', lastUsedAt: '2026-10-12T07:15:00' },
+]
+
+const modelUsageSince = '2026-09-18T00:00:00'
+
 function pageOf(rows: ClientSnapshot['requests'], page: number): Pick<ClientSnapshot, 'requests' | 'requestTotal' | 'requestHasMore'> {
   const start = (page - 1) * PAGE_SIZE
   return {
@@ -58,6 +72,8 @@ export function createClientService() {
           group: null,
           modelAccessMode: 'full',
           baseUrl: 'https://relay.northline.example/v1',
+          modelUsage: [],
+          modelUsageSince: '',
           ...pageOf([], input.page),
         }
       }
@@ -68,6 +84,8 @@ export function createClientService() {
           group: { id: 'grp_studio', name: 'Studio', allModels: false },
           modelAccessMode: 'custom',
           baseUrl: 'https://relay.northline.example/v1',
+          modelUsage,
+          modelUsageSince,
           ...pageOf(requests, input.page),
         }
       }
@@ -77,6 +95,8 @@ export function createClientService() {
         group: { id: 'grp_studio', name: 'Studio', allModels: false },
         modelAccessMode: 'custom',
         baseUrl: 'https://relay.northline.example/v1',
+        modelUsage,
+        modelUsageSince,
         ...pageOf(requests, input.page),
       }
     },

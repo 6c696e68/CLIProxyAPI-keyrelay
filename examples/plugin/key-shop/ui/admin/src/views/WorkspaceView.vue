@@ -12,7 +12,7 @@ import RequestsView from '@/views/RequestsView.vue'
 import TunnelsView from '@/views/TunnelsView.vue'
 import type { AdminService, Scenario, ThemeName } from '@/types'
 
-const props = withDefaults(defineProps<{ service: AdminService; scenario?: Scenario; theme: ThemeName }>(), { scenario: 'ready' })
+const props = withDefaults(defineProps<{ service: AdminService; scenario?: Scenario; theme: ThemeName; embedded?: boolean }>(), { scenario: 'ready', embedded: false })
 const emit = defineEmits<{ logout: []; toggleTheme: [] }>()
 const { route } = useRoute()
 const { toast, notify } = useToast()
@@ -24,7 +24,8 @@ provide(viewBusyKey, viewBusy)
 </script>
 
 <template>
-  <AdminShell :theme="theme" :busy="viewBusy" @refresh="refreshTick += 1" @logout="emit('logout')" @toggle-theme="emit('toggleTheme')">
+  <AdminShell :theme="theme" :embedded="embedded" :busy="viewBusy" @refresh="refreshTick += 1" @logout="emit('logout')" @toggle-theme="emit('toggleTheme')">
+    <template #tools><slot name="tools" /></template>
     <main id="content" class="content">
       <DashboardView v-if="route === 'dashboard'" :service="service" :scenario="props.scenario" />
       <GroupsView v-else-if="route === 'groups'" :service="service" :scenario="props.scenario" />

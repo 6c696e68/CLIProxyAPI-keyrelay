@@ -170,6 +170,8 @@ A direct `GET /v0/resource/plugins/key-shop/dashboard` redirects to `/client`. U
 
 The session JSON includes `base_url`, which is the request host plus `/v1`, and `total`, the number of stored requests for that key. It also includes `group` (`{id, name, all_models}`, or `null` when the key has no group) and `model_access_mode`. `models` is the list the key may call. For a limited group that list is the group's client-visible names (alias if set, otherwise the upstream name). `model_access_mode` is `full` only when neither the global policy nor the group limits the key.
 
+On the first page (no `cursor`) the session also carries `model_usage`, a per-model breakdown for that key only, sorted by `total_tokens` then model name (max 200 entries). Each entry has `model`, `requests` (rows with a final status), `input_tokens`, `output_tokens`, `reasoning_tokens`, `cached_tokens`, `total_tokens` (sum of `billed_tokens`, the same number charged against the key quota), `first_used_at` and `last_used_at` (RFC3339). Only models that were billed appear; `model_usage_since` is the earliest `first_used_at` or `""`. Later pages omit these fields, so the dashboard keeps the page-1 breakdown while paging. The breakdown is cached per key for up to 10 seconds and is invalidated when a request for that key is finalized, its usage is reset, or the key is deleted. It is built from the retained request log, so after pruning or a usage reset it can be lower than the key's `tokens_used`.
+
 ## Enforcement
 
 Auth accepts a `ck_` key only when it is active, unexpired, and has remaining tokens after open reservations. Expired, disabled, and exhausted keys are not accepted. The plugin auth adapter cannot set an HTTP status, so those clients see 401.

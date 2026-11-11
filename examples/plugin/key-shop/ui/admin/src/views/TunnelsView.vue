@@ -4,6 +4,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AppButton from '@/components/ui/AppButton.vue'
 import AppField from '@/components/ui/AppField.vue'
 import AppModal from '@/components/ui/AppModal.vue'
+import AppSelect from '@/components/ui/AppSelect.vue'
 import AppSheet from '@/components/ui/AppSheet.vue'
 import AppTextInput from '@/components/ui/AppTextInput.vue'
 import { useLoadGuard } from '@/composables/useLoadGuard'
@@ -39,6 +40,10 @@ let logTimer = 0
 let logPull: Promise<void> | null = null
 let refreshTimer = 0
 let disposed = false
+
+function statusLabel(status: string) {
+  return status ? status.charAt(0).toUpperCase() + status.slice(1) : '—'
+}
 
 function statusClass(status: string) {
   if (status === 'running') return 'chip-good'
@@ -249,7 +254,7 @@ onBeforeUnmount(() => {
                     <div class="sub">{{ row.kind }} · {{ row.targetUrl || row.id }}<span v-if="row.hasToken"> · token …{{ row.tokenHint }}</span></div>
                     <div v-if="row.lastError" class="sub">{{ row.lastError }}</div>
                   </td>
-                  <td><span class="chip" :class="statusClass(row.status)">{{ row.status }}</span></td>
+                  <td><span class="chip" :class="statusClass(row.status)"><i />{{ statusLabel(row.status) }}</span></td>
                   <td>
                     <div v-if="row.kind === 'quick' && row.publicUrl" class="flex items-center gap-2">
                       <span class="truncate">{{ row.publicUrl }}</span>
@@ -274,7 +279,7 @@ onBeforeUnmount(() => {
         <div class="card-list only-mobile">
           <article v-for="row in tunnels" :key="row.id" class="record">
             <strong>{{ row.name }}</strong>
-            <p class="sub">{{ row.kind }} · <span class="chip" :class="statusClass(row.status)">{{ row.status }}</span></p>
+            <p class="sub">{{ row.kind }} · <span class="chip" :class="statusClass(row.status)"><i />{{ statusLabel(row.status) }}</span></p>
             <p v-if="row.kind === 'quick' && row.publicUrl" class="sub">{{ row.publicUrl }}</p>
             <div class="mt-3 flex flex-wrap gap-2">
               <AppButton small :disabled="busy" @click="toggle(row)">{{ busy ? 'Working...' : (row.status === 'running' || row.status === 'starting' ? 'Stop' : 'Start') }}</AppButton>
@@ -295,10 +300,13 @@ onBeforeUnmount(() => {
           <AppTextInput v-model="name" :maxlength="64" placeholder="edge" />
         </AppField>
         <AppField label="Kind" hint="Kind cannot change after create.">
-          <select v-model="kind" class="field" :disabled="Boolean(editing)">
-            <option value="quick">quick</option>
-            <option value="token">token</option>
-          </select>
+          <AppSelect
+            :model-value="kind"
+            :options="[{ value: 'quick', label: 'Quick tunnel' }, { value: 'token', label: 'Named tunnel with token' }]"
+            :disabled="Boolean(editing)"
+            label="Tunnel kind"
+            @update:model-value="kind = $event as TunnelKind"
+          />
         </AppField>
         <AppField label="Target URL" :hint="kind === 'quick' ? 'Required. http or https.' : 'Optional hint.'">
           <AppTextInput v-model="targetUrl" :placeholder="targetPlaceholder()" />

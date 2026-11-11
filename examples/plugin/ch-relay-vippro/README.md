@@ -178,7 +178,13 @@ The client `Authorization` header is not forwarded. The plugin sets `Authorizati
 
 `GET /v0/management/ch-relay-vippro/stats` returns immediately and does not call `host.auth.list`. `usage_by_email` lists each account email with success count, error count, and total tokens, sorted by request count descending.
 
-`GET /v0/resource/plugins/ch-relay-vippro/dashboard` is the React dashboard that ships inside the plugin. The host lists it as the Dashboard menu. The page loads `?format=json` for totals, the email table, the chart, and the latest account check, and refreshes that JSON without reloading. The table shows `asd***@****.com`. Each Copy button copies the full email. This page is a plugin resource, so the host does not require the management key. Rebuild the page from `go/ui` with `bun run build` before compiling the plugin. Account checks still start from `POST /v0/management/ch-relay-vippro/accounts/check`, and the plugin also scans on its own.
+`GET /v0/resource/plugins/ch-relay-vippro/dashboard` is the React dashboard that ships inside the plugin. The host lists it as the Dashboard menu. The page loads `?format=json` for totals, the email table, the charts, and the latest account check, and refreshes that JSON every five seconds without reloading.
+
+The page uses the same design tokens and page anatomy as the key-shop admin: four primary metrics, a quieter detail strip, a traffic chart with y-axis labels and a Requests/Tokens switch, the account snapshot, and the email table. Below 768px the email table becomes cards with the same fields.
+
+It is a plugin resource, so the host does not require the management key. It follows the panel theme (`data-theme`) and reserves the band the panel header floats over, so its content never sits under the panel actions. The table shows `asd***@****.com`; each Copy button copies the full email. Rebuild the page from `go/ui` with `bun run build` before compiling the plugin. Account checks still start from `POST /v0/management/ch-relay-vippro/accounts/check`, and the plugin also scans on its own.
+
+`vite dev` in `go/ui` renders `src/devfixture.ts` instead of calling the plugin endpoint, so the page can be reviewed without a running host. Vite drops the fixture from the production bundle. In dev the page also lists a theme choice from `localStorage` before falling back to `prefers-color-scheme`; embedded in the panel it always follows the panel theme.
 
 `POST /v0/management/ch-relay-vippro/accounts/check` starts a background scan of enabled Codex accounts when one is not already running, then returns the same stats JSON. The plugin also scans shortly after load and every 30 minutes. Disabled and non-Codex records are skipped. The response does not include access tokens, emails, or auth file paths.
 

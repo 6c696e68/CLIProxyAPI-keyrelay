@@ -159,6 +159,7 @@ watch(preset, () => { void load() })
           <a v-for="row in latest" :key="row.requestId" class="record text-link-card" href="#/requests">
             <div class="flex items-start justify-between gap-3"><strong class="num truncate text-xs">{{ row.model }}</strong><StatusChip :value="row.status" /></div>
             <p class="sub">{{ row.keyLabel || row.keyId }} · {{ row.customer || '—' }}</p>
+            <p class="sub num">{{ splitWhen(row.requestedAt).date }} · {{ splitWhen(row.requestedAt).time }}</p>
           </a>
           <p v-if="!latest.length" class="record text-center text-sm text-[var(--ink-soft)]">No requests in this range.</p>
         </div>

@@ -39,6 +39,18 @@ export interface RequestRow {
   billed: number
 }
 
+export interface ModelUsageRow {
+  model: string
+  requests: number
+  inputTokens: number
+  outputTokens: number
+  reasoningTokens: number
+  cachedTokens: number
+  totalTokens: number
+  firstUsedAt: string
+  lastUsedAt: string
+}
+
 export interface ClientQuery {
   scenario: Scenario
   page: number
@@ -59,4 +71,6 @@ export interface ClientSnapshot {
   baseUrl: string
   requestTotal: number
   requestHasMore: boolean
+  modelUsage: ModelUsageRow[]
+  modelUsageSince: string
 }

@@ -44,6 +44,9 @@ if (storedTheme === 'dark' || storedTheme === 'light') applyTheme(storedTheme)
 <template>
   <a class="skip-link" href="#content">Skip to content</a>
   <LoginView v-if="!authed" :loading="loading" :error="error" @submit="submit" />
-  <WorkspaceView v-else :service="service" :scenario="scenario" :theme="theme" @logout="logout" @toggle-theme="applyTheme(theme === 'dark' ? 'light' : 'dark')" />
-  <PrototypeBar :scenario="scenario" @update:scenario="scenario = $event" />
+  <WorkspaceView v-else :service="service" :scenario="scenario" :theme="theme" @logout="logout" @toggle-theme="applyTheme(theme === 'dark' ? 'light' : 'dark')">
+    <template #tools>
+      <PrototypeBar :scenario="scenario" @update:scenario="scenario = $event" />
+    </template>
+  </WorkspaceView>
 </template>

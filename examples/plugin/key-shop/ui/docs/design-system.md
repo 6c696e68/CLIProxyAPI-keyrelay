@@ -2,7 +2,7 @@
 
 ## Principles
 
-Admin is an operator workbench. It should feel like another CPA Management Center page: warm paper, left rail, dense but aligned data, quiet gray actions.
+Admin is an operator workbench. It should feel like another CPA Management Center page: warm paper, one top tab bar, dense but aligned data, quiet gray actions. It runs inside the panel, so it follows the panel theme and never draws a second sidebar.
 
 Client is a private ledger. It should feel calmer and more personal: cool mist canvas, serif identity, quota health as the visual center, no operator chrome.
 
@@ -29,19 +29,21 @@ Both systems use the same interaction grammar:
 | `AppDateTime` | Month grid, 24-hour time, presets, no Flatpickr and no native date input |
 | `StatusChip` | Dot plus sentence-case label; good, warn, bad, muted |
 | `Pager` | Previous/Next, disabled at ends, range text |
-| `AppModal` | Centered dialog for create, edit, details, and delete. No side drawer. Escape and scrim close |
-| `AppModal` | Centered confirmation, focus moves inside, Escape cancels |
+| `AppModal` | Centered dialog for create, edit, details, and delete. Escape and scrim close |
+| `AppSheet` | Side sheet for long editors. Close stays in the sheet header, never a floating button |
 | `Toast` | Bottom-right, 2.2s, status text, does not cover the primary action on mobile |
 
 ### Admin layout
 
-- Desktop: 216px rail, page canvas, floating action cluster at the top right.
-- Rail groups: Overview, Access, Activity. Items scroll to sections. The active item follows the section in view.
-- Below 768px the rail becomes an off-canvas drawer. A menu button stays in the top-left cluster.
-- The rail can collapse to a 60px icon rail on desktop. Labels remain available to assistive technology.
+- The admin is mounted in the panel as a plugin resource iframe. The panel header is fixed and floats over the iframe's top edge, so the app reserves that band in `--chrome-top` before painting content.
+- Theme comes from the panel (`data-theme="dark"` means dark; `white` or absent means light). The app observes the parent and repaints on a live theme switch. It does not ship a second theme switch while embedded.
+- Navigation is one horizontal tab bar: Dashboard, Model groups, Keys, Plans, Partners, Request log, Tunnels. No internal sidebar, no second nav next to the panel rail.
+- The tab bar is sticky and owns the reserved band, so scrolled content never shows behind the panel actions. On narrow screens the tabs scroll horizontally and the active tab is scrolled into view.
+- Global controls live in the tab bar: refresh always, theme and sign-out only when the page is opened outside the panel. Nothing floats over page content.
 - Content is left-aligned inside a 1440px max width. Do not center the workspace like a marketing page.
-- Metrics are two rows: four primary figures, then a quieter outcome strip. Do not render eleven identical cards.
-- Tables are desktop-only. Below 768px each record becomes a card with the same actions.
+- Metrics are two rows: four primary figures, then a quieter outcome strip. Do not render eleven identical cards. Below 768px the primary row stays two columns.
+- Tables are desktop-only. Below 768px each record becomes a card with the same fields and actions, including usage and expiry.
+- Charts share one shape in both plugin pages: y-axis labels, horizontal gridlines, three x labels, and an empty state inside the plot.
 
 ## Client components
 
@@ -67,4 +69,4 @@ Every data region has:
 
 ## Prototype-only chrome
 
-A Preview menu exposes scenarios. It is visually separate, labeled "Preview", and must be deleted before any production embed. It is not part of either design system.
+A Preview menu exposes scenarios in dev builds. It sits inside the tab bar so it never covers page content, and it is not part of either design system. The production embed does not include it.

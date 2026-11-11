@@ -28,6 +28,8 @@ A model group is a second layer. For a grouped `ck_` key the host calls `keyshop
 
 `usage.handle` writes tokens, latency, effort, and account facts into `usage_notes`. The sweeper drops notes for terminal rows, and notes older than retention, but it leaves the note for a still-pending request. `Finalize` copies that note onto the request row and then deletes it. A note deleted between `usage.handle` and `request.complete` would leave zeros and bill nothing.
 
+The client session (`/client/api/session`) carries `model_usage`, a per-model breakdown for the authenticated key only, computed on the first page over the retained request log with a covering index on `key_id`; only billed models are listed and later pages omit the field. The breakdown is cached per key for up to 10 seconds and invalidated on finalize, usage reset, and key delete. Because it reads the retained log, after pruning or a usage reset it can be lower than the key's `tokens_used`.
+
 The Request log Account column is `auth_id`, the host `AuthID` for that call. It is the upstream auth id, not necessarily an email. The customer page does not show it.
 
 Opening a database from the previous plugin only adds columns and tables: `keys.group_id` (default empty), request and usage-note columns, indexes, and `model_groups` (including the `all-models` seed). An existing `model_groups` table gains `aliases_json` (`TEXT NOT NULL DEFAULT '{}'`) and keeps `models_json` as an array of upstream names, so the previous plugin can still read the group. It does not rebuild or drop existing tables. The previous `key-shop.so` names its columns, so it still runs on a migrated database. Restoring that library does not require restoring the database.

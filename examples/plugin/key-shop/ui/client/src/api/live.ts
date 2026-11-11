@@ -1,6 +1,6 @@
-import type { ClientQuery, ClientSnapshot, Scenario } from '@/types'
-import { asRecord, pickNumber, pickString } from './pick'
-import { mapKey, mapModels, mapRequest, mapSessionGroup } from './map'
+import type { ClientQuery, ClientSnapshot, ModelUsageRow, Scenario } from '@/types'
+import { asRecord, pickNumber, pickString, pickTime } from './pick'
+import { mapKey, mapModelUsage, mapModels, mapRequest, mapSessionGroup } from './map'
 
 export const CLIENT_STORAGE = 'keyshop.client'
 const SESSION_PATH = '/client/api/session?limit=25'
@@ -18,6 +18,9 @@ async function readJSON(response: Response): Promise<Record<string, unknown>> {
 export function createLiveClientService() {
   let secret = ''
   const cursors = ['']
+  // Model usage is a page-1 field; later pages reuse the last known value.
+  let modelUsage: ModelUsageRow[] = []
+  let modelUsageSince = ''
 
   async function session(page: number): Promise<ClientSnapshot> {
     const cursor = page <= 1 ? '' : cursors[page - 1] || ''
@@ -32,6 +35,11 @@ export function createLiveClientService() {
     const key = mapKey(data.Key || data.key)
     const requests = Array.isArray(data.Requests) ? data.Requests.map(mapRequest) : Array.isArray(data.requests) ? data.requests.map(mapRequest) : []
     const mode = pickString(data, 'model_access_mode') === 'custom' ? 'custom' : 'full'
+    const usage = data.model_usage ?? data.ModelUsage
+    if (Array.isArray(usage)) {
+      modelUsage = mapModelUsage(usage)
+      modelUsageSince = pickTime(data, 'model_usage_since', 'ModelUsageSince') || ''
+    }
     return {
       key,
       requests,
@@ -41,6 +49,8 @@ export function createLiveClientService() {
       baseUrl: pickString(data, 'base_url') || `${window.location.origin}/v1`,
       requestTotal: pickNumber(data, 'total'),
       requestHasMore: Boolean(data.has_more),
+      modelUsage,
+      modelUsageSince,
     }
   }
 
@@ -52,6 +62,8 @@ export function createLiveClientService() {
       secret = next
       cursors.length = 0
       cursors.push('')
+      modelUsage = []
+      modelUsageSince = ''
       await session(1)
     },
     async load(input: ClientQuery): Promise<ClientSnapshot> {
