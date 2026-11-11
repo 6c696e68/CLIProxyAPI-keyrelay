@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/MoeForge/moego/ojson"
 )
 
 // RelayRequest is the token-free request accepted from a trusted relay host.
@@ -243,7 +245,7 @@ func (m *Manager) executeRelayRequest(ctx context.Context, request RelayRequest,
 
 		resp.BodySent = len(request.Body) > 0
 		if request.ReplaySafe && resp.StatusCode == http.StatusUnauthorized && policy.Retry401 && sends < maxSends {
-			if refreshed, ok := m.tryRefreshAfterUnauthorized(ctx, auth, relayStatusError(resp.StatusCode), false); ok && refreshed != nil {
+			if refreshed, ok := m.tryRefreshAfterUnauthorized(ctx, auth, relayStatusError(resp.StatusCode, resp.Body), false); ok && refreshed != nil {
 				if policy.PlusPreference == "only" && !m.relayAuthIsPlus(refreshed) {
 					clearAffinity()
 					response = resp
@@ -295,7 +297,7 @@ func (m *Manager) executeRelayRequest(ctx context.Context, request RelayRequest,
 				}
 			}
 		}
-		statusError := relayStatusError(resp.StatusCode)
+		statusError := relayStatusError(resp.StatusCode, resp.Body)
 		if stream == nil || statusError != nil {
 			m.MarkResult(ctx, relayResult(auth, request.Model, statusError))
 		}
@@ -633,11 +635,53 @@ func redactRelaySecrets(data []byte, secrets ...string) []byte {
 	return data
 }
 
-func relayStatusError(status int) *Error {
+func relayStatusError(status int, body []byte) *Error {
 	if status < 400 {
 		return nil
 	}
-	return &Error{Code: "relay_upstream_status", Message: fmt.Sprintf("Codex upstream returned HTTP %d", status), Retryable: status == 401 || status == 429 || status >= 500, HTTPStatus: status}
+	message := fmt.Sprintf("Codex upstream returned HTTP %d", status)
+	// Surface the upstream error code and message in the bounded error text so
+	// credential bookkeeping classifies relay failures the same way executor
+	// failures are classified (e.g. a token_revoked 401). Only the parsed
+	// upstream "error" fields are echoed; the raw body is never copied.
+	if upstreamCode, upstreamMessage := relayUpstreamErrorBody(body); upstreamCode != "" || upstreamMessage != "" {
+		detail := make([]string, 0, 2)
+		if upstreamCode != "" {
+			detail = append(detail, upstreamCode)
+		}
+		if upstreamMessage != "" {
+			detail = append(detail, upstreamMessage)
+		}
+		message += ": " + strings.Join(detail, ": ")
+	}
+	return &Error{Code: "relay_upstream_status", Message: message, Retryable: status == 401 || status == 429 || status >= 500, HTTPStatus: status}
+}
+
+// relayUpstreamErrorBodyLimit bounds how much of an upstream error body is
+// parsed for the relay status error.
+const relayUpstreamErrorBodyLimit = 64 << 10
+
+// relayUpstreamErrorBody extracts the upstream error code and message from a
+// JSON error body with a bounded read. Non-JSON, oversized, or empty bodies
+// yield empty values. It never returns tokens or other upstream secrets.
+func relayUpstreamErrorBody(body []byte) (string, string) {
+	if len(body) == 0 || len(body) > relayUpstreamErrorBodyLimit {
+		return "", ""
+	}
+	codeResult := ojson.GetBytesNoCopy(body, "error.code")
+	if codeResult.Type == ojson.JSON {
+		return "", ""
+	}
+	code := strings.TrimSpace(codeResult.String())
+	if codeResult.Type == ojson.Null {
+		code = ""
+	}
+	messageResult := ojson.GetBytesNoCopy(body, "error.message")
+	message := ""
+	if messageResult.Type != ojson.Null && messageResult.Type != ojson.JSON {
+		message = strings.TrimSpace(messageResult.String())
+	}
+	return code, message
 }
 
 func relayResult(auth *Auth, model string, err *Error) Result {

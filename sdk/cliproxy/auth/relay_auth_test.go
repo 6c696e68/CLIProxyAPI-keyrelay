@@ -532,7 +532,7 @@ func TestExecuteRelayRequestRetryRejectsChangedLiveCandidate(t *testing.T) {
 				manager.Remove(context.Background(), second.ID)
 				registerRelayTestAuths(t, manager, relayOAuthAuth(second.ID, "replacement-token"))
 			case "cooldown":
-				manager.MarkResult(context.Background(), relayResult(second, "raw-model", relayStatusError(http.StatusTooManyRequests)))
+				manager.MarkResult(context.Background(), relayResult(second, "raw-model", relayStatusError(http.StatusTooManyRequests, nil)))
 			}
 			close(release)
 			<-finished

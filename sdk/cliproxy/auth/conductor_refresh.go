@@ -1461,8 +1461,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 				}
 				revokedRefreshToken := isRevokedRefreshTokenError(err)
 				if revokedRefreshToken {
-					// A permanently invalidated refresh token cannot recover without a
-					// new login, so disable the credential instead of retrying it.
+					// A permanently invalidated refresh token, or an access token the
+					// upstream permanently revoked (token_revoked), cannot recover
+					// without a new login, so disable the credential instead of retrying it.
 					current.Disabled = true
 					current.Unavailable = true
 					current.Status = StatusDisabled
@@ -1473,8 +1474,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 						current.Metadata = make(map[string]any)
 					}
 					current.Metadata["disabled"] = true
-					current.StatusMessage = "disabled (refresh token invalidated)"
-					current.LastError = &Error{Code: "refresh_token_invalidated", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+					disabledCode, disabledStatus := revokedTokenDisableStatus(err)
+					current.StatusMessage = disabledStatus
+					current.LastError = &Error{Code: disabledCode, Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
 				}
 				m.auths[id] = current
 				if m.scheduler != nil {
@@ -1525,8 +1527,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 			accessTokenRejected := failedAccessToken != "" && authMatchesTokenPartition(current, failedAccessToken)
 			revokedRefreshToken := isRevokedRefreshTokenError(err)
 			if revokedRefreshToken {
-				// A permanently invalidated refresh token cannot recover without a new
-				// login, so disable the credential instead of retrying it.
+				// A permanently invalidated refresh token, or an access token the
+				// upstream permanently revoked (token_revoked), cannot recover without
+				// a new login, so disable the credential instead of retrying it.
 				current.Disabled = true
 				current.Unavailable = true
 				current.Status = StatusDisabled
@@ -1537,8 +1540,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 					current.Metadata = make(map[string]any)
 				}
 				current.Metadata["disabled"] = true
-				current.StatusMessage = "disabled (refresh token invalidated)"
-				current.LastError = &Error{Code: "refresh_token_invalidated", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
+				disabledCode, disabledStatus := revokedTokenDisableStatus(err)
+				current.StatusMessage = disabledStatus
+				current.LastError = &Error{Code: disabledCode, Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
 				shouldUnschedule = true
 			} else if isDisabled && invalidGrant {
 				current.Unavailable = true

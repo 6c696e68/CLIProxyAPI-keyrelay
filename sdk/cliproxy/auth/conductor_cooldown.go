@@ -906,6 +906,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	var authSnapshot *Auth
 	cooldownStateChanged := false
 	scheduleUnauthorizedRefresh := false
+	revokedAuthDisabled := false
 	now := time.Now()
 	// A 401 condemns the access token, except one a -and-cooldown rule matched: that only cools the credential.
 	rejectsToken := !result.Success && (result.Error == nil || result.Error.Code != ErrorCodeForceCooldown) && !shouldSkipCredentialCooldown(result.Error) && (statusCodeFromResult(result.Error) == http.StatusUnauthorized || isUnauthorizedError(result.Error))
@@ -1344,7 +1345,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 			_ = recordRejectedTokenOnAuth(auth, tokenToReject)
 		}
-		if wasTerminalUnauthorized {
+		revokedAuthDisabled = rejectsToken && revokedResultDisableEligible(auth, result.Error, result.Provider, now)
+		if revokedAuthDisabled {
+			// Upstream permanently revoked the OAuth token and the access token
+			// cannot be recovered by a refresh, so disable the credential
+			// instead of cooling it down like any other 401.
+			disableAuthForRevokedTokenError(auth, result.Error)
+		} else if wasTerminalUnauthorized {
 			auth.Unavailable = true
 			auth.Status = StatusError
 			auth.NextRefreshAfter = time.Time{}
@@ -1395,6 +1402,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	// A newly exhausted Devin credential must join the refresh schedule so
 	// quota revalidation can detect early restoration (issue #6690).
+	if revokedAuthDisabled {
+		m.queueRefreshUnschedule(result.AuthID)
+	}
 	if authSnapshot != nil {
 		if _, due := devinQuotaRevalidateAt(authSnapshot, now); due {
 			m.queueRefreshReschedule(result.AuthID)
@@ -2278,6 +2288,53 @@ func HasDisabledInvalidGrantFailure(auth *Auth) bool {
 	return hasDisabledInvalidGrantFailure(auth)
 }
 
+// revokedResultDisableEligible reports whether a failed 401 result should
+// disable the credential instead of only cooling it down. Only a Codex result
+// whose error classifies as a permanent OAuth token revocation qualifies, and
+// only when the access token cannot be recovered: the auth has no refresh
+// credential, or an access token issued by a recent refresh was rejected
+// again.
+func revokedResultDisableEligible(auth *Auth, err *Error, provider string, now time.Time) bool {
+	if auth == nil || err == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(provider), "codex") {
+		return false
+	}
+	if auth.Disabled || auth.Status == StatusDisabled {
+		return false
+	}
+	if !isRevokedRefreshTokenResultError(err) {
+		return false
+	}
+	if !authHasRefreshCredential(auth) {
+		return true
+	}
+	return !auth.LastRefreshedAt.IsZero() && now.Sub(auth.LastRefreshedAt) < refreshFailureBackoff
+}
+
+// disableAuthForRevokedTokenError marks the auth disabled for a permanently
+// revoked OAuth token. It mirrors the revoked refresh-token disable branches in
+// conductor_refresh.go so request-time 401s persist the same disabled state.
+func disableAuthForRevokedTokenError(auth *Auth, revocation *Error) {
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.NextRefreshAfter = time.Time{}
+	auth.NextRetryAfter = time.Time{}
+	auth.RefreshFailures = 0
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["disabled"] = true
+	status := http.StatusUnauthorized
+	if revocation.HTTPStatus != 0 {
+		status = revocation.HTTPStatus
+	}
+	auth.StatusMessage = "disabled (oauth token revoked)"
+	auth.LastError = &Error{Code: "token_revoked", Message: sanitizeRenewalMessage(revocation.Message), HTTPStatus: status}
+}
+
 var (
 	renewalURLPattern          = regexp.MustCompile(`(?i)https?://[^\s"'<>\\]+`)
 	renewalJWTPattern          = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?\b`)
@@ -2632,7 +2689,8 @@ func isInvalidGrantResultError(err *Error) bool {
 
 func isRevokedRefreshTokenErrorMessage(message string) bool {
 	lower := strings.ToLower(message)
-	return strings.Contains(lower, "refresh_token_invalidated") || strings.Contains(lower, "refresh_token_expired")
+	return strings.Contains(lower, "refresh_token_invalidated") || strings.Contains(lower, "refresh_token_expired") ||
+		strings.Contains(lower, "token_revoked") || strings.Contains(lower, "invalidated oauth token")
 }
 
 // isRevokedRefreshTokenError reports whether the refresh failed because the
@@ -2650,6 +2708,17 @@ func isRevokedRefreshTokenError(err error) bool {
 		return true
 	}
 	return false
+}
+
+// revokedTokenDisableStatus returns the LastError code and StatusMessage used
+// when a credential is disabled because its upstream OAuth tokens were
+// permanently revoked. The blurb keeps access-token revocations (token_revoked)
+// from being mislabeled as invalidated refresh grants.
+func revokedTokenDisableStatus(err error) (string, string) {
+	if err != nil && strings.Contains(strings.ToLower(err.Error()), "token_revoked") {
+		return "token_revoked", "disabled (oauth token revoked)"
+	}
+	return "refresh_token_invalidated", "disabled (refresh token invalidated)"
 }
 
 func isRevokedRefreshTokenResultError(err *Error) bool {

@@ -498,6 +498,10 @@ func probePluginLibrary(sourcePath, loadPath string) error {
 		_, _ = io.Copy(stderrBuf, stderrReader)
 	}()
 
+	// execPath is the host binary's own path (pluginProbeExecutable = os.Executable),
+	// falling back to os.Args[0]. It is never request or plugin supplied, so there is
+	// no command-injection surface here.
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command
 	cmd := exec.Command(execPath)
 	cmd.Env = append(
 		os.Environ(),
